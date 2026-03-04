@@ -1,0 +1,332 @@
+#pragma once
+// ============================================================
+// AgentOS :: Agent 基类 + AgentOS 系统门面
+// ============================================================
+#include <agentos/bus/agent_bus.hpp>
+#include <agentos/context/context.hpp>
+#include <agentos/core/types.hpp>
+#include <agentos/kernel/llm_kernel.hpp>
+#include <agentos/memory/memory.hpp>
+#include <agentos/scheduler/scheduler.hpp>
+#include <agentos/security/security.hpp>
+#include <agentos/tools/tool_manager.hpp>
+#include <atomic>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace agentos {
+
+// ─────────────────────────────────────────────────────────────
+// § A.1  AgentConfig — Agent 构建配置
+// ─────────────────────────────────────────────────────────────
+
+struct AgentConfig {
+    std::string name;
+    std::string role_prompt;        // System prompt / 角色设定
+    std::string security_role{"standard"}; // RBAC 角色
+    Priority    priority{Priority::Normal};
+    TokenCount  context_limit{8192};
+    std::vector<std::string> allowed_tools; // 空 = 全部允许
+    bool        persist_memory{false};      // 是否使用长期记忆
+};
+
+// ─────────────────────────────────────────────────────────────
+// § A.2  AgentRuntime — Agent 运行时状态
+// ─────────────────────────────────────────────────────────────
+
+class AgentOS; // 前向声明
+
+class Agent : private NonCopyable {
+public:
+    Agent(AgentId id, AgentConfig cfg, AgentOS* os)
+        : id_(id), config_(std::move(cfg)), os_(os) {}
+
+    virtual ~Agent() = default;
+
+    // ── 生命周期钩子（子类可重写）───────────────────────────
+    virtual void on_start()  {}
+    virtual void on_stop()   {}
+
+    // ── 核心执行循环（ReAct 范式：Think → Act → Observe）──
+    // 子类实现具体业务逻辑
+    virtual Result<std::string> run(std::string user_input) = 0;
+
+    // ── 便捷接口（通过 AgentOS 调用各子系统）────────────────
+    Result<kernel::LLMResponse> think(std::string user_msg);
+    Result<tools::ToolResult>   act(const kernel::ToolCallRequest& call);
+    Result<std::string>         remember(std::string content, float importance = 0.5f);
+    Result<std::vector<memory::SearchResult>> recall(std::string_view query, size_t k = 5);
+    void                        send(AgentId target, std::string topic, std::string payload);
+    std::optional<bus::BusMessage> recv(Duration timeout = Duration{3000});
+
+    AgentId           id()     const { return id_; }
+    const AgentConfig& config() const { return config_; }
+
+protected:
+    AgentId     id_;
+    AgentConfig config_;
+    AgentOS*    os_;          // 非拥有指针，指向父系统
+    std::shared_ptr<bus::Channel> channel_;
+
+    friend class AgentOS;
+};
+
+// ─────────────────────────────────────────────────────────────
+// § A.3  ReActAgent — 通用 ReAct 循环实现
+// ─────────────────────────────────────────────────────────────
+
+class ReActAgent : public Agent {
+public:
+    ReActAgent(AgentId id, AgentConfig cfg, AgentOS* os)
+        : Agent(id, std::move(cfg), os) {}
+
+    Result<std::string> run(std::string user_input) override;
+
+private:
+    static constexpr int MAX_STEPS = 10; // 防止无限循环
+};
+
+// ─────────────────────────────────────────────────────────────
+// § A.4  AgentOS — 系统总门面
+// ─────────────────────────────────────────────────────────────
+
+class AgentOS : private NonCopyable {
+public:
+    struct Config {
+        uint32_t    scheduler_threads{4};
+        uint32_t    tpm_limit{100000};
+        std::string snapshot_dir{"/tmp/agentos_snapshots"};
+        std::string ltm_dir{"/tmp/agentos_ltm"};
+        bool        enable_security{true};
+    };
+
+    explicit AgentOS(std::unique_ptr<kernel::ILLMBackend> backend,
+                     Config cfg)
+        : config_(cfg),   // 先拷贝，后续用 config_ 成员，避免 cfg 被移走后失效
+          kernel_(std::make_unique<kernel::LLMKernel>(
+              std::move(backend), config_.tpm_limit)),
+          scheduler_(std::make_unique<scheduler::Scheduler>(
+              scheduler::SchedulerPolicy::Priority,
+              config_.scheduler_threads)),
+          ctx_mgr_(std::make_unique<context::ContextManager>(config_.snapshot_dir)),
+          memory_(std::make_unique<memory::MemorySystem>(config_.ltm_dir)),
+          tool_mgr_(std::make_unique<tools::ToolManager>()),
+          security_(config_.enable_security
+              ? std::make_unique<security::SecurityManager>()
+              : nullptr),
+          bus_(std::make_unique<bus::AgentBus>(security_.get())) {
+        scheduler_->start();
+    }
+
+    ~AgentOS() {
+        scheduler_->shutdown();
+    }
+
+    // ── Agent 工厂 ─────────────────────────────────────────
+    template<typename AgentT = ReActAgent, typename... Args>
+    std::shared_ptr<AgentT> create_agent(AgentConfig cfg, Args&&... args) {
+        AgentId id = next_agent_id_++;
+        auto agent = std::make_shared<AgentT>(id, std::move(cfg), this,
+                                              std::forward<Args>(args)...);
+        agent->channel_ = bus_->register_agent(id);
+
+        // 配置安全角色
+        if (security_) {
+            security_->grant(id, agent->config().security_role);
+        }
+
+        // 初始化上下文窗口
+        auto& win = ctx_mgr_->get_window(id, agent->config().context_limit);
+        if (!agent->config().role_prompt.empty()) {
+            win.try_add(kernel::Message::system(agent->config().role_prompt));
+        }
+
+        {
+            std::lock_guard lk(agents_mu_);
+            agents_[id] = agent;
+        }
+
+        agent->on_start();
+        return agent;
+    }
+
+    void destroy_agent(AgentId id) {
+        std::lock_guard lk(agents_mu_);
+        auto it = agents_.find(id);
+        if (it == agents_.end()) return;
+        it->second->on_stop();
+        bus_->unregister_agent(id);
+        ctx_mgr_->clear(id);
+        agents_.erase(it);
+    }
+
+    // ── 提交异步任务 ────────────────────────────────────────
+    TaskId submit_task(std::string name,
+                                  std::function<void()> work,
+                                  AgentId agent_id = 0,
+                                  Priority priority = Priority::Normal,
+                                  std::vector<TaskId> deps = {}) {
+        auto task = std::make_shared<scheduler::AgentTaskDescriptor>();
+        task->id         = scheduler::Scheduler::new_task_id();
+        task->agent_id   = agent_id;
+        task->name       = std::move(name);
+        task->work       = std::move(work);
+        task->priority   = priority;
+        task->depends_on = std::move(deps);
+
+        auto result = scheduler_->submit(task);
+        return result.value_or(0);
+    }
+
+    // ── 子系统访问器 ────────────────────────────────────────
+    kernel::LLMKernel&           kernel()    { return *kernel_; }
+    scheduler::Scheduler&        scheduler() { return *scheduler_; }
+    context::ContextManager&     ctx()       { return *ctx_mgr_; }
+    memory::MemorySystem&        memory()    { return *memory_; }
+    tools::ToolManager&          tools()     { return *tool_mgr_; }
+    security::SecurityManager*   security()  { return security_.get(); }
+    bus::AgentBus&               bus()       { return *bus_; }
+
+    // ── 系统状态摘要 ────────────────────────────────────────
+    std::string status() const {
+        std::lock_guard lk(agents_mu_);
+        return fmt::format(
+            "AgentOS | agents={} | total_tokens={} | total_requests={}",
+            agents_.size(),
+            kernel_->metrics().total_tokens.load(),
+            kernel_->metrics().total_requests.load());
+    }
+
+private:
+    Config                                                config_;
+    std::unique_ptr<kernel::LLMKernel>                   kernel_;
+    std::unique_ptr<scheduler::Scheduler>                 scheduler_;
+    std::unique_ptr<context::ContextManager>              ctx_mgr_;
+    std::unique_ptr<memory::MemorySystem>                 memory_;
+    std::unique_ptr<tools::ToolManager>                   tool_mgr_;
+    std::unique_ptr<security::SecurityManager>            security_;
+    std::unique_ptr<bus::AgentBus>                        bus_;
+
+    mutable std::mutex mu_;
+    mutable std::mutex agents_mu_;
+    std::unordered_map<AgentId, std::shared_ptr<Agent>> agents_;
+    std::atomic<AgentId> next_agent_id_{1};
+};
+
+// ─────────────────────────────────────────────────────────────
+// § A.5  Agent 便捷方法实现（需要 AgentOS 完整定义）
+// ─────────────────────────────────────────────────────────────
+
+inline Result<kernel::LLMResponse> Agent::think(std::string user_msg) {
+    // 追加到上下文
+    os_->ctx().append(id_, kernel::Message::user(user_msg));
+
+    // 构建请求
+    kernel::LLMRequest req;
+    req.agent_id  = id_;
+    req.priority  = config_.priority;
+    auto& win     = os_->ctx().get_window(id_, config_.context_limit);
+    req.messages  = {win.messages().begin(), win.messages().end()};
+
+    // 若有允许的工具，注入工具描述
+    if (!config_.allowed_tools.empty()) {
+        req.tool_names = config_.allowed_tools;
+    }
+
+    auto result = os_->kernel().infer(req);
+    if (result) {
+        // 追加 assistant 回复到上下文
+        os_->ctx().append(id_, kernel::Message::assistant(result->content));
+    }
+    return result;
+}
+
+inline Result<tools::ToolResult> Agent::act(const kernel::ToolCallRequest& call) {
+    // ECL 安全检查
+    if (os_->security()) {
+        auto check = os_->security()->authorize_tool(id_, call.name, call.args_json);
+        if (!check) {
+            return make_error(check.error().code, check.error().message);
+        }
+    }
+    auto result = os_->tools().dispatch(call);
+    return result;
+}
+
+inline Result<std::string> Agent::remember(std::string content, float importance) {
+    return os_->memory().remember(std::move(content),
+                                   std::to_string(id_), importance);
+}
+
+inline Result<std::vector<memory::SearchResult>>
+Agent::recall(std::string_view query, size_t k) {
+    return os_->memory().recall(query, k);
+}
+
+inline void Agent::send(AgentId target, std::string topic, std::string payload) {
+    os_->bus().send(
+        bus::BusMessage::make_request(id_, target, std::move(topic), std::move(payload)));
+}
+
+inline std::optional<bus::BusMessage> Agent::recv(Duration timeout) {
+    if (!channel_) return std::nullopt;
+    return channel_->recv(timeout);
+}
+
+// ─────────────────────────────────────────────────────────────
+// § A.6  ReActAgent::run() — ReAct 循环实现
+// ─────────────────────────────────────────────────────────────
+
+inline Result<std::string> ReActAgent::run(std::string user_input) {
+    // 先从记忆中检索相关上下文
+    if (auto memories = recall(user_input, 3)) {
+        if (!memories->empty()) {
+            std::string mem_ctx = "相关记忆：\n";
+            for (auto& sr : *memories) {
+                mem_ctx += "- " + sr.entry.content + "\n";
+            }
+            os_->ctx().append(id_, kernel::Message::system(mem_ctx));
+        }
+    }
+
+    for (int step = 0; step < MAX_STEPS; ++step) {
+        // ── Think ──
+        auto resp = think(step == 0 ? user_input : "[继续]");
+        if (!resp) return make_unexpected(resp.error());
+
+        // ── 完成（无工具调用）──
+        if (!resp->wants_tool_call()) {
+            // 将最终结果存入记忆
+            remember(fmt::format("Q: {} → A: {}", user_input, resp->content), 0.6f);
+            return resp->content;
+        }
+
+        // ── Act（处理工具调用）──
+        for (auto& tc : resp->tool_calls) {
+            auto tool_result = act(tc);
+            std::string obs;
+            if (tool_result) {
+                obs = tool_result->success
+                    ? tool_result->output
+                    : "工具执行失败: " + tool_result->error;
+            } else {
+                obs = "工具调用被拒绝: " + tool_result.error().message;
+            }
+
+            // Observe：将工具结果追加到上下文
+            kernel::Message obs_msg;
+            obs_msg.role         = kernel::Role::Tool;
+            obs_msg.content      = obs;
+            obs_msg.tool_call_id = tc.id;
+            obs_msg.name         = tc.name;
+            os_->ctx().append(id_, obs_msg);
+        }
+    }
+
+    return make_error(ErrorCode::Unknown,
+                      "ReAct loop exceeded max steps without reaching stop");
+}
+
+} // namespace agentos
