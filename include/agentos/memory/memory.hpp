@@ -17,6 +17,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "graph_memory.hpp"
+
 namespace agentos::memory {
 
 namespace fs = std::filesystem;
@@ -518,7 +520,8 @@ public:
   explicit MemorySystem(fs::path ltm_dir = "/tmp/agentos_ltm")
       : working_(std::make_unique<WorkingMemory>(32)),
         short_term_(std::make_unique<ShortTermMemory>(512)),
-        long_term_(std::make_unique<LongTermMemory>(std::move(ltm_dir))) {}
+        long_term_(std::make_unique<LongTermMemory>(ltm_dir)),
+        graph_(std::make_unique<LocalGraphMemory>(std::move(ltm_dir))) {}
 
   // 便捷方法：添加情景记忆（绑定 Session 和 User）
   Result<std::string> add_episodic(std::string content, const Embedding &emb,
@@ -541,6 +544,25 @@ public:
     f.type = "semantic";
     return remember(std::move(content), emb, "agent", importance, f);
   }
+
+  // ==== Graph Memory High-Level APIs ====
+
+  Result<bool> add_triplet(const std::string &subject,
+                           const std::string &predicate,
+                           const std::string &object, float weight = 1.0f) {
+    GraphEdge edge;
+    edge.source_id = subject;
+    edge.target_id = object;
+    edge.relation = predicate;
+    edge.weight = weight;
+    return graph_->add_edge(edge);
+  }
+
+  Result<Subgraph> query_graph(const std::string &start_entity, int k_hop = 2) {
+    return graph_->k_hop_search(start_entity, k_hop);
+  }
+
+  // ======================================
 
   // 写入：优先写入工作记忆；重要性高的自动同步到长期
   Result<std::string> remember(std::string content, const Embedding &emb,
@@ -642,11 +664,13 @@ public:
   WorkingMemory &working() { return *working_; }
   ShortTermMemory &short_term() { return *short_term_; }
   LongTermMemory &long_term() { return *long_term_; }
+  IGraphMemory &graph() { return *graph_; }
 
 private:
   std::unique_ptr<WorkingMemory> working_;
   std::unique_ptr<ShortTermMemory> short_term_;
   std::unique_ptr<LongTermMemory> long_term_;
+  std::unique_ptr<IGraphMemory> graph_;
 };
 
 } // namespace agentos::memory

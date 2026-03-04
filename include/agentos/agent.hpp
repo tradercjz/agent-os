@@ -114,7 +114,7 @@ public:
         ctx_mgr_(
             std::make_unique<context::ContextManager>(config_.snapshot_dir)),
         memory_(std::make_unique<memory::MemorySystem>(config_.ltm_dir)),
-        tool_mgr_(std::make_unique<tools::ToolManager>()),
+        tool_mgr_(std::make_unique<tools::ToolManager>(memory_.get())),
         security_(config_.enable_security
                       ? std::make_unique<security::SecurityManager>()
                       : nullptr),

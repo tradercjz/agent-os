@@ -38,6 +38,14 @@ target_link_libraries(agentos_demo PRIVATE agentos)
 add_executable(openai_demo examples/openai_demo.cpp)
 target_link_libraries(openai_demo PRIVATE agentos)
 
+# ---- Graph Demo ----
+add_executable(graph_demo examples/graph_demo.cpp)
+target_link_libraries(graph_demo PRIVATE agentos)
+
+# ---- Tests ----
+add_executable(test_graph_memory tests/test_graph_memory.cpp)
+target_link_libraries(test_graph_memory PRIVATE agentos)
+
 # ---- Build info ----
 message(STATUS "AgentOS ${PROJECT_VERSION} | C++${CMAKE_CXX_STANDARD} | ${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "Targets: agentos_demo (Mock), openai_demo (Real LLM via curl)")

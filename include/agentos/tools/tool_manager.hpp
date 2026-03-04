@@ -5,6 +5,7 @@
 // ============================================================
 #include <agentos/core/types.hpp>
 #include <agentos/kernel/llm_kernel.hpp>
+#include <agentos/memory/memory.hpp>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -361,11 +362,71 @@ private:
 
 class ToolManager : private NonCopyable {
 public:
-  ToolManager() {
+  ToolManager(memory::MemorySystem *memory = nullptr) : memory_(memory) {
     // 注册内置工具
     registry_.register_tool(std::make_shared<KVStoreTool>());
     registry_.register_tool(std::make_shared<ShellTool>());
     registry_.register_tool(std::make_shared<HttpFetchTool>());
+
+    if (memory_) {
+      // 注册知识图谱/本体提取工具
+      registry_.register_fn(
+          ToolSchema{.id = "extract_knowledge_graph",
+                     .description = "提取实体和关系以构建本体知识图谱。用于将客"
+                                    "观事实或逻辑关系保存到长期的知识图谱中。",
+                     .params = {{"subject", ParamType::String,
+                                 "主语实体名称，如 'Apple' 或 'Alice'"},
+                                {"predicate", ParamType::String,
+                                 "谓语关系，如 'founded_by' 或 'likes'"},
+                                {"object", ParamType::String,
+                                 "宾语实体名称，如 'Steve Jobs' 或 'Bob'"}}},
+          [this](const ParsedArgs &args) -> ToolResult {
+            auto subj = args.get("subject");
+            auto pred = args.get("predicate");
+            auto obj = args.get("object");
+            if (subj.empty() || pred.empty() || obj.empty()) {
+              return ToolResult::fail(
+                  "subject, predicate, object must not be empty");
+            }
+            auto res = memory_->add_triplet(subj, pred, obj);
+            if (res)
+              return ToolResult::ok(fmt::format(
+                  "Successfully recorded: {} -[{}]-> {}", subj, pred, obj));
+            else
+              return ToolResult::fail("Failed to add graph relation");
+          });
+
+      // 注册知识图谱查询工具
+      registry_.register_fn(
+          ToolSchema{
+              .id = "query_ontology",
+              .description =
+                  "查询知识图谱（Ontology）。当面临需要复杂多跳关系的推理问题时"
+                  "使用，如 '苹果的CEO在哪里上学？'。返回与之相连的子图信息。",
+              .params = {{"entity", ParamType::String,
+                          "要查询的中心实体名称"}}},
+          [this](const ParsedArgs &args) -> ToolResult {
+            auto entity = args.get("entity");
+            if (entity.empty())
+              return ToolResult::fail("entity parameter is required");
+
+            auto res = memory_->query_graph(entity, 2); // default 2-hop
+            if (!res)
+              return ToolResult::fail(
+                  "Failed to query ontology or entity not found");
+
+            std::string out =
+                fmt::format("Ontology sub-graph for '{}':\n", entity);
+            for (const auto &r : res->edges) {
+              out += fmt::format("- {} -[{}]-> {}\n", r.source_id, r.relation,
+                                 r.target_id);
+            }
+            if (res->edges.empty()) {
+              out += "No known relations found.";
+            }
+            return ToolResult::ok(out);
+          });
+    }
   }
 
   ToolRegistry &registry() { return registry_; }
@@ -416,6 +477,7 @@ public:
 
 private:
   ToolRegistry registry_;
+  memory::MemorySystem *memory_{nullptr};
 };
 
 } // namespace agentos::tools
