@@ -30,9 +30,14 @@ add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(agentos PUBLIC Threads::Threads)
 
-# ---- Demo executable ----
+# ---- Demo executable (Mock backend) ----
 add_executable(agentos_demo examples/demo.cpp)
 target_link_libraries(agentos_demo PRIVATE agentos)
 
+# ---- OpenAI Demo（读取 OPENAI_API_KEY 环境变量，接入真实 LLM）----
+add_executable(openai_demo examples/openai_demo.cpp)
+target_link_libraries(openai_demo PRIVATE agentos)
+
 # ---- Build info ----
 message(STATUS "AgentOS ${PROJECT_VERSION} | C++${CMAKE_CXX_STANDARD} | ${CMAKE_CXX_COMPILER_ID}")
+message(STATUS "Targets: agentos_demo (Mock), openai_demo (Real LLM via curl)")
