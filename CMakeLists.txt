@@ -15,6 +15,26 @@ endif()
 
 find_package(Threads REQUIRED)
 
+include(FetchContent)
+
+# ---- nlohmann/json ----
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+# ---- libcurl ----
+find_package(CURL REQUIRED)
+
+# ---- GoogleTest ----
+FetchContent_Declare(
+  googletest
+  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+)
+FetchContent_MakeAvailable(googletest)
+
 # ---- Library sources ----
 set(AGENTOS_SOURCES
     src/kernel/llm_kernel.cpp
@@ -28,9 +48,9 @@ set(AGENTOS_SOURCES
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(agentos PUBLIC Threads::Threads)
+target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl)
 
-# ---- Demo executable (Mock backend) ----
+# ---- Examples ----
 add_executable(agentos_demo examples/demo.cpp)
 target_link_libraries(agentos_demo PRIVATE agentos)
 
@@ -43,8 +63,13 @@ add_executable(graph_demo examples/graph_demo.cpp)
 target_link_libraries(graph_demo PRIVATE agentos)
 
 # ---- Tests ----
-add_executable(test_graph_memory tests/test_graph_memory.cpp)
-target_link_libraries(test_graph_memory PRIVATE agentos)
+enable_testing()
+add_executable(test_agentos
+    tests/test_graph_memory.cpp
+)
+target_link_libraries(test_agentos PRIVATE agentos GTest::gtest_main)
+include(GoogleTest)
+gtest_discover_tests(test_agentos)
 
 # ---- Benchmarks ----
 add_executable(benchmark_graph_memory tests/benchmark_graph_memory.cpp)

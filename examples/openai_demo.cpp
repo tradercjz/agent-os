@@ -156,8 +156,11 @@ int main() {
           .description = "执行数学计算，支持 +、-、*、/ 运算",
           .params =
               {
-                  {"expression", tools::ParamType::String,
-                   "数学表达式，如 \"(10 + 5) * 3\""},
+                  {.name = "expression",
+                   .type = tools::ParamType::String,
+                   .description = "数学表达式，如 \"(10 + 5) * 3\"",
+                   .required = true,
+                   .default_value = std::nullopt},
               },
       },
       [](const tools::ParsedArgs &args) -> tools::ToolResult {

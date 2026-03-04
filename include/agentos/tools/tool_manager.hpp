@@ -40,45 +40,51 @@ struct ToolSchema {
 
   // 生成 OpenAI function calling 格式的 JSON
   std::string to_function_json() const {
-    std::string params_json = "{\"type\":\"object\",\"properties\":{";
-    std::string required_json = "[";
-    bool first = true, first_req = true;
-    for (auto &p : params) {
-      if (!first)
-        params_json += ',';
-      std::string type_str;
+    Json root = Json::object();
+    root["type"] = "function";
+    Json func = Json::object();
+    func["name"] = id;
+    if (!description.empty())
+      func["description"] = description;
+
+    Json params_obj = Json::object();
+    params_obj["type"] = "object";
+    Json props = Json::object();
+    Json required_arr = Json::array();
+
+    for (const auto &p : params) {
+      Json p_desc = Json::object();
       switch (p.type) {
       case ParamType::String:
-        type_str = "string";
+        p_desc["type"] = "string";
         break;
       case ParamType::Integer:
-        type_str = "integer";
+        p_desc["type"] = "integer";
         break;
       case ParamType::Float:
-        type_str = "number";
+        p_desc["type"] = "number";
         break;
       case ParamType::Boolean:
-        type_str = "boolean";
+        p_desc["type"] = "boolean";
         break;
       default:
-        type_str = "object";
+        p_desc["type"] = "object";
         break;
       }
-      params_json += "\"" + p.name + "\":{\"type\":\"" + type_str +
-                     "\",\"description\":" + Json::quote(p.description) + "}";
-      if (p.required) {
-        if (!first_req)
-          required_json += ',';
-        required_json += '"' + p.name + '"';
-        first_req = false;
-      }
-      first = false;
+      if (!p.description.empty())
+        p_desc["description"] = p.description;
+      props[p.name] = p_desc;
+      if (p.required)
+        required_arr.push_back(p.name);
     }
-    params_json += "},\"required\":" + required_json + "]}";
 
-    return "{\"type\":\"function\",\"function\":{\"name\":" + Json::quote(id) +
-           ",\"description\":" + Json::quote(description) +
-           ",\"parameters\":" + params_json + "}}";
+    params_obj["properties"] = props;
+    if (!required_arr.empty())
+      params_obj["required"] = required_arr;
+    func["parameters"] = params_obj;
+    root["function"] = func;
+
+    return root.dump();
   }
 };
 
@@ -96,49 +102,23 @@ struct ParsedArgs {
   }
 };
 
-// 从 JSON 字符串粗略解析参数（简化版）
-inline ParsedArgs parse_args(const std::string &json) {
+// 使用 nlohmann::json 解析参数
+inline ParsedArgs parse_args(const std::string &json_str) {
   ParsedArgs args;
-  // 解析 "key": "value" 或 "key": number 模式
-  size_t pos = 0;
-  while (pos < json.size()) {
-    // 找下一个 "
-    auto k_start = json.find('"', pos);
-    if (k_start == std::string::npos)
-      break;
-    auto k_end = json.find('"', k_start + 1);
-    if (k_end == std::string::npos)
-      break;
-    std::string key = json.substr(k_start + 1, k_end - k_start - 1);
-    pos = k_end + 1;
-    // 跳过 : 和空格
-    while (pos < json.size() && (json[pos] == ':' || json[pos] == ' '))
-      pos++;
-    if (pos >= json.size())
-      break;
-    std::string value;
-    if (json[pos] == '"') {
-      // 字符串值
-      pos++;
-      while (pos < json.size() && json[pos] != '"') {
-        if (json[pos] == '\\') {
-          pos++;
+  if (json_str.empty())
+    return args;
+  try {
+    Json j = Json::parse(json_str);
+    if (j.is_object()) {
+      for (const auto &[key, value] : j.items()) {
+        if (value.is_string()) {
+          args.values[key] = value.get<std::string>();
+        } else {
+          args.values[key] = value.dump(); // 转换非字符串为原生字符串表示
         }
-        value += json[pos++];
       }
-      pos++; // 跳过结束 "
-    } else {
-      // 数字或 bool
-      while (pos < json.size() && json[pos] != ',' && json[pos] != '}' &&
-             json[pos] != '\n') {
-        value += json[pos++];
-      }
-      // trim
-      while (!value.empty() && std::isspace(value.back()))
-        value.pop_back();
     }
-    if (!key.empty())
-      args.values[key] = value;
+  } catch (...) {
   }
   return args;
 }
@@ -178,9 +158,21 @@ public:
         .description = "读写键值存储，用于 Agent 间共享数据",
         .params =
             {
-                {"op", ParamType::String, "操作：get / set / delete"},
-                {"key", ParamType::String, "键名"},
-                {"value", ParamType::String, "值（set 时必填）", false},
+                {.name = "op",
+                 .type = ParamType::String,
+                 .description = "操作：get / set / delete",
+                 .required = true,
+                 .default_value = std::nullopt},
+                {.name = "key",
+                 .type = ParamType::String,
+                 .description = "键名",
+                 .required = true,
+                 .default_value = std::nullopt},
+                {.name = "value",
+                 .type = ParamType::String,
+                 .description = "值（set 时必填）",
+                 .required = false,
+                 .default_value = std::nullopt},
             },
     };
   }
@@ -225,33 +217,18 @@ public:
         .description = "在受限沙箱中执行 Shell 命令（仅允许白名单命令）",
         .params =
             {
-                {"cmd", ParamType::String, "要执行的命令"},
+                {.name = "cmd",
+                 .type = ParamType::String,
+                 .description = "要执行的命令",
+                 .required = true,
+                 .default_value = std::nullopt},
             },
         .is_dangerous = true,
         .sandboxed = true,
     };
   }
 
-  ToolResult execute(const ParsedArgs &args) override {
-    auto cmd = args.get("cmd");
-    // 提取第一个词（命令名）
-    std::string cmd_name = cmd.substr(0, cmd.find(' '));
-    if (!allowed_cmds_.count(cmd_name)) {
-      return ToolResult::fail(
-          fmt::format("Command '{}' not in allowlist", cmd_name));
-    }
-    // 限制输出长度
-    std::string safe_cmd = cmd + " 2>&1 | head -100";
-    std::array<char, 2048> buf{};
-    std::string output;
-    FILE *pipe = popen(safe_cmd.c_str(), "r");
-    if (!pipe)
-      return ToolResult::fail("Failed to open pipe");
-    while (fgets(buf.data(), buf.size(), pipe) != nullptr)
-      output += buf.data();
-    pclose(pipe);
-    return ToolResult::ok(output);
-  }
+  ToolResult execute(const ParsedArgs &args) override;
 
 private:
   std::unordered_set<std::string> allowed_cmds_;
@@ -266,34 +243,16 @@ public:
         .description = "获取指定 URL 的内容（GET 请求）",
         .params =
             {
-                {"url", ParamType::String, "目标 URL"},
+                {.name = "url",
+                 .type = ParamType::String,
+                 .description = "目标 URL",
+                 .required = true,
+                 .default_value = std::nullopt},
             },
     };
   }
 
-  ToolResult execute(const ParsedArgs &args) override {
-    auto url = args.get("url");
-    if (url.empty())
-      return ToolResult::fail("URL is required");
-    // 安全检查：只允许 http/https
-    if (url.substr(0, 4) != "http")
-      return ToolResult::fail("Only http/https URLs are allowed");
-
-    std::string cmd =
-        fmt::format("curl -s --max-time 10 --max-filesize 102400 {}", url);
-    std::array<char, 4096> buf{};
-    std::string output;
-    FILE *pipe = popen(cmd.c_str(), "r");
-    if (!pipe)
-      return ToolResult::fail("curl not available");
-    while (fgets(buf.data(), buf.size(), pipe) != nullptr)
-      output += buf.data();
-    pclose(pipe);
-    // 截断过长输出
-    if (output.size() > 4000)
-      output = output.substr(0, 4000) + "...[truncated]";
-    return ToolResult::ok(output);
-  }
+  ToolResult execute(const ParsedArgs &args) override;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -371,15 +330,26 @@ public:
     if (memory_) {
       // 注册知识图谱/本体提取工具
       registry_.register_fn(
-          ToolSchema{.id = "extract_knowledge_graph",
-                     .description = "提取实体和关系以构建本体知识图谱。用于将客"
-                                    "观事实或逻辑关系保存到长期的知识图谱中。",
-                     .params = {{"subject", ParamType::String,
-                                 "主语实体名称，如 'Apple' 或 'Alice'"},
-                                {"predicate", ParamType::String,
-                                 "谓语关系，如 'founded_by' 或 'likes'"},
-                                {"object", ParamType::String,
-                                 "宾语实体名称，如 'Steve Jobs' 或 'Bob'"}}},
+          ToolSchema{
+              .id = "extract_knowledge_graph",
+              .description = "提取实体和关系以构建本体知识图谱。用于将客"
+                             "观事实或逻辑关系保存到长期的知识图谱中。",
+              .params = {{.name = "subject",
+                          .type = ParamType::String,
+                          .description = "主语实体名称，如 'Apple' 或 'Alice'",
+                          .required = true,
+                          .default_value = std::nullopt},
+                         {.name = "predicate",
+                          .type = ParamType::String,
+                          .description = "谓语关系，如 'founded_by' 或 'likes'",
+                          .required = true,
+                          .default_value = std::nullopt},
+                         {.name = "object",
+                          .type = ParamType::String,
+                          .description =
+                              "宾语实体名称，如 'Steve Jobs' 或 'Bob'",
+                          .required = true,
+                          .default_value = std::nullopt}}},
           [this](const ParsedArgs &args) -> ToolResult {
             auto subj = args.get("subject");
             auto pred = args.get("predicate");
@@ -403,8 +373,11 @@ public:
               .description =
                   "查询知识图谱（Ontology）。当面临需要复杂多跳关系的推理问题时"
                   "使用，如 '苹果的CEO在哪里上学？'。返回与之相连的子图信息。",
-              .params = {{"entity", ParamType::String,
-                          "要查询的中心实体名称"}}},
+              .params = {{.name = "entity",
+                          .type = ParamType::String,
+                          .description = "要查询的中心实体名称",
+                          .required = true,
+                          .default_value = std::nullopt}}},
           [this](const ParsedArgs &args) -> ToolResult {
             auto entity = args.get("entity");
             if (entity.empty())
@@ -459,20 +432,15 @@ public:
 
   // 生成工具列表供 LLM 使用
   std::string tools_json(const std::vector<std::string> &filter = {}) const {
+    Json arr = Json::array();
     auto schemas = registry_.list_schemas();
-    std::string out = "[";
-    bool first = true;
     for (auto &s : schemas) {
       if (!filter.empty() &&
           std::find(filter.begin(), filter.end(), s.id) == filter.end())
         continue;
-      if (!first)
-        out += ',';
-      out += s.to_function_json();
-      first = false;
+      arr.push_back(Json::parse(s.to_function_json()));
     }
-    out += ']';
-    return out;
+    return arr.dump();
   }
 
 private:

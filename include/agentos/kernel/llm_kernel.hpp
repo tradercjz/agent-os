@@ -158,14 +158,15 @@ public:
   virtual Result<LLMResponse> complete(const LLMRequest &req) = 0;
 
   // 向量化嵌入
-  virtual Result<EmbeddingResponse> embed(const EmbeddingRequest &req) {
+  virtual Result<EmbeddingResponse> embed(const EmbeddingRequest & /*req*/) {
     return make_error(ErrorCode::LLMBackendError,
                       "Embedding not implicitly supported by backend");
   }
 
   // 流式推理（逐 token 回调）
   using TokenCallback = std::function<void(std::string_view token)>;
-  virtual Result<LLMResponse> stream(const LLMRequest &req, TokenCallback cb) {
+  virtual Result<LLMResponse> stream(const LLMRequest &req,
+                                     TokenCallback /*cb*/) {
     // 默认降级为非流式
     return complete(req);
   }
@@ -399,7 +400,7 @@ public:
 
   ILLMBackend &backend() { return *backend_; }
   KernelMetrics &metrics() { return metrics_; }
-  const std::string &model_name() const { return backend_->name(); }
+  std::string model_name() const { return backend_->name(); }
 
 private:
   std::unique_ptr<ILLMBackend> backend_;

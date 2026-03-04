@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -24,121 +25,84 @@ namespace agentos {
 // using fmt::format;
 
 // ── ID 类型 ──────────────────────────────────────────────────
-using AgentId    = std::uint64_t;
-using TaskId     = std::uint64_t;
-using ToolId     = std::string;
-using SessionId  = std::string;
+using AgentId = std::uint64_t;
+using TaskId = std::uint64_t;
+using ToolId = std::string;
+using SessionId = std::string;
 using TokenCount = std::uint32_t;
 
 // ── 优先级 ────────────────────────────────────────────────────
 enum class Priority : int {
-    Low      = 0,
-    Normal   = 5,
-    High     = 10,
-    Critical = 20,
+  Low = 0,
+  Normal = 5,
+  High = 10,
+  Critical = 20,
 };
 
 // ── 错误体系 ──────────────────────────────────────────────────
 enum class ErrorCode : int {
-    Ok = 0,
-    Unknown,
-    InvalidArgument,
-    NotFound,
-    AlreadyExists,
-    Timeout,
-    Cancelled,
-    LLMBackendError,
-    RateLimitExceeded,
-    TokenBudgetExceeded,
-    ContextWindowFull,
-    DeadlockDetected,
-    CircularDependency,
-    PermissionDenied,
-    TaintedInput,
-    InjectionDetected,
-    ToolNotFound,
-    ToolExecutionFailed,
-    SandboxViolation,
-    MemoryReadFailed,
-    MemoryWriteFailed,
+  Ok = 0,
+  Unknown,
+  InvalidArgument,
+  NotFound,
+  AlreadyExists,
+  Timeout,
+  Cancelled,
+  LLMBackendError,
+  RateLimitExceeded,
+  TokenBudgetExceeded,
+  ContextWindowFull,
+  DeadlockDetected,
+  CircularDependency,
+  PermissionDenied,
+  TaintedInput,
+  InjectionDetected,
+  ToolNotFound,
+  ToolExecutionFailed,
+  SandboxViolation,
+  MemoryReadFailed,
+  MemoryWriteFailed,
 };
 
 struct Error {
-    Error() = default;
-    ErrorCode   code;
-    std::string message;
-    SourceLocation loc;
+  Error() = default;
+  ErrorCode code;
+  std::string message;
+  SourceLocation loc;
 
-    Error(ErrorCode c, std::string msg,
-          SourceLocation l = SourceLocation::current())
-        : code(c), message(std::move(msg)), loc(l) {}
+  Error(ErrorCode c, std::string msg,
+        SourceLocation l = SourceLocation::current())
+      : code(c), message(std::move(msg)), loc(l) {}
 
-    std::string to_string() const {
-        return fmt::format("[Error {}] {} ({}:{})",
-                      static_cast<int>(code), message,
-                      loc.file_name(), loc.line_number());
-    }
+  std::string to_string() const {
+    return fmt::format("[Error {}] {} ({}:{})", static_cast<int>(code), message,
+                       loc.file_name(), loc.line_number());
+  }
 };
 
-template<typename T>
-using Result = Expected<T, Error>;
+template <typename T> using Result = Expected<T, Error>;
 
 inline auto make_error(ErrorCode c, std::string msg,
                        SourceLocation loc = SourceLocation::current()) {
-    return make_unexpected(Error{c, std::move(msg), loc});
+  return make_unexpected(Error{c, std::move(msg), loc});
 }
 
 // ── 时间工具 ──────────────────────────────────────────────────
-using Clock     = std::chrono::steady_clock;
+using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
-using Duration  = std::chrono::milliseconds;
+using Duration = std::chrono::milliseconds;
 
 inline TimePoint now() { return Clock::now(); }
 
-// ── 简单 JSON 类型 ────────────────────────────────────────────
-struct Json {
-    std::string raw;
-
-    static Json from_string(std::string s) { return Json{std::move(s)}; }
-
-    static Json object(std::initializer_list<std::pair<std::string_view, std::string>> kv) {
-        std::string out = "{";
-        bool first = true;
-        for (auto& [k, v] : kv) {
-            if (!first) out += ',';
-            out += '"';
-            out += k;
-            out += "\":";
-            out += v;
-            first = false;
-        }
-        out += '}';
-        return Json{out};
-    }
-
-    static std::string quote(std::string_view s) {
-        std::string out = "\"";
-        for (char c : s) {
-            if (c == '"')  out += "\\\"";
-            else if (c == '\\') out += "\\\\";
-            else if (c == '\n') out += "\\n";
-            else out += c;
-        }
-        out += '"';
-        return out;
-    }
-
-    std::optional<std::string> get_string(std::string_view key) const;
-    std::optional<int> get_int(std::string_view key) const;
-};
+using Json = nlohmann::json;
 
 // ── 不可拷贝基类 ──────────────────────────────────────────────
 struct NonCopyable {
-    NonCopyable() = default;
-    NonCopyable(const NonCopyable&) = delete;
-    NonCopyable& operator=(const NonCopyable&) = delete;
-    NonCopyable(NonCopyable&&) = default;
-    NonCopyable& operator=(NonCopyable&&) = default;
+  NonCopyable() = default;
+  NonCopyable(const NonCopyable &) = delete;
+  NonCopyable &operator=(const NonCopyable &) = delete;
+  NonCopyable(NonCopyable &&) = default;
+  NonCopyable &operator=(NonCopyable &&) = default;
 };
 
 } // namespace agentos

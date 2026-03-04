@@ -8,53 +8,7 @@
 
 namespace agentos {
 
-// ── Json 工具方法实现 ─────────────────────────────────────────
-std::optional<std::string> Json::get_string(std::string_view key) const {
-  // 简单查找 "key":"value" 模式
-  std::string search = fmt::format("\"{}\":", key);
-  auto pos = raw.find(search);
-  if (pos == std::string::npos)
-    return std::nullopt;
-  pos += search.size();
-  while (pos < raw.size() && raw[pos] == ' ')
-    pos++;
-  if (pos >= raw.size() || raw[pos] != '"')
-    return std::nullopt;
-  pos++; // skip opening "
-  std::string result;
-  while (pos < raw.size() && raw[pos] != '"') {
-    if (raw[pos] == '\\' && pos + 1 < raw.size()) {
-      pos++;
-      if (raw[pos] == 'n')
-        result += '\n';
-      else if (raw[pos] == '"')
-        result += '"';
-      else
-        result += raw[pos];
-    } else {
-      result += raw[pos];
-    }
-    pos++;
-  }
-  return result;
-}
-
-std::optional<int> Json::get_int(std::string_view key) const {
-  std::string search = fmt::format("\"{}\":", key);
-  auto pos = raw.find(search);
-  if (pos == std::string::npos)
-    return std::nullopt;
-  pos += search.size();
-  while (pos < raw.size() && raw[pos] == ' ')
-    pos++;
-  std::string num;
-  while (pos < raw.size() && (std::isdigit(raw[pos]) || raw[pos] == '-')) {
-    num += raw[pos++];
-  }
-  if (num.empty())
-    return std::nullopt;
-  return std::stoi(num);
-}
+// ── Json 工具方法目前由 nlohmann/json 替代 ───────────────────
 
 } // namespace agentos
 
@@ -63,139 +17,119 @@ namespace agentos::kernel {
 // ── OpenAIBackend 实现 ────────────────────────────────────────
 
 std::string OpenAIBackend::build_request_json(const LLMRequest &req) const {
-  std::string messages_json = "[";
-  bool first = true;
+  Json root_obj = Json::object();
+
+  Json messages_arr = Json::array();
   for (auto &m : req.messages) {
-    if (!first)
-      messages_json += ',';
-    std::string role_str;
+    Json msg_obj = Json::object();
     switch (m.role) {
     case Role::System:
-      role_str = "system";
+      msg_obj["role"] = "system";
       break;
     case Role::User:
-      role_str = "user";
+      msg_obj["role"] = "user";
       break;
     case Role::Assistant:
-      role_str = "assistant";
+      msg_obj["role"] = "assistant";
       break;
     case Role::Tool:
-      role_str = "tool";
+      msg_obj["role"] = "tool";
       break;
     }
     if (m.role == Role::Tool) {
-      messages_json += "{\"role\":\"" + role_str +
-                       "\",\"content\":" + Json::quote(m.content) +
-                       ",\"tool_call_id\":" + Json::quote(m.tool_call_id) + "}";
+      msg_obj["content"] = m.content;
+      msg_obj["tool_call_id"] = m.tool_call_id;
     } else if (m.role == Role::Assistant) {
-      std::string msg_json =
-          "{\"role\":\"" + role_str + "\",\"content\":" +
-          (m.content.empty() ? "null" : Json::quote(m.content));
-      if (!m.tool_calls.empty()) {
-        msg_json += ",\"tool_calls\":[";
-        bool first_tc = true;
-        for (const auto &tc : m.tool_calls) {
-          if (!first_tc)
-            msg_json += ",";
-          msg_json += "{\"id\":" + Json::quote(tc.id) +
-                      ",\"type\":\"function\",\"function\":{\"name\":" +
-                      Json::quote(tc.name) +
-                      ",\"arguments\":" + Json::quote(tc.args_json) + "}}";
-          first_tc = false;
-        }
-        msg_json += "]";
+      if (m.content.empty()) {
+        msg_obj["content"] = nullptr;
+      } else {
+        msg_obj["content"] = m.content;
       }
-      msg_json += "}";
-      messages_json += msg_json;
+      if (!m.tool_calls.empty()) {
+        Json tool_calls_arr = Json::array();
+        for (const auto &tc : m.tool_calls) {
+          Json call_obj = Json::object();
+          call_obj["id"] = tc.id;
+          call_obj["type"] = "function";
+          Json func_obj = Json::object();
+          func_obj["name"] = tc.name;
+          // args_json is passed as JSON-encoded string in OpenAI's API
+          func_obj["arguments"] = tc.args_json;
+          call_obj["function"] = func_obj;
+          tool_calls_arr.push_back(call_obj);
+        }
+        msg_obj["tool_calls"] = tool_calls_arr;
+      }
     } else {
-      messages_json += "{\"role\":\"" + role_str +
-                       "\",\"content\":" + Json::quote(m.content) + "}";
+      msg_obj["content"] = m.content;
     }
-    first = false;
+    messages_arr.push_back(msg_obj);
   }
-  messages_json += ']';
 
-  // 使用请求中指定的模型，若为空则用后端默认模型
+  root_obj["messages"] = messages_arr;
   const std::string &model = req.model.empty() ? default_model_ : req.model;
+  root_obj["model"] = model;
+  root_obj["temperature"] = req.temperature;
+  root_obj["max_tokens"] = req.max_tokens;
 
-  std::string json = "{\"model\":" + Json::quote(model) +
-                     ",\"messages\":" + messages_json +
-                     ",\"temperature\":" + std::to_string(req.temperature) +
-                     ",\"max_tokens\":" + std::to_string(req.max_tokens) + "}";
-
-  // 若请求携带了工具定义，注入 tools + tool_choice 字段
   if (req.tools_json && !req.tools_json->empty()) {
-    // 去掉最后的 } 然后追加工具字段
-    json.pop_back();
-    json += ",\"tools\":" + *req.tools_json + ",\"tool_choice\":\"auto\"}";
+    root_obj["tools"] = Json::parse(*req.tools_json);
+    root_obj["tool_choice"] = "auto";
   }
 
-  return json;
+  return root_obj.dump();
 }
 
 Result<LLMResponse>
 OpenAIBackend::parse_response(const std::string &json_str) const {
-  // 提取 content
-  Json j{json_str};
-
-  // 查找 choices[0].message.content
-  auto content_pos = json_str.find("\"content\":");
-  std::string content;
-  if (content_pos != std::string::npos) {
-    Json content_json{json_str.substr(content_pos)};
-    auto val = content_json.get_string("content");
-    if (val)
-      content = *val;
-  }
-
-  // finish_reason
-  std::string finish_reason = "stop";
-  auto fr_pos = json_str.find("\"finish_reason\":");
-  if (fr_pos != std::string::npos) {
-    Json fr_json{json_str.substr(fr_pos)};
-    auto val = fr_json.get_string("finish_reason");
-    if (val)
-      finish_reason = *val;
-  }
-
-  // token usage
-  TokenCount prompt_tokens = 0, completion_tokens = 0;
-  auto usage_pos = json_str.find("\"usage\":");
-  if (usage_pos != std::string::npos) {
-    Json usage_json{json_str.substr(usage_pos)};
-    if (auto v = usage_json.get_int("prompt_tokens"))
-      prompt_tokens = *v;
-    if (auto v = usage_json.get_int("completion_tokens"))
-      completion_tokens = *v;
-  }
-
   LLMResponse resp;
-  resp.content = content;
-  resp.finish_reason = finish_reason;
-  resp.prompt_tokens = prompt_tokens;
-  resp.completion_tokens = completion_tokens;
+  resp.finish_reason = "stop";
+  try {
+    Json j = Json::parse(json_str);
 
-  // 工具调用解析（简化版）
-  if (finish_reason == "tool_calls") {
-    auto tc_pos = json_str.find("\"tool_calls\":");
-    if (tc_pos != std::string::npos) {
-      // 简单提取第一个工具调用
-      auto name_pos = json_str.find("\"name\":", tc_pos);
-      if (name_pos != std::string::npos) {
-        Json name_json{json_str.substr(name_pos)};
-        ToolCallRequest tcr;
-        if (auto v = name_json.get_string("name"))
-          tcr.name = *v;
-        auto args_pos = json_str.find("\"arguments\":", tc_pos);
-        if (args_pos != std::string::npos) {
-          Json args_json{json_str.substr(args_pos)};
-          if (auto v = args_json.get_string("arguments"))
-            tcr.args_json = *v;
+    if (j.contains("choices") && j["choices"].is_array() &&
+        !j["choices"].empty()) {
+      auto &choice = j["choices"][0];
+      if (choice.contains("message")) {
+        auto &msg = choice["message"];
+        if (msg.contains("content") && msg["content"].is_string()) {
+          resp.content = msg["content"].get<std::string>();
+        } else {
+          resp.content = "";
         }
-        tcr.id = "call_0";
-        resp.tool_calls.push_back(std::move(tcr));
+        if (msg.contains("tool_calls") && msg["tool_calls"].is_array()) {
+          for (auto &tc : msg["tool_calls"]) {
+            if (tc.contains("id") && tc.contains("function")) {
+              ToolCallRequest tcr;
+              tcr.id = tc["id"].get<std::string>();
+              auto &func = tc["function"];
+              if (func.contains("name") && func["name"].is_string())
+                tcr.name = func["name"].get<std::string>();
+              if (func.contains("arguments") && func["arguments"].is_string())
+                tcr.args_json = func["arguments"].get<std::string>();
+              resp.tool_calls.push_back(std::move(tcr));
+            }
+          }
+        }
+      }
+      if (choice.contains("finish_reason") &&
+          choice["finish_reason"].is_string()) {
+        resp.finish_reason = choice["finish_reason"].get<std::string>();
       }
     }
+
+    if (j.contains("usage")) {
+      auto &usage = j["usage"];
+      if (usage.contains("prompt_tokens") &&
+          usage["prompt_tokens"].is_number_integer())
+        resp.prompt_tokens = usage["prompt_tokens"].get<int>();
+      if (usage.contains("completion_tokens") &&
+          usage["completion_tokens"].is_number_integer())
+        resp.completion_tokens = usage["completion_tokens"].get<int>();
+    }
+  } catch (const Json::exception &e) {
+    return make_error(ErrorCode::LLMBackendError,
+                      fmt::format("JSON Parse Error: {}", e.what()));
   }
 
   return resp;
@@ -335,54 +269,39 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
       if (data == "[DONE]")
         break; // 结束标志
 
-      Json j{data};
-      // 提取 choices[0].delta
-      auto choices_pos = data.find("\"choices\":[");
-      if (choices_pos != std::string::npos) {
-        auto delta_pos = data.find("\"delta\":", choices_pos);
-        if (delta_pos != std::string::npos) {
-          Json delta_json{data.substr(delta_pos)};
-
-          // 提取文本
-          if (auto text = delta_json.get_string("content")) {
-            if (cb)
-              cb(*text);
-            resp.content += *text;
-          }
-
-          // 提取 tool_calls (流式)
-          auto tc_pos = data.find("\"tool_calls\":", delta_pos);
-          if (tc_pos != std::string::npos) {
-            Json tc_json{data.substr(tc_pos)};
-            // id 只在第一个 chunk 出现
-            if (auto id = tc_json.get_string("id"))
-              current_tool_id = *id;
-
-            // name 只在第一个 chunk 出现
-            auto name_pos = data.find("\"name\":", tc_pos);
-            if (name_pos != std::string::npos) {
-              Json name_json{data.substr(name_pos)};
-              if (auto name = name_json.get_string("name"))
-                current_tool_name = *name;
+      try {
+        Json j = Json::parse(data);
+        if (j.contains("choices") && j["choices"].is_array() &&
+            !j["choices"].empty()) {
+          auto &choice = j["choices"][0];
+          if (choice.contains("delta")) {
+            auto &delta = choice["delta"];
+            if (delta.contains("content") && delta["content"].is_string()) {
+              std::string text = delta["content"].get<std::string>();
+              if (cb)
+                cb(text);
+              resp.content += text;
             }
-
-            // arguments 是拼接的
-            auto args_pos = data.find("\"arguments\":", tc_pos);
-            if (args_pos != std::string::npos) {
-              Json args_json{data.substr(args_pos)};
-              if (auto args = args_json.get_string("arguments"))
-                current_tool_args += *args;
+            if (delta.contains("tool_calls") &&
+                delta["tool_calls"].is_array() &&
+                !delta["tool_calls"].empty()) {
+              auto &tc = delta["tool_calls"][0];
+              if (tc.contains("id") && tc["id"].is_string())
+                current_tool_id = tc["id"].get<std::string>();
+              if (tc.contains("function")) {
+                auto &func = tc["function"];
+                if (func.contains("name") && func["name"].is_string())
+                  current_tool_name = func["name"].get<std::string>();
+                if (func.contains("arguments") && func["arguments"].is_string())
+                  current_tool_args += func["arguments"].get<std::string>();
+              }
             }
           }
-        }
-
-        // 提取 finish_reason
-        auto fr_pos = data.find("\"finish_reason\":", choices_pos);
-        if (fr_pos != std::string::npos) {
-          Json fr_json{data.substr(fr_pos)};
-          if (auto fr = fr_json.get_string("finish_reason")) {
-            resp.finish_reason = *fr;
-            if (*fr == "tool_calls" && !current_tool_name.empty()) {
+          if (choice.contains("finish_reason") &&
+              choice["finish_reason"].is_string()) {
+            std::string fr = choice["finish_reason"].get<std::string>();
+            resp.finish_reason = fr;
+            if (fr == "tool_calls" && !current_tool_name.empty()) {
               ToolCallRequest tcr;
               tcr.id = current_tool_id.empty() ? "call_0" : current_tool_id;
               tcr.name = current_tool_name;
@@ -391,6 +310,7 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
             }
           }
         }
+      } catch (...) {
       }
     }
   }
@@ -408,20 +328,17 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
 }
 
 Result<EmbeddingResponse> OpenAIBackend::embed(const EmbeddingRequest &req) {
-  std::string inputs_json = "[";
-  bool first = true;
+  Json root_obj = Json::object();
+  Json inputs_arr = Json::array();
   for (const auto &in : req.inputs) {
-    if (!first)
-      inputs_json += ",";
-    inputs_json += Json::quote(in);
-    first = false;
+    inputs_arr.push_back(in);
   }
-  inputs_json += "]";
-
   const std::string &model =
       req.model.empty() ? "text-embedding-3-small" : req.model;
-  std::string body =
-      "{\"model\":" + Json::quote(model) + ",\"input\":" + inputs_json + "}";
+  root_obj["model"] = model;
+  root_obj["input"] = inputs_arr;
+
+  std::string body = root_obj.dump();
 
   auto http_result = http_post("/embeddings", body);
   if (!http_result)
@@ -430,49 +347,28 @@ Result<EmbeddingResponse> OpenAIBackend::embed(const EmbeddingRequest &req) {
   const std::string &json_str = *http_result;
   EmbeddingResponse resp;
 
-  // token usage
-  auto usage_pos = json_str.find("\"usage\":");
-  if (usage_pos != std::string::npos) {
-    Json usage_json{json_str.substr(usage_pos)};
-    if (auto v = usage_json.get_int("total_tokens"))
-      resp.total_tokens = *v;
-  }
-
-  // Parse embeddings
-  size_t search_pos = 0;
-  while ((search_pos = json_str.find("\"embedding\":", search_pos)) !=
-         std::string::npos) {
-    auto arr_start = json_str.find("[", search_pos);
-    if (arr_start == std::string::npos)
-      break;
-    auto arr_end = json_str.find("]", arr_start);
-    if (arr_end == std::string::npos)
-      break;
-
-    std::vector<float> vec;
-    std::string arr_str =
-        json_str.substr(arr_start + 1, arr_end - arr_start - 1);
-    size_t pos = 0;
-    while (pos < arr_str.size()) {
-      while (pos < arr_str.size() &&
-             (arr_str[pos] == ' ' || arr_str[pos] == ',' ||
-              arr_str[pos] == '\n' || arr_str[pos] == '\r')) {
-        pos++;
-      }
-      if (pos >= arr_str.size())
-        break;
-      size_t next_comma = arr_str.find(",", pos);
-      std::string num_str = arr_str.substr(pos, next_comma - pos);
-      try {
-        vec.push_back(std::stof(num_str));
-      } catch (...) {
-      }
-      if (next_comma == std::string::npos)
-        break;
-      pos = next_comma + 1;
+  try {
+    Json j = Json::parse(json_str);
+    if (j.contains("usage") && j["usage"].contains("total_tokens") &&
+        j["usage"]["total_tokens"].is_number_integer()) {
+      resp.total_tokens = j["usage"]["total_tokens"].get<int>();
     }
-    resp.embeddings.push_back(std::move(vec));
-    search_pos = arr_end;
+    if (j.contains("data") && j["data"].is_array()) {
+      for (auto &item : j["data"]) {
+        if (item.contains("embedding") && item["embedding"].is_array()) {
+          std::vector<float> vec;
+          for (auto &v : item["embedding"]) {
+            if (v.is_number()) {
+              vec.push_back(v.get<float>());
+            }
+          }
+          resp.embeddings.push_back(std::move(vec));
+        }
+      }
+    }
+  } catch (...) {
+    return make_error(ErrorCode::LLMBackendError,
+                      "Failed to parse embeddings JSON");
   }
 
   return resp;
