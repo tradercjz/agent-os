@@ -85,6 +85,16 @@ struct LLMResponse {
   bool wants_tool_call() const { return !tool_calls.empty(); }
 };
 
+struct EmbeddingRequest {
+  std::vector<std::string> inputs;
+  std::string model;
+};
+
+struct EmbeddingResponse {
+  std::vector<std::vector<float>> embeddings;
+  TokenCount total_tokens{0};
+};
+
 // ─────────────────────────────────────────────────────────────
 // § 1.2  Token 桶限流器（Thread-safe）
 // ─────────────────────────────────────────────────────────────
@@ -146,6 +156,12 @@ public:
 
   // 同步推理（由调度器在工作线程上调用）
   virtual Result<LLMResponse> complete(const LLMRequest &req) = 0;
+
+  // 向量化嵌入
+  virtual Result<EmbeddingResponse> embed(const EmbeddingRequest &req) {
+    return make_error(ErrorCode::LLMBackendError,
+                      "Embedding not implicitly supported by backend");
+  }
 
   // 流式推理（逐 token 回调）
   using TokenCallback = std::function<void(std::string_view token)>;
@@ -257,6 +273,7 @@ public:
 
   Result<LLMResponse> complete(const LLMRequest &req) override;
   Result<LLMResponse> stream(const LLMRequest &req, TokenCallback cb) override;
+  Result<EmbeddingResponse> embed(const EmbeddingRequest &req) override;
   std::string name() const override { return "openai/" + default_model_; }
 
 private:
@@ -344,6 +361,36 @@ public:
     auto result = backend_->stream(req, std::move(cb));
     if (result) {
       metrics_.total_tokens += result->total_tokens();
+    } else {
+      metrics_.errors++;
+    }
+    return result;
+  }
+
+  // 获取文本向量嵌入
+  Result<EmbeddingResponse> embed(const EmbeddingRequest &req) {
+    TokenCount estimated = 0;
+    for (const auto &text : req.inputs) {
+      estimated += ILLMBackend::estimate_tokens(text);
+    }
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      auto [ok, wait] = rate_limiter_.try_consume(estimated);
+      if (ok)
+        break;
+      if (attempt == 2) {
+        metrics_.rate_limit_hits++;
+        return make_error(
+            ErrorCode::RateLimitExceeded,
+            fmt::format("Rate limit: need {}ms wait", wait.count()));
+      }
+      std::this_thread::sleep_for(wait);
+    }
+
+    metrics_.total_requests++;
+    auto result = backend_->embed(req);
+    if (result) {
+      metrics_.total_tokens += result->total_tokens;
     } else {
       metrics_.errors++;
     }

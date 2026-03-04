@@ -407,4 +407,75 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
   return resp;
 }
 
+Result<EmbeddingResponse> OpenAIBackend::embed(const EmbeddingRequest &req) {
+  std::string inputs_json = "[";
+  bool first = true;
+  for (const auto &in : req.inputs) {
+    if (!first)
+      inputs_json += ",";
+    inputs_json += Json::quote(in);
+    first = false;
+  }
+  inputs_json += "]";
+
+  const std::string &model =
+      req.model.empty() ? "text-embedding-3-small" : req.model;
+  std::string body =
+      "{\"model\":" + Json::quote(model) + ",\"input\":" + inputs_json + "}";
+
+  auto http_result = http_post("/embeddings", body);
+  if (!http_result)
+    return make_unexpected(http_result.error());
+
+  const std::string &json_str = *http_result;
+  EmbeddingResponse resp;
+
+  // token usage
+  auto usage_pos = json_str.find("\"usage\":");
+  if (usage_pos != std::string::npos) {
+    Json usage_json{json_str.substr(usage_pos)};
+    if (auto v = usage_json.get_int("total_tokens"))
+      resp.total_tokens = *v;
+  }
+
+  // Parse embeddings
+  size_t search_pos = 0;
+  while ((search_pos = json_str.find("\"embedding\":", search_pos)) !=
+         std::string::npos) {
+    auto arr_start = json_str.find("[", search_pos);
+    if (arr_start == std::string::npos)
+      break;
+    auto arr_end = json_str.find("]", arr_start);
+    if (arr_end == std::string::npos)
+      break;
+
+    std::vector<float> vec;
+    std::string arr_str =
+        json_str.substr(arr_start + 1, arr_end - arr_start - 1);
+    size_t pos = 0;
+    while (pos < arr_str.size()) {
+      while (pos < arr_str.size() &&
+             (arr_str[pos] == ' ' || arr_str[pos] == ',' ||
+              arr_str[pos] == '\n' || arr_str[pos] == '\r')) {
+        pos++;
+      }
+      if (pos >= arr_str.size())
+        break;
+      size_t next_comma = arr_str.find(",", pos);
+      std::string num_str = arr_str.substr(pos, next_comma - pos);
+      try {
+        vec.push_back(std::stof(num_str));
+      } catch (...) {
+      }
+      if (next_comma == std::string::npos)
+        break;
+      pos = next_comma + 1;
+    }
+    resp.embeddings.push_back(std::move(vec));
+    search_pos = arr_end;
+  }
+
+  return resp;
+}
+
 } // namespace agentos::kernel

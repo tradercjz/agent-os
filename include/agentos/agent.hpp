@@ -272,13 +272,25 @@ Agent::act(const kernel::ToolCallRequest &call) {
 
 inline Result<std::string> Agent::remember(std::string content,
                                            float importance) {
-  return os_->memory().remember(std::move(content), std::to_string(id_),
+  kernel::EmbeddingRequest req{{content}, ""};
+  auto emb_res = os_->kernel().embed(req);
+  memory::Embedding emb;
+  if (emb_res && !emb_res->embeddings.empty()) {
+    emb = std::move(emb_res->embeddings[0]);
+  }
+  return os_->memory().remember(std::move(content), emb, std::to_string(id_),
                                 importance);
 }
 
 inline Result<std::vector<memory::SearchResult>>
 Agent::recall(std::string_view query, size_t k) {
-  return os_->memory().recall(query, k);
+  kernel::EmbeddingRequest req{{std::string(query)}, ""};
+  auto emb_res = os_->kernel().embed(req);
+  memory::Embedding emb;
+  if (emb_res && !emb_res->embeddings.empty()) {
+    emb = std::move(emb_res->embeddings[0]);
+  }
+  return os_->memory().recall(emb, {}, k);
 }
 
 inline void Agent::send(AgentId target, std::string topic,
