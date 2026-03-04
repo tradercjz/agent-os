@@ -281,4 +281,130 @@ Result<LLMResponse> OpenAIBackend::complete(const LLMRequest &req) {
   return parse_response(*http_result);
 }
 
+Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
+                                          TokenCallback cb) {
+  // 1. 构建请求体，注入 stream 标志
+  std::string body = build_request_json(req);
+  // 简单粗暴插入 "stream": true
+  auto obj_end = body.rfind('}');
+  if (obj_end != std::string::npos) {
+    body.insert(obj_end, ",\"stream\":true");
+  }
+
+  // 将请求体写入临时文件，避免 shell 转义
+  std::string tmp_req =
+      fmt::format("/tmp/agentos_req_stream_{}.json", getpid());
+  FILE *fw = fopen(tmp_req.c_str(), "w");
+  if (!fw)
+    return make_error(ErrorCode::LLMBackendError,
+                      "Cannot write temp request file");
+  fwrite(body.data(), 1, body.size(), fw);
+  fclose(fw);
+
+  // 2. 构造 curl 命令 (使用 -s 和 -N 避免缓冲，直接读取 stdout)
+  std::string url = base_url_ + "/chat/completions";
+  std::string cmd = fmt::format("curl -s -X POST '{}' "
+                                "-H 'Content-Type: application/json' "
+                                "-H 'Authorization: Bearer {}' "
+                                "--data-binary @'{}' "
+                                "-N --max-time 120",
+                                url, api_key_, tmp_req);
+
+  LLMResponse resp;
+  resp.finish_reason = "stop";
+  std::string current_tool_id;
+  std::string current_tool_name;
+  std::string current_tool_args;
+
+  FILE *pipe = popen(cmd.c_str(), "r");
+  if (!pipe) {
+    remove(tmp_req.c_str());
+    return make_error(ErrorCode::LLMBackendError,
+                      "Failed to start curl process");
+  }
+
+  char buf[4096];
+  while (fgets(buf, sizeof(buf), pipe) != nullptr) {
+    std::string line(buf);
+    // 移除换行符
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+      line.pop_back();
+
+    if (line.starts_with("data: ")) {
+      std::string data = line.substr(6);
+      if (data == "[DONE]")
+        break; // 结束标志
+
+      Json j{data};
+      // 提取 choices[0].delta
+      auto choices_pos = data.find("\"choices\":[");
+      if (choices_pos != std::string::npos) {
+        auto delta_pos = data.find("\"delta\":", choices_pos);
+        if (delta_pos != std::string::npos) {
+          Json delta_json{data.substr(delta_pos)};
+
+          // 提取文本
+          if (auto text = delta_json.get_string("content")) {
+            if (cb)
+              cb(*text);
+            resp.content += *text;
+          }
+
+          // 提取 tool_calls (流式)
+          auto tc_pos = data.find("\"tool_calls\":", delta_pos);
+          if (tc_pos != std::string::npos) {
+            Json tc_json{data.substr(tc_pos)};
+            // id 只在第一个 chunk 出现
+            if (auto id = tc_json.get_string("id"))
+              current_tool_id = *id;
+
+            // name 只在第一个 chunk 出现
+            auto name_pos = data.find("\"name\":", tc_pos);
+            if (name_pos != std::string::npos) {
+              Json name_json{data.substr(name_pos)};
+              if (auto name = name_json.get_string("name"))
+                current_tool_name = *name;
+            }
+
+            // arguments 是拼接的
+            auto args_pos = data.find("\"arguments\":", tc_pos);
+            if (args_pos != std::string::npos) {
+              Json args_json{data.substr(args_pos)};
+              if (auto args = args_json.get_string("arguments"))
+                current_tool_args += *args;
+            }
+          }
+        }
+
+        // 提取 finish_reason
+        auto fr_pos = data.find("\"finish_reason\":", choices_pos);
+        if (fr_pos != std::string::npos) {
+          Json fr_json{data.substr(fr_pos)};
+          if (auto fr = fr_json.get_string("finish_reason")) {
+            resp.finish_reason = *fr;
+            if (*fr == "tool_calls" && !current_tool_name.empty()) {
+              ToolCallRequest tcr;
+              tcr.id = current_tool_id.empty() ? "call_0" : current_tool_id;
+              tcr.name = current_tool_name;
+              tcr.args_json = current_tool_args;
+              resp.tool_calls.push_back(std::move(tcr));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  pclose(pipe);
+  remove(tmp_req.c_str());
+
+  // 简单估算 token 用量，流式接口通常不在行内返回完整 usage
+  resp.prompt_tokens = 0; // 可以遍历请求去估算
+  for (auto &m : req.messages)
+    resp.prompt_tokens += ILLMBackend::estimate_tokens(m.content);
+  resp.completion_tokens = ILLMBackend::estimate_tokens(resp.content);
+
+  return resp;
+}
+
 } // namespace agentos::kernel

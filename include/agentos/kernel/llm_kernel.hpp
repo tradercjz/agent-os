@@ -256,6 +256,7 @@ public:
         default_model_(std::move(default_model)) {}
 
   Result<LLMResponse> complete(const LLMRequest &req) override;
+  Result<LLMResponse> stream(const LLMRequest &req, TokenCallback cb) override;
   std::string name() const override { return "openai/" + default_model_; }
 
 private:
@@ -310,6 +311,37 @@ public:
 
     metrics_.total_requests++;
     auto result = backend_->complete(req);
+    if (result) {
+      metrics_.total_tokens += result->total_tokens();
+    } else {
+      metrics_.errors++;
+    }
+    return result;
+  }
+
+  // 流式推理：在推理过程中通过回调函数实时返回生成的 token
+  Result<LLMResponse> stream_infer(const LLMRequest &req,
+                                   ILLMBackend::TokenCallback cb) {
+    TokenCount estimated = 0;
+    for (auto &m : req.messages)
+      estimated += ILLMBackend::estimate_tokens(m.content);
+    estimated += req.max_tokens;
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      auto [ok, wait] = rate_limiter_.try_consume(estimated);
+      if (ok)
+        break;
+      if (attempt == 2) {
+        metrics_.rate_limit_hits++;
+        return make_error(
+            ErrorCode::RateLimitExceeded,
+            fmt::format("Rate limit: need {}ms wait", wait.count()));
+      }
+      std::this_thread::sleep_for(wait);
+    }
+
+    metrics_.total_requests++;
+    auto result = backend_->stream(req, std::move(cb));
     if (result) {
       metrics_.total_tokens += result->total_tokens();
     } else {

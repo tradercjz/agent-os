@@ -54,7 +54,8 @@ public:
   virtual Result<std::string> run(std::string user_input) = 0;
 
   // ── 便捷接口（通过 AgentOS 调用各子系统）────────────────
-  Result<kernel::LLMResponse> think(std::string user_msg);
+  Result<kernel::LLMResponse>
+  think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb = nullptr);
   Result<tools::ToolResult> act(const kernel::ToolCallRequest &call);
   Result<std::string> remember(std::string content, float importance = 0.5f);
   Result<std::vector<memory::SearchResult>> recall(std::string_view query,
@@ -216,7 +217,8 @@ private:
 // § A.5  Agent 便捷方法实现（需要 AgentOS 完整定义）
 // ─────────────────────────────────────────────────────────────
 
-inline Result<kernel::LLMResponse> Agent::think(std::string user_msg) {
+inline Result<kernel::LLMResponse>
+Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
   // 追加到上下文
   os_->ctx().append(id_, kernel::Message::user(user_msg));
 
@@ -241,7 +243,8 @@ inline Result<kernel::LLMResponse> Agent::think(std::string user_msg) {
       req.tools_json = tj;
   }
 
-  auto result = os_->kernel().infer(req);
+  auto result = cb ? os_->kernel().stream_infer(req, std::move(cb))
+                   : os_->kernel().infer(req);
   if (result) {
     // 追加 assistant 回复到上下文，并携带 tool_calls（如果有）
     auto m = kernel::Message::assistant(result->content);
