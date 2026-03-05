@@ -771,11 +771,34 @@ private:
 
 class MemorySystem : private NonCopyable {
 public:
-  explicit MemorySystem(fs::path ltm_dir = "/tmp/agentos_ltm")
+  // LTM 后端类型
+  enum class LTMBackend { FileBased, SQLite };
+
+  explicit MemorySystem(fs::path ltm_dir = "/tmp/agentos_ltm",
+                        LTMBackend backend = LTMBackend::FileBased)
       : working_(std::make_unique<WorkingMemory>(32)),
         short_term_(std::make_unique<ShortTermMemory>(512)),
-        long_term_(std::make_unique<LongTermMemory>(ltm_dir)),
+        graph_(std::make_unique<LocalGraphMemory>(ltm_dir)) {
+    // 根据后端类型创建 LTM（都实现 IMemoryStore 接口，可热切换）
+    if (backend == LTMBackend::FileBased) {
+      long_term_ = std::make_unique<LongTermMemory>(std::move(ltm_dir));
+    } else {
+      // SQLite 后端通过外部注入（见 set_long_term_store）
+      long_term_ = std::make_unique<LongTermMemory>(std::move(ltm_dir));
+    }
+  }
+
+  // 高级构造：注入自定义 LTM 后端（如 SQLiteLongTermMemory）
+  MemorySystem(fs::path ltm_dir, std::unique_ptr<IMemoryStore> custom_ltm)
+      : working_(std::make_unique<WorkingMemory>(32)),
+        short_term_(std::make_unique<ShortTermMemory>(512)),
+        long_term_(std::move(custom_ltm)),
         graph_(std::make_unique<LocalGraphMemory>(std::move(ltm_dir))) {}
+
+  // 运行时切换 LTM 后端
+  void set_long_term_store(std::unique_ptr<IMemoryStore> store) {
+    long_term_ = std::move(store);
+  }
 
   // 便捷方法：添加情景记忆（绑定 Session 和 User）
   Result<std::string> add_episodic(std::string content, const Embedding &emb,
@@ -917,13 +940,13 @@ public:
 
   WorkingMemory &working() { return *working_; }
   ShortTermMemory &short_term() { return *short_term_; }
-  LongTermMemory &long_term() { return *long_term_; }
+  IMemoryStore &long_term() { return *long_term_; }
   IGraphMemory &graph() { return *graph_; }
 
 private:
   std::unique_ptr<WorkingMemory> working_;
   std::unique_ptr<ShortTermMemory> short_term_;
-  std::unique_ptr<LongTermMemory> long_term_;
+  std::unique_ptr<IMemoryStore> long_term_;
   std::unique_ptr<IGraphMemory> graph_;
 };
 

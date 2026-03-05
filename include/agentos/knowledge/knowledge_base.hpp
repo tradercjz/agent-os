@@ -6,7 +6,10 @@
 #include "graph_engine/core/immutable_graph.hpp"
 #include <filesystem>
 #include <fstream>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <hnswlib/hnswlib.h>
+#pragma GCC diagnostic pop
 #include <iostream>
 #include <memory>
 #include <string>
@@ -88,6 +91,152 @@ public:
         next_hnsw_id_++;
       }
     }
+  }
+
+  // ── 持久化 ───────────────────────────────────────
+  bool save(const fs::path &dir) const {
+    fs::create_directories(dir);
+
+    // 1. BM25 索引
+    if (!bm25_.save(dir / "bm25_index.bin")) {
+      std::cerr << "[KB] Failed to save BM25 index\n";
+      return false;
+    }
+
+    // 2. HNSW 索引
+    if (hnsw_ && next_hnsw_id_ > 0) {
+      hnsw_->saveIndex((dir / "hnsw_index.bin").string());
+    }
+
+    // 3. chunk 映射（chunk_content_ + chunk_docs_ + hnsw_id_to_chunk_）
+    std::ofstream ofs(dir / "kb_meta.bin", std::ios::binary);
+    if (!ofs)
+      return false;
+
+    uint32_t magic = 0x4B424D54; // "KBMT"
+    ofs.write(reinterpret_cast<const char *>(&magic), 4);
+    ofs.write(reinterpret_cast<const char *>(&dim_), sizeof(dim_));
+    ofs.write(reinterpret_cast<const char *>(&max_chunks_), sizeof(max_chunks_));
+
+    auto write_str = [&](const std::string &s) {
+      uint32_t len = static_cast<uint32_t>(s.size());
+      ofs.write(reinterpret_cast<const char *>(&len), 4);
+      ofs.write(s.data(), len);
+    };
+
+    // chunk_content_
+    uint32_t n_chunks = static_cast<uint32_t>(chunk_content_.size());
+    ofs.write(reinterpret_cast<const char *>(&n_chunks), 4);
+    for (const auto &[id, content] : chunk_content_) {
+      write_str(id);
+      write_str(content);
+    }
+
+    // chunk_docs_
+    uint32_t n_docs = static_cast<uint32_t>(chunk_docs_.size());
+    ofs.write(reinterpret_cast<const char *>(&n_docs), 4);
+    for (const auto &[chunk_id, doc_id] : chunk_docs_) {
+      write_str(chunk_id);
+      write_str(doc_id);
+    }
+
+    // hnsw_id_to_chunk_
+    auto nid = next_hnsw_id_;
+    ofs.write(reinterpret_cast<const char *>(&nid), sizeof(nid));
+    uint32_t n_hnsw = static_cast<uint32_t>(hnsw_id_to_chunk_.size());
+    ofs.write(reinterpret_cast<const char *>(&n_hnsw), 4);
+    for (const auto &[label, chunk_id] : hnsw_id_to_chunk_) {
+      ofs.write(reinterpret_cast<const char *>(&label), sizeof(label));
+      write_str(chunk_id);
+    }
+
+    std::cout << "[KB] Saved: " << n_chunks << " chunks, " << n_hnsw
+              << " HNSW points → " << dir << "\n";
+    return ofs.good();
+  }
+
+  bool load(const fs::path &dir) {
+    if (!fs::exists(dir / "kb_meta.bin"))
+      return false;
+
+    // 1. BM25 索引
+    if (!bm25_.load(dir / "bm25_index.bin")) {
+      std::cerr << "[KB] Failed to load BM25 index\n";
+      return false;
+    }
+
+    // 2. chunk 映射
+    std::ifstream ifs(dir / "kb_meta.bin", std::ios::binary);
+    if (!ifs)
+      return false;
+
+    uint32_t magic;
+    ifs.read(reinterpret_cast<char *>(&magic), 4);
+    if (magic != 0x4B424D54)
+      return false;
+
+    ifs.read(reinterpret_cast<char *>(&dim_), sizeof(dim_));
+    ifs.read(reinterpret_cast<char *>(&max_chunks_), sizeof(max_chunks_));
+
+    auto read_str = [&]() -> std::string {
+      uint32_t len;
+      ifs.read(reinterpret_cast<char *>(&len), 4);
+      std::string s(len, '\0');
+      ifs.read(s.data(), len);
+      return s;
+    };
+
+    // chunk_content_
+    uint32_t n_chunks;
+    ifs.read(reinterpret_cast<char *>(&n_chunks), 4);
+    chunk_content_.clear();
+    chunk_content_.reserve(n_chunks);
+    for (uint32_t i = 0; i < n_chunks; ++i) {
+      auto id = read_str();
+      auto content = read_str();
+      chunk_content_[std::move(id)] = std::move(content);
+    }
+
+    // chunk_docs_
+    uint32_t n_docs;
+    ifs.read(reinterpret_cast<char *>(&n_docs), 4);
+    chunk_docs_.clear();
+    chunk_docs_.reserve(n_docs);
+    for (uint32_t i = 0; i < n_docs; ++i) {
+      auto chunk_id = read_str();
+      auto doc_id = read_str();
+      chunk_docs_[std::move(chunk_id)] = std::move(doc_id);
+    }
+
+    // hnsw_id_to_chunk_
+    ifs.read(reinterpret_cast<char *>(&next_hnsw_id_), sizeof(next_hnsw_id_));
+    uint32_t n_hnsw;
+    ifs.read(reinterpret_cast<char *>(&n_hnsw), 4);
+    hnsw_id_to_chunk_.clear();
+    hnsw_id_to_chunk_.reserve(n_hnsw);
+    for (uint32_t i = 0; i < n_hnsw; ++i) {
+      hnswlib::labeltype label;
+      ifs.read(reinterpret_cast<char *>(&label), sizeof(label));
+      auto chunk_id = read_str();
+      hnsw_id_to_chunk_[label] = std::move(chunk_id);
+    }
+
+    // 3. HNSW 索引
+    auto hnsw_path = dir / "hnsw_index.bin";
+    if (fs::exists(hnsw_path) && n_hnsw > 0) {
+      space_ = std::make_unique<hnswlib::InnerProductSpace>(dim_);
+      try {
+        hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+            space_.get(), hnsw_path.string());
+      } catch (const std::exception &e) {
+        std::cerr << "[KB] Failed to load HNSW: " << e.what() << "\n";
+        hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+            space_.get(), max_chunks_);
+      }
+    }
+
+    std::cout << "[KB] Loaded: " << n_chunks << " chunks from " << dir << "\n";
+    return ifs.good();
   }
 
   void ingest_directory(const fs::path &dir) {

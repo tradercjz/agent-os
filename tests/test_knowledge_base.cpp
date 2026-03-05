@@ -133,3 +133,51 @@ TEST(KnowledgeBaseTest, SearchWithoutGraphReturnsEmptyContext) {
   ASSERT_FALSE(results.empty());
   EXPECT_TRUE(results[0].graph_context.empty());
 }
+
+// ── KB 持久化测试 ──────────────────────────────
+TEST(KnowledgeBaseTest, SaveAndLoad) {
+  fs::path kb_dir = "/tmp/agentos_kb_persist_test";
+  if (fs::exists(kb_dir))
+    fs::remove_all(kb_dir);
+
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+
+  // 1. 创建 KB 并 ingest 文档
+  {
+    KnowledgeBase kb(mock_llm, 1536);
+    kb.ingest_text("doc1", "The apple is red and delicious.");
+    kb.ingest_text("doc2", "The banana is yellow and sweet.");
+
+    // 验证搜索正常
+    auto results = kb.search("delicious apple", 2);
+    ASSERT_FALSE(results.empty());
+    EXPECT_EQ(results[0].doc_id, "doc1");
+
+    // 保存
+    ASSERT_TRUE(kb.save(kb_dir));
+  }
+
+  // 2. 从磁盘加载到新 KB
+  {
+    KnowledgeBase kb2(mock_llm, 1536);
+    ASSERT_TRUE(kb2.load(kb_dir));
+
+    // 验证 BM25 搜索正常（不依赖 HNSW）
+    auto results = kb2.search("delicious apple", 2);
+    ASSERT_FALSE(results.empty());
+    EXPECT_EQ(results[0].doc_id, "doc1");
+
+    // 验证内容完整
+    auto banana_results = kb2.search("banana yellow", 1);
+    ASSERT_FALSE(banana_results.empty());
+    EXPECT_EQ(banana_results[0].doc_id, "doc2");
+  }
+
+  fs::remove_all(kb_dir);
+}
+
+TEST(KnowledgeBaseTest, LoadNonexistentReturnsFalse) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+  EXPECT_FALSE(kb.load("/tmp/nonexistent_kb_dir_42"));
+}

@@ -3,6 +3,8 @@
 #include "agentos/knowledge/tokenizer.hpp"
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -90,6 +92,112 @@ public:
   size_t size() const {
     std::lock_guard lk(mu_);
     return doc_lengths_.size();
+  }
+
+  // ── 持久化 ───────────────────────────────────────
+  bool save(const std::filesystem::path &path) const {
+    std::lock_guard lk(mu_);
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs)
+      return false;
+
+    // Header
+    uint32_t magic = 0x424D3235; // "BM25"
+    ofs.write(reinterpret_cast<const char *>(&magic), 4);
+    ofs.write(reinterpret_cast<const char *>(&k1_), sizeof(k1_));
+    ofs.write(reinterpret_cast<const char *>(&b_), sizeof(b_));
+    ofs.write(reinterpret_cast<const char *>(&total_length_),
+              sizeof(total_length_));
+
+    // doc_lengths_
+    uint32_t n_docs = static_cast<uint32_t>(doc_lengths_.size());
+    ofs.write(reinterpret_cast<const char *>(&n_docs), 4);
+    for (const auto &[doc_id, len] : doc_lengths_) {
+      uint32_t slen = static_cast<uint32_t>(doc_id.size());
+      ofs.write(reinterpret_cast<const char *>(&slen), 4);
+      ofs.write(doc_id.data(), slen);
+      ofs.write(reinterpret_cast<const char *>(&len), sizeof(len));
+    }
+
+    // inverted_index_
+    uint32_t n_terms = static_cast<uint32_t>(inverted_index_.size());
+    ofs.write(reinterpret_cast<const char *>(&n_terms), 4);
+    for (const auto &[term, postings] : inverted_index_) {
+      uint32_t tlen = static_cast<uint32_t>(term.size());
+      ofs.write(reinterpret_cast<const char *>(&tlen), 4);
+      ofs.write(term.data(), tlen);
+
+      uint32_t n_postings = static_cast<uint32_t>(postings.size());
+      ofs.write(reinterpret_cast<const char *>(&n_postings), 4);
+      for (const auto &[doc_id, tf] : postings) {
+        uint32_t dlen = static_cast<uint32_t>(doc_id.size());
+        ofs.write(reinterpret_cast<const char *>(&dlen), 4);
+        ofs.write(doc_id.data(), dlen);
+        ofs.write(reinterpret_cast<const char *>(&tf), sizeof(tf));
+      }
+    }
+
+    return ofs.good();
+  }
+
+  bool load(const std::filesystem::path &path) {
+    std::lock_guard lk(mu_);
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs)
+      return false;
+
+    uint32_t magic;
+    ifs.read(reinterpret_cast<char *>(&magic), 4);
+    if (magic != 0x424D3235)
+      return false;
+
+    ifs.read(reinterpret_cast<char *>(&k1_), sizeof(k1_));
+    ifs.read(reinterpret_cast<char *>(&b_), sizeof(b_));
+    ifs.read(reinterpret_cast<char *>(&total_length_), sizeof(total_length_));
+
+    // doc_lengths_
+    uint32_t n_docs;
+    ifs.read(reinterpret_cast<char *>(&n_docs), 4);
+    doc_lengths_.clear();
+    doc_lengths_.reserve(n_docs);
+    for (uint32_t i = 0; i < n_docs; ++i) {
+      uint32_t slen;
+      ifs.read(reinterpret_cast<char *>(&slen), 4);
+      std::string doc_id(slen, '\0');
+      ifs.read(doc_id.data(), slen);
+      size_t len;
+      ifs.read(reinterpret_cast<char *>(&len), sizeof(len));
+      doc_lengths_[doc_id] = len;
+    }
+
+    // inverted_index_
+    uint32_t n_terms;
+    ifs.read(reinterpret_cast<char *>(&n_terms), 4);
+    inverted_index_.clear();
+    inverted_index_.reserve(n_terms);
+    for (uint32_t i = 0; i < n_terms; ++i) {
+      uint32_t tlen;
+      ifs.read(reinterpret_cast<char *>(&tlen), 4);
+      std::string term(tlen, '\0');
+      ifs.read(term.data(), tlen);
+
+      uint32_t n_postings;
+      ifs.read(reinterpret_cast<char *>(&n_postings), 4);
+      std::vector<std::pair<std::string, int>> postings;
+      postings.reserve(n_postings);
+      for (uint32_t j = 0; j < n_postings; ++j) {
+        uint32_t dlen;
+        ifs.read(reinterpret_cast<char *>(&dlen), 4);
+        std::string doc_id(dlen, '\0');
+        ifs.read(doc_id.data(), dlen);
+        int tf;
+        ifs.read(reinterpret_cast<char *>(&tf), sizeof(tf));
+        postings.push_back({std::move(doc_id), tf});
+      }
+      inverted_index_[std::move(term)] = std::move(postings);
+    }
+
+    return ifs.good();
   }
 
 private:

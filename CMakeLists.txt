@@ -28,6 +28,12 @@ FetchContent_MakeAvailable(nlohmann_json)
 # ---- libcurl ----
 find_package(CURL REQUIRED)
 
+# ---- SQLite3 ----
+# macOS Homebrew: brew install sqlite
+# Linux: apt install libsqlite3-dev
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+
 # ---- GoogleTest ----
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
@@ -76,28 +82,26 @@ set(AGENTOS_SOURCES
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib cppjieba::cppjieba)
+target_include_directories(agentos PUBLIC ${SQLITE3_INCLUDE_DIRS})
+target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib cppjieba::cppjieba ${SQLITE3_LIBRARIES})
 target_compile_definitions(agentos PUBLIC CPPJIEBA_DICT_DIR="${cppjieba_SOURCE_DIR}/dict")
 
 # ---- Examples ----
 add_executable(agentos_demo examples/demo.cpp)
-target_link_libraries(agentos_demo PRIVATE agentos)
-
-# ---- OpenAI Demo（读取 OPENAI_API_KEY 环境变量，接入真实 LLM）----
-add_executable(openai_demo examples/openai_demo.cpp)
-target_link_libraries(openai_demo PRIVATE agentos)
-
-# ---- Graph Demo ----
 add_executable(graph_demo examples/graph_demo.cpp)
-target_link_libraries(graph_demo PRIVATE agentos)
+target_link_libraries(graph_demo agentos)
 
-# ---- CSR Graph Engine Demo ----
+add_executable(temporal_graph_demo examples/temporal_graph_demo.cpp)
+target_link_libraries(temporal_graph_demo agentos)
+
 add_executable(csr_graph_demo examples/csr_graph_demo.cpp)
-target_link_libraries(csr_graph_demo PRIVATE agentos)
+target_link_libraries(csr_graph_demo agentos)
 
-# ---- Turnkey RAG Demo ----
+add_executable(openai_demo examples/openai_demo.cpp)
+target_link_libraries(openai_demo agentos)
+
 add_executable(rag_agent_demo examples/rag_agent_demo.cpp)
-target_link_libraries(rag_agent_demo PRIVATE agentos)
+target_link_libraries(rag_agent_demo agentos)
 
 # ---- Tests ----
 add_executable(benchmark_csr_graph tests/benchmark_csr_graph.cpp)
@@ -117,6 +121,7 @@ add_executable(
   tests/test_agent.cpp
   tests/test_csr_graph.cpp
   tests/test_knowledge_base.cpp
+  tests/test_sqlite_store.cpp
 )
 target_link_libraries(test_agentos PRIVATE agentos GTest::gtest_main GTest::gtest)
 include(GoogleTest)
