@@ -19,20 +19,24 @@ public:
     fs::create_directories(output_dir_);
   }
 
-  // Add a triplet to the graph building queue
+  // 添加一条三元组（可选时间窗口）
   void add_edge(const std::string &src, const std::string &dst,
-                const std::string &relation) {
+                const std::string &relation, uint64_t start_ts = 0,
+                uint64_t end_ts = 0) {
     EntityID u = entity_dict_.get_or_insert(src);
     EntityID v = entity_dict_.get_or_insert(dst);
     RelationID r =
         static_cast<RelationID>(relation_dict_.get_or_insert(relation));
 
-    raw_edges_.push_back({u, v, r});
+    raw_edges_.push_back({u, v, r, start_ts, end_ts});
   }
 
-  // Build the underlying CSR arrays and flush everything to disk.
+  // 构建 CSR/CSC 并序列化到磁盘
   bool build() {
-    // 1. Sort the raw edges by source node ID
+    uint32_t num_nodes = static_cast<uint32_t>(entity_dict_.size());
+    uint64_t num_edges = raw_edges_.size();
+
+    // ── CSR（出边）─────────────────────────────────────
     std::sort(raw_edges_.begin(), raw_edges_.end(),
               [](const RawEdge &a, const RawEdge &b) {
                 if (a.src != b.src)
@@ -42,36 +46,23 @@ public:
                 return a.rel < b.rel;
               });
 
-    uint32_t num_nodes = static_cast<uint32_t>(entity_dict_.size());
-    uint64_t num_edges = raw_edges_.size();
-
     std::vector<uint64_t> offsets(num_nodes + 1, 0);
     std::vector<Edge> edges;
     edges.reserve(num_edges);
 
-    // 2. Build the CSR topology
-    EntityID current_src = 0;
+    EntityID cur = 0;
     for (size_t i = 0; i < num_edges; ++i) {
-      const auto &current_edge = raw_edges_[i];
-
-      // If we skipped some nodes, fill their offsets with the current edge
-      // index
-      while (current_src < current_edge.src) {
-        current_src++;
-        offsets[current_src] = i;
+      const auto &e = raw_edges_[i];
+      while (cur < e.src) {
+        offsets[++cur] = i;
       }
-
-      edges.push_back({current_edge.dst, current_edge.rel});
+      edges.push_back({e.dst, e.rel, e.start_ts, e.end_ts});
+    }
+    while (cur < num_nodes) {
+      offsets[++cur] = num_edges;
     }
 
-    // Fill the remaining offsets up to num_nodes
-    while (current_src < num_nodes) {
-      current_src++;
-      offsets[current_src] = num_edges; // tail offset
-    }
-
-    // --- CSC (Incoming Edges) Phase ---
-    // 3. Sort the raw edges by destination node ID for CSC
+    // ── CSC（入边）─────────────────────────────────────
     std::sort(raw_edges_.begin(), raw_edges_.end(),
               [](const RawEdge &a, const RawEdge &b) {
                 if (a.dst != b.dst)
@@ -85,33 +76,20 @@ public:
     std::vector<Edge> csc_edges;
     csc_edges.reserve(num_edges);
 
-    EntityID current_dst = 0;
+    EntityID cur_dst = 0;
     for (size_t i = 0; i < num_edges; ++i) {
-      const auto &current_edge = raw_edges_[i];
-
-      while (current_dst < current_edge.dst) {
-        current_dst++;
-        csc_offsets[current_dst] = i;
+      const auto &e = raw_edges_[i];
+      while (cur_dst < e.dst) {
+        csc_offsets[++cur_dst] = i;
       }
-
-      // For CSC, the elements we store are the source of the edge
-      csc_edges.push_back({current_edge.src, current_edge.rel});
+      // CSC 中 target 存的是 source
+      csc_edges.push_back({e.src, e.rel, e.start_ts, e.end_ts});
+    }
+    while (cur_dst < num_nodes) {
+      csc_offsets[++cur_dst] = num_edges;
     }
 
-    while (current_dst < num_nodes) {
-      current_dst++;
-      csc_offsets[current_dst] = num_edges;
-    }
-
-    // 4. Serialize outputs
-
-    // Fill the remaining offsets up to num_nodes
-    while (current_src < num_nodes) {
-      current_src++;
-      offsets[current_src] = num_edges; // tail offset
-    }
-
-    // 4. Serialize outputs
+    // ── 序列化 ─────────────────────────────────────────
     if (!save_array(output_dir_ / "graph.offsets", offsets))
       return false;
     if (!save_array(output_dir_ / "graph.edges", edges))
@@ -125,7 +103,6 @@ public:
     if (!relation_dict_.save((output_dir_ / "relation.dict").string()))
       return false;
 
-    // 4. Serialize Meta
     GraphMeta meta{num_nodes, num_edges, 1, 0};
     if (!save_array(output_dir_ / "snapshot.meta",
                     std::vector<GraphMeta>{meta}))
@@ -142,6 +119,8 @@ private:
     EntityID src;
     EntityID dst;
     RelationID rel;
+    uint64_t start_ts;
+    uint64_t end_ts;
   };
 
   fs::path output_dir_;
