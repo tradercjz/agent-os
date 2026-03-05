@@ -118,7 +118,8 @@ public:
 
     void define_role(std::string name, Permission perms) {
         std::lock_guard lk(mu_);
-        roles_[std::move(name)] = Role{name, perms};
+        Role r{name, perms};
+        roles_[std::move(name)] = std::move(r);
     }
 
 private:
@@ -231,7 +232,8 @@ public:
     DetectionResult scan(std::string_view text) const {
         std::string lower;
         lower.reserve(text.size());
-        for (char c : text) lower += static_cast<char>(std::tolower(c));
+        for (char c : text)
+          lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
         for (auto& pat : patterns_) {
             if (lower.find(pat) != std::string::npos) {

@@ -504,8 +504,10 @@ private:
     std::vector<MetaRecord> metas;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-      std::string id(
-          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0)));
+      auto col0 = sqlite3_column_text(stmt, 0);
+      if (!col0)
+        continue; // id 为 NULL 时跳过
+      std::string id(reinterpret_cast<const char *>(col0));
 
       auto col1 = sqlite3_column_text(stmt, 1);
       auto col2 = sqlite3_column_text(stmt, 2);

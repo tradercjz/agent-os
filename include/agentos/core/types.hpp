@@ -66,7 +66,7 @@ enum class ErrorCode : int {
 
 struct Error {
   Error() = default;
-  ErrorCode code;
+  ErrorCode code{ErrorCode::Ok};
   std::string message;
   SourceLocation loc;
 

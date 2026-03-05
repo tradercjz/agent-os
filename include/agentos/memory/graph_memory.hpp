@@ -277,11 +277,16 @@ private:
     return res;
   }
 
+  /// Escape-aware split: 不会在转义逗号 (\c) 处分割
   std::vector<std::string> split(const std::string &s, char delim) const {
     std::vector<std::string> res;
     std::string cur;
     for (size_t i = 0; i < s.size(); ++i) {
-      if (s[i] == delim) {
+      if (s[i] == '\\' && i + 1 < s.size()) {
+        // 保留转义序列，跳过下一个字符（防止 \c 被当作分隔符）
+        cur += s[i];
+        cur += s[++i];
+      } else if (s[i] == delim) {
         res.push_back(cur);
         cur.clear();
       } else {

@@ -186,9 +186,9 @@ public:
             }
         }
 
+        std::lock_guard lk(mu_);
         audit_push(msg);
 
-        std::lock_guard lk(mu_);
         if (msg.to == 0) {
             // 广播
             for (auto& [id, ch] : channels_) {

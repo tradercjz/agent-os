@@ -17,7 +17,6 @@
 namespace agentos::context {
 
 namespace fs = std::filesystem;
-using namespace kernel;
 
 // ─────────────────────────────────────────────────────────────
 // § 3.1  ContextWindow — Token 预算管理器
@@ -29,9 +28,9 @@ public:
       : max_tokens_(max_tokens) {}
 
   // 尝试添加消息；若超预算返回 false
-  bool try_add(const Message &msg) {
+  bool try_add(const kernel::Message &msg) {
     TokenCount cost =
-        ILLMBackend::estimate_tokens(msg.content) + 4; // 角色 overhead
+        kernel::ILLMBackend::estimate_tokens(msg.content) + 4; // 角色 overhead
     if (used_tokens_ + cost > max_tokens_)
       return false;
     messages_.push_back(msg);
@@ -40,25 +39,30 @@ public:
   }
 
   // 强制添加（可能触发 LRU 驱逐）
-  void add_evict_if_needed(const Message &msg) {
-    TokenCount cost = ILLMBackend::estimate_tokens(msg.content) + 4;
+  void add_evict_if_needed(const kernel::Message &msg) {
+    TokenCount cost = kernel::ILLMBackend::estimate_tokens(msg.content) + 4;
     while (!messages_.empty() && used_tokens_ + cost > max_tokens_) {
       // 驱逐最老的（非 system）消息
+      bool evicted_one = false;
       for (auto it = messages_.begin(); it != messages_.end(); ++it) {
-        if (it->role != Role::System) {
+        if (it->role != kernel::Role::System) {
           evicted_.push_back(*it);
-          used_tokens_ -= ILLMBackend::estimate_tokens(it->content) + 4;
+          used_tokens_ -= kernel::ILLMBackend::estimate_tokens(it->content) + 4;
           messages_.erase(it);
+          evicted_one = true;
           break;
         }
       }
+      // 全是 system 消息且仍超预算时，退出循环避免死循环
+      if (!evicted_one)
+        break;
     }
     messages_.push_back(msg);
     used_tokens_ += cost;
   }
 
-  const std::deque<Message> &messages() const { return messages_; }
-  const std::deque<Message> &evicted() const { return evicted_; }
+  const std::deque<kernel::Message> &messages() const { return messages_; }
+  const std::deque<kernel::Message> &evicted() const { return evicted_; }
   TokenCount used_tokens() const { return used_tokens_; }
   TokenCount max_tokens() const { return max_tokens_; }
   float utilization() const {
@@ -79,17 +83,17 @@ public:
   // 注入一段摘要，替换已驱逐的历史
   void inject_summary(std::string summary_content) {
     messages_.push_front(
-        Message::system("=== 历史对话摘要 ===\n" + std::move(summary_content)));
+        kernel::Message::system("=== 历史对话摘要 ===\n" + std::move(summary_content)));
     used_tokens_ = 0;
     for (auto &m : messages_)
-      used_tokens_ += ILLMBackend::estimate_tokens(m.content) + 4;
+      used_tokens_ += kernel::ILLMBackend::estimate_tokens(m.content) + 4;
   }
 
 private:
   TokenCount max_tokens_;
   TokenCount used_tokens_{0};
-  std::deque<Message> messages_;
-  std::deque<Message> evicted_; // 被驱逐的消息，等待持久化
+  std::deque<kernel::Message> messages_;
+  std::deque<kernel::Message> evicted_; // 被驱逐的消息，等待持久化
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -100,7 +104,7 @@ struct ContextSnapshot {
   AgentId agent_id;
   SessionId session_id;
   TimePoint captured_at;
-  std::vector<Message> messages;
+  std::vector<kernel::Message> messages;
   std::string metadata_json; // 任意扩展元数据
 
   // 序列化为文本（简单格式，生产可换 protobuf/msgpack）
@@ -146,6 +150,8 @@ struct ContextSnapshot {
         if (colon == std::string::npos)
           continue;
         int role_id = std::stoi(rest.substr(0, colon));
+        if (role_id < 0 || role_id > 3) // Role enum: System=0, User=1, Assistant=2, Tool=3
+          continue;
         std::string content;
         // 反转义
         bool escape = false;
@@ -163,7 +169,7 @@ struct ContextSnapshot {
           }
         }
         snap.messages.push_back(
-            {.role = static_cast<Role>(role_id), .content = content});
+            {.role = static_cast<kernel::Role>(role_id), .content = content});
       } else if (line.starts_with("META:")) {
         snap.metadata_json = line.substr(5);
       }
@@ -178,9 +184,10 @@ struct ContextSnapshot {
 
 // 换页策略回调（将被驱逐的消息写入长期存储）
 using EvictionCallback =
-    std::function<void(AgentId, const std::vector<Message> &)>;
+    std::function<void(AgentId, const std::vector<kernel::Message> &)>;
 // 摘要生成回调（可由 LLM 实现）
-using SummarizeFn = std::function<std::string(const std::vector<Message> &)>;
+using SummarizeFn =
+    std::function<std::string(const std::vector<kernel::Message> &)>;
 
 class ContextManager : private NonCopyable {
 public:
@@ -197,15 +204,20 @@ public:
   }
 
   // 向上下文追加消息，自动换页
-  void append(AgentId agent_id, Message msg,
+  void append(AgentId agent_id, kernel::Message msg,
               EvictionCallback on_evict = nullptr) {
     std::lock_guard lk(mu_);
-    auto &win = windows_.at(agent_id);
+    auto it = windows_.find(agent_id);
+    if (it == windows_.end()) {
+      // 窗口不存在时自动创建（默认 8192 token）
+      it = windows_.emplace(agent_id, ContextWindow{8192}).first;
+    }
+    auto &win = it->second;
     win.add_evict_if_needed(msg);
 
     // 若有驱逐，触发回调
     if (!win.evicted().empty() && on_evict) {
-      std::vector<Message> evicted(win.evicted().begin(), win.evicted().end());
+      std::vector<kernel::Message> evicted(win.evicted().begin(), win.evicted().end());
       win.clear_evicted();
       on_evict(agent_id, evicted);
     }
@@ -222,7 +234,7 @@ public:
       return;
 
     // 收集所有消息做摘要
-    std::vector<Message> all{win.messages().begin(), win.messages().end()};
+    std::vector<kernel::Message> all{win.messages().begin(), win.messages().end()};
     std::string summary = summarize(all);
     win.reset();
     win.inject_summary(std::move(summary));
