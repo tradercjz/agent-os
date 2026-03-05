@@ -183,6 +183,43 @@ TEST(KnowledgeBaseTest, LoadNonexistentReturnsFalse) {
 }
 
 // ── 文档删除测试 ──────────────────────────────
+// ── BM25 文档删除测试 ──────────────────────────────
+TEST(KnowledgeBaseTest, BM25RemoveDocumentCleansIndex) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  kb.ingest_text("doc_apple", "Apple is a delicious red fruit.");
+  kb.ingest_text("doc_banana", "Banana is a yellow tropical fruit.");
+
+  // 删除前：搜索 "apple" 应返回 doc_apple
+  auto before = kb.search("apple fruit", 5);
+  bool found_apple = false;
+  for (const auto &r : before) {
+    if (r.doc_id == "doc_apple")
+      found_apple = true;
+  }
+  EXPECT_TRUE(found_apple);
+
+  // 删除 doc_apple
+  EXPECT_TRUE(kb.remove_document("doc_apple"));
+  EXPECT_EQ(kb.document_count(), 1u);
+
+  // 删除后：BM25 不应再返回已删除文档的结果
+  auto after = kb.search("apple fruit", 5);
+  for (const auto &r : after) {
+    EXPECT_NE(r.doc_id, "doc_apple");
+  }
+
+  // banana 仍可搜到
+  auto banana_results = kb.search("banana tropical", 5);
+  bool found_banana = false;
+  for (const auto &r : banana_results) {
+    if (r.doc_id == "doc_banana")
+      found_banana = true;
+  }
+  EXPECT_TRUE(found_banana);
+}
+
 TEST(KnowledgeBaseTest, RemoveDocumentRemovesChunks) {
   auto mock_llm = std::make_shared<MockEmbeddingBackend>();
   KnowledgeBase kb(mock_llm, 1536);

@@ -12,6 +12,7 @@
 #pragma GCC diagnostic pop
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -54,12 +55,25 @@ public:
   }
 
   // ── 配置访问 ─────────────────────────────────────
-  const std::string &embedding_model() const { return embedding_model_; }
-  void set_embedding_model(const std::string &model) { embedding_model_ = model; }
+  const std::string &embedding_model() const {
+    std::lock_guard lk(mu_);
+    return embedding_model_;
+  }
+  void set_embedding_model(const std::string &model) {
+    std::lock_guard lk(mu_);
+    embedding_model_ = model;
+  }
 
-  size_t chunk_size() const { return chunk_size_; }
-  size_t chunk_overlap() const { return chunk_overlap_; }
+  size_t chunk_size() const {
+    std::lock_guard lk(mu_);
+    return chunk_size_;
+  }
+  size_t chunk_overlap() const {
+    std::lock_guard lk(mu_);
+    return chunk_overlap_;
+  }
   void set_chunk_params(size_t size, size_t overlap) {
+    std::lock_guard lk(mu_);
     chunk_size_ = size;
     chunk_overlap_ = overlap;
   }
@@ -67,11 +81,13 @@ public:
   // ── Graph 关联 ─────────────────────────────────────
   void attach_graph(
       std::shared_ptr<graph_engine::core::ImmutableGraph> graph) {
+    std::lock_guard lk(mu_);
     graph_ = std::move(graph);
   }
 
   // ── 文本摄入 ───────────────────────────────────────
   void ingest_text(const std::string &doc_id, const std::string &text) {
+    std::lock_guard lk(mu_);
     auto chunks = chunk_text(text, chunk_size_, chunk_overlap_);
     std::cout << "[KB Ingestion] Document [" << doc_id << "] parsed into "
               << chunks.size() << " chunks.\n";
@@ -109,6 +125,7 @@ public:
 
   // ── 持久化 ───────────────────────────────────────
   bool save(const fs::path &dir) const {
+    std::lock_guard lk(mu_);
     fs::create_directories(dir);
 
     // 1. BM25 索引
@@ -173,6 +190,7 @@ public:
   }
 
   bool load(const fs::path &dir) {
+    std::lock_guard lk(mu_);
     if (!fs::exists(dir / "kb_meta.bin"))
       return false;
 
@@ -277,6 +295,7 @@ public:
 
   // ── 文档删除（逻辑删除：从 BM25 + HNSW 映射中移除）────
   bool remove_document(const std::string &doc_id) {
+    std::lock_guard lk(mu_);
     // 收集该 doc 的所有 chunk_id
     std::vector<std::string> to_remove;
     for (const auto &[chunk_id, did] : chunk_docs_) {
@@ -301,18 +320,22 @@ public:
           ++it;
         }
       }
+      // 从 BM25 索引中移除
+      bm25_.remove_document(chunk_id);
       // 从映射中移除
       chunk_content_.erase(chunk_id);
       chunk_docs_.erase(chunk_id);
-      // BM25 不支持单文档删除，但检索时 chunk_content_ 已移除，
-      // rrf_fuse 会跳过找不到内容的 chunk_id
     }
     return true;
   }
 
   // ── 统计 ─────────────────────────────────────────
-  size_t chunk_count() const { return chunk_content_.size(); }
+  size_t chunk_count() const {
+    std::lock_guard lk(mu_);
+    return chunk_content_.size();
+  }
   size_t document_count() const {
+    std::lock_guard lk(mu_);
     std::unordered_set<std::string> docs;
     for (const auto &[_, doc_id] : chunk_docs_)
       docs.insert(doc_id);
@@ -323,6 +346,7 @@ public:
   std::vector<SearchResult> search(const std::string &query,
                                     size_t top_k = 5,
                                     int graph_hops = 0) {
+    std::lock_guard lk(mu_);
     const size_t internal_k = top_k * 2;
 
     // 1. Sparse (BM25)
@@ -369,6 +393,7 @@ public:
   }
 
 private:
+  mutable std::mutex mu_;
   std::shared_ptr<kernel::ILLMBackend> llm_;
   BM25Index bm25_;
   std::string embedding_model_;

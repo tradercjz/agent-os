@@ -431,7 +431,9 @@ public:
       entry.id = "lt_" + std::to_string(id_counter_++);
     entry.created_at = entry.accessed_at = now();
 
-    // 持久化 content 到 .mem 文件
+    std::lock_guard lk(mu_);
+
+    // 持久化 content 到 .mem 文件（锁内执行，避免并发写同一文件竞态）
     auto path = entry_path(entry.id);
     std::ofstream ofs(path);
     if (!ofs)
@@ -449,8 +451,6 @@ public:
         ofs << c;
     }
     ofs << "\n";
-
-    std::lock_guard lk(mu_);
 
     hnswlib::labeltype node_label = hnswlib::labeltype(-1);
     bool has_embedding = !entry.embedding.empty();
@@ -484,52 +484,17 @@ public:
   }
 
   Result<MemoryEntry> read(const std::string &id) override {
-    auto path = entry_path(id);
-    if (!fs::exists(path))
-      return make_error(ErrorCode::NotFound, "LTM: entry not found");
-
-    std::ifstream ifs(path);
-    MemoryEntry entry;
-    std::string line;
-    std::getline(ifs, entry.id);
-    std::getline(ifs, entry.source);
-    std::string imp_str;
-    std::getline(ifs, imp_str);
-    entry.importance = std::stof(imp_str);
-    std::getline(ifs, entry.user_id);
-    std::getline(ifs, entry.agent_id);
-    std::getline(ifs, entry.session_id);
-    std::getline(ifs, entry.type);
-    std::getline(ifs, line);
-    for (size_t i = 0; i < line.size(); ++i) {
-      if (line[i] == '\\' && i + 1 < line.size() && line[i + 1] == 'n') {
-        entry.content += '\n';
-        i++;
-      } else {
-        entry.content += line[i];
-      }
-    }
-
     std::lock_guard lk(mu_);
-    auto it = index_.find(id);
-    if (it != index_.end() && it->second.label != hnswlib::labeltype(-1) &&
-        hnsw_index_) {
-      try {
-        entry.embedding = hnsw_index_->getDataByLabel<float>(it->second.label);
-      } catch (...) {
-      }
-    }
-
-    return entry;
+    return read_locked(id);
   }
 
   Result<bool> forget(const std::string &id) override {
+    std::lock_guard lk(mu_);
     auto path = entry_path(id);
     if (!fs::exists(path))
       return false;
     fs::remove(path);
 
-    std::lock_guard lk(mu_);
     auto it = index_.find(id);
     if (it != index_.end()) {
       if (hnsw_index_ && it->second.label != hnswlib::labeltype(-1)) {
@@ -571,22 +536,16 @@ public:
   Result<std::vector<SearchResult>> search(const Embedding &q_emb,
                                            const MemoryFilter &filter,
                                            size_t top_k = 5) override {
-    std::unique_lock lk(mu_);
+    std::lock_guard lk(mu_);
     std::vector<SearchResult> results;
 
     if (q_emb.empty() || !hnsw_index_ || hnsw_index_->cur_element_count == 0) {
       // 退化线性过滤
-      std::vector<std::string> matched_ids;
       for (auto &[id, rec] : index_) {
         if (filter.match(rec.user_id, rec.agent_id, rec.session_id, rec.type)) {
-          matched_ids.push_back(id);
+          if (auto entry = read_locked(id))
+            results.push_back({*entry, 0.0f});
         }
-      }
-      lk.unlock(); // 释放锁以避免在 read() 中死锁
-
-      for (const auto &id : matched_ids) {
-        if (auto entry = read(id))
-          results.push_back({*entry, 0.0f});
       }
       std::sort(results.begin(), results.end(),
                 [](const auto &a, const auto &b) { return a.score > b.score; });
@@ -614,7 +573,6 @@ public:
       return results;
     }
 
-    std::vector<std::pair<std::string, float>> matched_items;
     while (!res.empty()) {
       auto [dist, label] = res.top();
       res.pop();
@@ -628,13 +586,8 @@ public:
 
       float sim = 1.0f - dist;
       float score = sim * (0.7f + 0.3f * idx_it->second.importance);
-      matched_items.push_back({l2i_it->second, score});
-    }
 
-    lk.unlock(); // 释放锁以避免在 read() 中死锁
-
-    for (auto &[id, score] : matched_items) {
-      if (auto entry = read(id)) {
+      if (auto entry = read_locked(l2i_it->second)) {
         results.push_back({*entry, score});
       }
     }
@@ -647,16 +600,10 @@ public:
   }
 
   std::vector<MemoryEntry> get_all() override {
+    std::lock_guard lk(mu_);
     std::vector<MemoryEntry> results;
-    std::vector<std::string> ids;
-    {
-      std::lock_guard lk(mu_);
-      for (auto &[id, rec] : index_)
-        ids.push_back(id);
-    }
-    for (auto &id : ids) {
-      auto entry = read(id);
-      if (entry)
+    for (auto &[id, rec] : index_) {
+      if (auto entry = read_locked(id))
         results.push_back(std::move(*entry));
     }
     return results;
@@ -671,6 +618,46 @@ public:
 private:
   fs::path entry_path(const std::string &id) const {
     return dir_ / (id + ".mem");
+  }
+
+  /// 锁内读取（调用者必须已持有 mu_）
+  Result<MemoryEntry> read_locked(const std::string &id) {
+    auto path = entry_path(id);
+    if (!fs::exists(path))
+      return make_error(ErrorCode::NotFound, "LTM: entry not found");
+
+    std::ifstream ifs(path);
+    MemoryEntry entry;
+    std::string line;
+    std::getline(ifs, entry.id);
+    std::getline(ifs, entry.source);
+    std::string imp_str;
+    std::getline(ifs, imp_str);
+    entry.importance = std::stof(imp_str);
+    std::getline(ifs, entry.user_id);
+    std::getline(ifs, entry.agent_id);
+    std::getline(ifs, entry.session_id);
+    std::getline(ifs, entry.type);
+    std::getline(ifs, line);
+    for (size_t i = 0; i < line.size(); ++i) {
+      if (line[i] == '\\' && i + 1 < line.size() && line[i + 1] == 'n') {
+        entry.content += '\n';
+        i++;
+      } else {
+        entry.content += line[i];
+      }
+    }
+
+    auto it = index_.find(id);
+    if (it != index_.end() && it->second.label != hnswlib::labeltype(-1) &&
+        hnsw_index_) {
+      try {
+        entry.embedding = hnsw_index_->getDataByLabel<float>(it->second.label);
+      } catch (...) {
+      }
+    }
+
+    return entry;
   }
 
   void load_index() {

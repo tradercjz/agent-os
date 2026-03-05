@@ -207,7 +207,6 @@ private:
   std::unique_ptr<security::SecurityManager> security_;
   std::unique_ptr<bus::AgentBus> bus_;
 
-  mutable std::mutex mu_;
   mutable std::mutex agents_mu_;
   std::unordered_map<AgentId, std::shared_ptr<Agent>> agents_;
   std::atomic<AgentId> next_agent_id_{1};

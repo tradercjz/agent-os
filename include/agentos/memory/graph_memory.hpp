@@ -107,8 +107,18 @@ public:
     if (edge.end_ts == 0)
       edge.end_ts = UINT64_MAX; // indefinite
 
-    // In-memory update
-    edges_[edge.source_id].push_back(edge);
+    // In-memory update（去重：相同 source+target+relation 的边覆盖）
+    auto &edge_list = edges_[edge.source_id];
+    auto dup = std::find_if(edge_list.begin(), edge_list.end(),
+                            [&](const GraphEdge &ex) {
+                              return ex.target_id == edge.target_id &&
+                                     ex.relation == edge.relation;
+                            });
+    if (dup != edge_list.end()) {
+      *dup = edge; // 覆盖（更新 weight/timestamp）
+    } else {
+      edge_list.push_back(edge);
+    }
 
     // Ensure nodes exist implicitly
     if (nodes_.find(edge.source_id) == nodes_.end()) {
@@ -316,7 +326,19 @@ private:
             e.weight = std::stof(parts[4]);
             e.start_ts = std::stoull(parts[5]);
             e.end_ts = std::stoull(parts[6]);
-            edges_[e.source_id].push_back(e);
+
+            // 去重：相同 (source, target, relation) 的边覆盖而非累加
+            auto &edge_list = edges_[e.source_id];
+            auto dup = std::find_if(edge_list.begin(), edge_list.end(),
+                                    [&](const GraphEdge &ex) {
+                                      return ex.target_id == e.target_id &&
+                                             ex.relation == e.relation;
+                                    });
+            if (dup != edge_list.end()) {
+              *dup = e; // 用最新值覆盖
+            } else {
+              edge_list.push_back(e);
+            }
           }
         }
       } catch (...) {

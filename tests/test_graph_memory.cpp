@@ -116,6 +116,42 @@ TEST(GraphMemoryTest, WALPersistence) {
   }
 }
 
+TEST(GraphMemoryTest, WALReplayDeduplicatesEdges) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_dedup";
+  std::filesystem::remove_all(test_dir);
+
+  {
+    memory::LocalGraphMemory graph(test_dir);
+    // 添加同一条边两次（不同 weight）
+    graph.add_edge(memory::GraphEdge{
+        .source_id = "A", .target_id = "B", .relation = "r1", .weight = 1.0f});
+    graph.add_edge(memory::GraphEdge{
+        .source_id = "A", .target_id = "B", .relation = "r1", .weight = 2.0f});
+    // 不同 relation 的边应保留
+    graph.add_edge(memory::GraphEdge{
+        .source_id = "A", .target_id = "B", .relation = "r2", .weight = 3.0f});
+
+    auto edges = graph.get_edges("A");
+    ASSERT_TRUE(edges.has_value());
+    EXPECT_EQ(edges->size(), 2u); // r1（覆盖后1条）+ r2（1条）
+    // r1 应被覆盖为 weight=2.0
+    for (const auto &e : *edges) {
+      if (e.relation == "r1")
+        EXPECT_FLOAT_EQ(e.weight, 2.0f);
+    }
+  }
+
+  {
+    // 重新从 WAL 加载，确认去重生效
+    memory::LocalGraphMemory graph(test_dir);
+    auto edges = graph.get_edges("A");
+    ASSERT_TRUE(edges.has_value());
+    EXPECT_EQ(edges->size(), 2u); // WAL 去重后仍为 2 条
+  }
+
+  std::filesystem::remove_all(test_dir);
+}
+
 TEST(GraphMemoryTest, HighLevelMemoryAPI) {
   std::filesystem::path test_dir = "/tmp/agentos_test_graph_high_level";
   std::filesystem::remove_all(test_dir);

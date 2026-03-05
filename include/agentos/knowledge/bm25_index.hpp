@@ -89,6 +89,36 @@ public:
     return results;
   }
 
+  /// 移除文档：从倒排索引和 doc_lengths 中清除，修正 total_length
+  bool remove_document(const std::string &doc_id) {
+    std::lock_guard lk(mu_);
+    auto dl_it = doc_lengths_.find(doc_id);
+    if (dl_it == doc_lengths_.end())
+      return false;
+
+    total_length_ -= dl_it->second;
+    doc_lengths_.erase(dl_it);
+
+    // 从所有 posting list 中移除该 doc 的条目
+    for (auto term_it = inverted_index_.begin();
+         term_it != inverted_index_.end();) {
+      auto &postings = term_it->second;
+      postings.erase(
+          std::remove_if(postings.begin(), postings.end(),
+                         [&](const std::pair<std::string, int> &p) {
+                           return p.first == doc_id;
+                         }),
+          postings.end());
+      // 清除空 posting list 以保持索引紧凑
+      if (postings.empty()) {
+        term_it = inverted_index_.erase(term_it);
+      } else {
+        ++term_it;
+      }
+    }
+    return true;
+  }
+
   size_t size() const {
     std::lock_guard lk(mu_);
     return doc_lengths_.size();
