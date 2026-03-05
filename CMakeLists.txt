@@ -88,6 +88,7 @@ target_compile_definitions(agentos PUBLIC CPPJIEBA_DICT_DIR="${cppjieba_SOURCE_D
 
 # ---- Examples ----
 add_executable(agentos_demo examples/demo.cpp)
+target_link_libraries(agentos_demo agentos)
 add_executable(graph_demo examples/graph_demo.cpp)
 target_link_libraries(graph_demo agentos)
 

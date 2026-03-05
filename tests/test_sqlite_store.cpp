@@ -297,3 +297,38 @@ TEST_F(SQLiteStoreTest, MemorySystemWithSQLiteBackend) {
 TEST_F(SQLiteStoreTest, NameIsSQLiteLongTermMemory) {
   EXPECT_EQ(store_->name(), "SQLiteLongTermMemory");
 }
+
+// ── MemorySystem::LTMBackend::SQLite 枚举构造器测试 ────
+TEST_F(SQLiteStoreTest, MemorySystemSQLiteEnumCreatesCorrectBackend) {
+  // 使用枚举值构造（而非手动注入）
+  auto sqlite_dir = fs::temp_directory_path() / "agentos_sqlite_enum_test";
+  fs::remove_all(sqlite_dir);
+
+  {
+    MemorySystem mem(sqlite_dir, MemorySystem::LTMBackend::SQLite);
+    EXPECT_EQ(mem.long_term().name(), "SQLiteLongTermMemory");
+
+    // 写入高重要性记忆
+    Embedding emb(64, 0.1f);
+    float norm = 0;
+    for (float v : emb)
+      norm += v * v;
+    norm = std::sqrt(norm);
+    for (float &v : emb)
+      v /= norm;
+
+    mem.remember("SQLite enum test data", emb, "agent", 0.9f);
+    EXPECT_GE(mem.long_term().size(), 1);
+  }
+
+  // 验证 FileBased 枚举仍正常工作
+  {
+    auto file_dir = fs::temp_directory_path() / "agentos_file_enum_test";
+    fs::remove_all(file_dir);
+    MemorySystem mem(file_dir, MemorySystem::LTMBackend::FileBased);
+    EXPECT_EQ(mem.long_term().name(), "LongTermMemory");
+    fs::remove_all(file_dir);
+  }
+
+  fs::remove_all(sqlite_dir);
+}

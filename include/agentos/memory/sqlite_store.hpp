@@ -263,16 +263,16 @@ public:
     std::lock_guard lk(mu_);
     std::vector<MemoryEntry> results;
 
-    auto stmt = db_.prepare("SELECT id FROM entries");
+    auto stmt = db_.prepare(
+        "SELECT id, content, source, user_id, agent_id, session_id, type, "
+        "       importance, access_count, created_at, accessed_at, embedding "
+        "FROM entries");
     if (!stmt)
       return results;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-      auto id =
-          std::string(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0)));
-      auto entry = read_locked(id);
-      if (entry)
-        results.push_back(std::move(*entry));
+      auto entry = row_to_entry(stmt);
+      results.push_back(std::move(entry));
     }
     return results;
   }
@@ -350,46 +350,33 @@ private:
     db_.exec("CREATE INDEX IF NOT EXISTS idx_type ON entries(type)");
   }
 
-  Result<MemoryEntry> read_locked(const std::string &id) {
-    auto stmt = db_.prepare(
-        "SELECT id, content, source, user_id, agent_id, session_id, type, "
-        "       importance, access_count, created_at, accessed_at, embedding "
-        "FROM entries WHERE id = ?");
-    if (!stmt)
-      return make_error(ErrorCode::MemoryReadFailed, "SQLiteLTM: prepare failed");
+  // ── 从 SELECT 结果行提取 MemoryEntry（列顺序必须匹配 SELECT_ALL_COLS）──
+  static constexpr const char *SELECT_ALL_COLS =
+      "id, content, source, user_id, agent_id, session_id, type, "
+      "importance, access_count, created_at, accessed_at, embedding";
 
-    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+  static std::string col_text(sqlite3_stmt *stmt, int col) {
+    auto p = sqlite3_column_text(stmt, col);
+    return p ? std::string(reinterpret_cast<const char *>(p)) : "";
+  }
 
-    if (sqlite3_step(stmt) != SQLITE_ROW)
-      return make_error(ErrorCode::NotFound, "SQLiteLTM: entry not found");
-
+  static MemoryEntry row_to_entry(sqlite3_stmt *stmt) {
     MemoryEntry entry;
-    entry.id =
-        std::string(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0)));
-    entry.content =
-        std::string(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1)));
-
-    auto col2 = sqlite3_column_text(stmt, 2);
-    entry.source = col2 ? std::string(reinterpret_cast<const char *>(col2)) : "";
-    auto col3 = sqlite3_column_text(stmt, 3);
-    entry.user_id = col3 ? std::string(reinterpret_cast<const char *>(col3)) : "";
-    auto col4 = sqlite3_column_text(stmt, 4);
-    entry.agent_id = col4 ? std::string(reinterpret_cast<const char *>(col4)) : "";
-    auto col5 = sqlite3_column_text(stmt, 5);
-    entry.session_id =
-        col5 ? std::string(reinterpret_cast<const char *>(col5)) : "";
-    auto col6 = sqlite3_column_text(stmt, 6);
-    entry.type = col6 ? std::string(reinterpret_cast<const char *>(col6)) : "";
+    entry.id = col_text(stmt, 0);
+    entry.content = col_text(stmt, 1);
+    entry.source = col_text(stmt, 2);
+    entry.user_id = col_text(stmt, 3);
+    entry.agent_id = col_text(stmt, 4);
+    entry.session_id = col_text(stmt, 5);
+    entry.type = col_text(stmt, 6);
 
     entry.importance = static_cast<float>(sqlite3_column_double(stmt, 7));
     entry.access_count = static_cast<uint32_t>(sqlite3_column_int(stmt, 8));
 
     auto created_us = sqlite3_column_int64(stmt, 9);
     auto accessed_us = sqlite3_column_int64(stmt, 10);
-    entry.created_at =
-        TimePoint(std::chrono::microseconds(created_us));
-    entry.accessed_at =
-        TimePoint(std::chrono::microseconds(accessed_us));
+    entry.created_at = TimePoint(std::chrono::microseconds(created_us));
+    entry.accessed_at = TimePoint(std::chrono::microseconds(accessed_us));
 
     // Embedding from BLOB
     if (sqlite3_column_type(stmt, 11) != SQLITE_NULL) {
@@ -403,12 +390,28 @@ private:
     return entry;
   }
 
+  Result<MemoryEntry> read_locked(const std::string &id) {
+    std::string sql = std::string("SELECT ") + SELECT_ALL_COLS +
+                      " FROM entries WHERE id = ?";
+    auto stmt = db_.prepare(sql);
+    if (!stmt)
+      return make_error(ErrorCode::MemoryReadFailed, "SQLiteLTM: prepare failed");
+
+    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(stmt) != SQLITE_ROW)
+      return make_error(ErrorCode::NotFound, "SQLiteLTM: entry not found");
+
+    return row_to_entry(stmt);
+  }
+
   Result<std::vector<SearchResult>>
   search_linear_locked(const MemoryFilter &filter, size_t top_k) {
     std::vector<SearchResult> results;
 
-    // Build WHERE clause dynamically
-    std::string sql = "SELECT id FROM entries WHERE 1=1";
+    // Build WHERE clause dynamically — single-pass SELECT all columns
+    std::string sql = std::string("SELECT ") + SELECT_ALL_COLS +
+                      " FROM entries WHERE 1=1";
     if (filter.user_id)
       sql += " AND user_id = ?";
     if (filter.agent_id)
@@ -439,11 +442,8 @@ private:
     sqlite3_bind_int64(stmt, bind_idx, static_cast<int64_t>(top_k));
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-      auto id = std::string(
-          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0)));
-      auto entry = read_locked(id);
-      if (entry)
-        results.push_back({std::move(*entry), 0.0f});
+      auto entry = row_to_entry(stmt);
+      results.push_back({std::move(entry), 0.0f});
     }
     return results;
   }

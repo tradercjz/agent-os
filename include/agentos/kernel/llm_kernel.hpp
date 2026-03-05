@@ -7,6 +7,7 @@
 #include <agentos/core/types.hpp>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -248,13 +249,45 @@ public:
     return resp;
   }
 
+  // 向量嵌入：生成确定性伪向量（基于文本内容哈希）
+  Result<EmbeddingResponse> embed(const EmbeddingRequest &req) override {
+    EmbeddingResponse resp;
+    for (const auto &input : req.inputs) {
+      std::vector<float> emb(embed_dim_, 0.0f);
+      // 确定性哈希：同一文本始终生成相同向量
+      std::hash<std::string> hasher;
+      size_t h = hasher(input);
+      float norm_sq = 0.0f;
+      for (size_t i = 0; i < embed_dim_; ++i) {
+        // 用哈希种子生成伪随机分量
+        h ^= (h << 13) ^ (h >> 7) ^ (i * 2654435761ULL);
+        emb[i] = static_cast<float>(static_cast<int32_t>(h & 0xFFFF) - 32768) /
+                 32768.0f;
+        norm_sq += emb[i] * emb[i];
+      }
+      // L2 归一化（使 inner product == cosine similarity）
+      float norm = std::sqrt(norm_sq);
+      if (norm > 0.0f) {
+        for (auto &v : emb)
+          v /= norm;
+      }
+      resp.embeddings.push_back(std::move(emb));
+      resp.total_tokens += ILLMBackend::estimate_tokens(input);
+    }
+    return resp;
+  }
+
   std::string name() const override { return model_name_; }
+
+  // 设置 embed() 输出维度（默认 1536，可调小以加速测试）
+  void set_embed_dim(size_t dim) { embed_dim_ = dim; }
 
 private:
   std::string model_name_;
   std::vector<std::pair<std::string, std::string>> rules_;
   std::vector<std::tuple<std::string, std::string, std::string>> tool_rules_;
   std::atomic<uint64_t> call_count_{0};
+  size_t embed_dim_{1536};
 };
 
 // ─────────────────────────────────────────────────────────────

@@ -44,11 +44,24 @@ class KnowledgeBase {
 public:
   explicit KnowledgeBase(std::shared_ptr<kernel::ILLMBackend> llm,
                          uint32_t vector_dim = 1536,
-                         size_t max_chunks = 100000)
-      : llm_(std::move(llm)), dim_(vector_dim), max_chunks_(max_chunks) {
+                         size_t max_chunks = 100000,
+                         std::string embedding_model = "text-embedding-3-small")
+      : llm_(std::move(llm)), embedding_model_(std::move(embedding_model)),
+        dim_(vector_dim), max_chunks_(max_chunks) {
     space_ = std::make_unique<hnswlib::InnerProductSpace>(dim_);
     hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(space_.get(),
                                                                max_chunks_);
+  }
+
+  // ── 配置访问 ─────────────────────────────────────
+  const std::string &embedding_model() const { return embedding_model_; }
+  void set_embedding_model(const std::string &model) { embedding_model_ = model; }
+
+  size_t chunk_size() const { return chunk_size_; }
+  size_t chunk_overlap() const { return chunk_overlap_; }
+  void set_chunk_params(size_t size, size_t overlap) {
+    chunk_size_ = size;
+    chunk_overlap_ = overlap;
   }
 
   // ── Graph 关联 ─────────────────────────────────────
@@ -59,7 +72,7 @@ public:
 
   // ── 文本摄入 ───────────────────────────────────────
   void ingest_text(const std::string &doc_id, const std::string &text) {
-    auto chunks = chunk_text(text, 500, 50);
+    auto chunks = chunk_text(text, chunk_size_, chunk_overlap_);
     std::cout << "[KB Ingestion] Document [" << doc_id << "] parsed into "
               << chunks.size() << " chunks.\n";
 
@@ -77,7 +90,7 @@ public:
       // Dense embedding
       kernel::EmbeddingRequest req;
       req.inputs = {chunks[i]};
-      req.model = "text-embedding-3-small";
+      req.model = embedding_model_;
 
       auto resp = llm_->embed(req);
       if (resp && !resp->embeddings.empty() &&
@@ -124,6 +137,9 @@ public:
       ofs.write(reinterpret_cast<const char *>(&len), 4);
       ofs.write(s.data(), len);
     };
+
+    // Embedding model name
+    write_str(embedding_model_);
 
     // chunk_content_
     uint32_t n_chunks = static_cast<uint32_t>(chunk_content_.size());
@@ -186,6 +202,9 @@ public:
       ifs.read(s.data(), len);
       return s;
     };
+
+    // Embedding model name
+    embedding_model_ = read_str();
 
     // chunk_content_
     uint32_t n_chunks;
@@ -256,6 +275,50 @@ public:
     }
   }
 
+  // ── 文档删除（逻辑删除：从 BM25 + HNSW 映射中移除）────
+  bool remove_document(const std::string &doc_id) {
+    // 收集该 doc 的所有 chunk_id
+    std::vector<std::string> to_remove;
+    for (const auto &[chunk_id, did] : chunk_docs_) {
+      if (did == doc_id)
+        to_remove.push_back(chunk_id);
+    }
+    if (to_remove.empty())
+      return false;
+
+    for (const auto &chunk_id : to_remove) {
+      // 从 HNSW 标记删除
+      for (auto it = hnsw_id_to_chunk_.begin(); it != hnsw_id_to_chunk_.end();) {
+        if (it->second == chunk_id) {
+          if (hnsw_) {
+            try {
+              hnsw_->markDelete(it->first);
+            } catch (...) {
+            }
+          }
+          it = hnsw_id_to_chunk_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      // 从映射中移除
+      chunk_content_.erase(chunk_id);
+      chunk_docs_.erase(chunk_id);
+      // BM25 不支持单文档删除，但检索时 chunk_content_ 已移除，
+      // rrf_fuse 会跳过找不到内容的 chunk_id
+    }
+    return true;
+  }
+
+  // ── 统计 ─────────────────────────────────────────
+  size_t chunk_count() const { return chunk_content_.size(); }
+  size_t document_count() const {
+    std::unordered_set<std::string> docs;
+    for (const auto &[_, doc_id] : chunk_docs_)
+      docs.insert(doc_id);
+    return docs.size();
+  }
+
   // ── Hybrid 检索 + 可选 GraphRAG 扩展 ───────────────
   std::vector<SearchResult> search(const std::string &query,
                                     size_t top_k = 5,
@@ -308,6 +371,9 @@ public:
 private:
   std::shared_ptr<kernel::ILLMBackend> llm_;
   BM25Index bm25_;
+  std::string embedding_model_;
+  size_t chunk_size_{500};
+  size_t chunk_overlap_{50};
 
   uint32_t dim_;
   size_t max_chunks_;
@@ -432,9 +498,13 @@ private:
 
     std::vector<SearchResult> fused;
     for (const auto &[chunk_id, score] : rrf_scores) {
-      fused.push_back(
-          {chunk_docs_[chunk_id], chunk_id, chunk_content_[chunk_id], score,
-           ""});
+      // 跳过已删除的 chunk（remove_document 后 BM25 可能仍返回旧 ID）
+      auto content_it = chunk_content_.find(chunk_id);
+      if (content_it == chunk_content_.end())
+        continue;
+      auto doc_it = chunk_docs_.find(chunk_id);
+      std::string doc_id = doc_it != chunk_docs_.end() ? doc_it->second : "";
+      fused.push_back({doc_id, chunk_id, content_it->second, score, ""});
     }
 
     std::sort(fused.begin(), fused.end(),

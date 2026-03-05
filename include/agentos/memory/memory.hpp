@@ -775,19 +775,9 @@ public:
   // LTM 后端类型
   enum class LTMBackend { FileBased, SQLite };
 
+  // 定义在 memory.cpp 以避免循环 include（SQLiteLongTermMemory 在 sqlite_store.hpp）
   explicit MemorySystem(fs::path ltm_dir = "/tmp/agentos_ltm",
-                        LTMBackend backend = LTMBackend::FileBased)
-      : working_(std::make_unique<WorkingMemory>(32)),
-        short_term_(std::make_unique<ShortTermMemory>(512)),
-        graph_(std::make_unique<LocalGraphMemory>(ltm_dir)) {
-    // 根据后端类型创建 LTM（都实现 IMemoryStore 接口，可热切换）
-    if (backend == LTMBackend::FileBased) {
-      long_term_ = std::make_unique<LongTermMemory>(std::move(ltm_dir));
-    } else {
-      // SQLite 后端通过外部注入（见 set_long_term_store）
-      long_term_ = std::make_unique<LongTermMemory>(std::move(ltm_dir));
-    }
-  }
+                        LTMBackend backend = LTMBackend::FileBased);
 
   // 高级构造：注入自定义 LTM 后端（如 SQLiteLongTermMemory）
   MemorySystem(fs::path ltm_dir, std::unique_ptr<IMemoryStore> custom_ltm)

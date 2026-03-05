@@ -29,13 +29,70 @@ TEST_F(LLMKernelTest, MockBackendTokenLimits) {
   // test the interface correctness and ensure no crashes happen.
   EXPECT_FALSE(res->content.empty());
 
-  // Test embedding interface (Mock backend doesn't implement embed by default,
-  // it returns error)
+  // Test embedding interface — MockBackend now generates deterministic vectors
   EmbeddingRequest ereq;
   ereq.inputs = {"test string"};
   auto emb_res = mock.embed(ereq);
-  ASSERT_FALSE(
-      emb_res); // Expected to fail with "Embedding not implicitly supported"
+  ASSERT_TRUE(emb_res);
+  ASSERT_EQ(emb_res->embeddings.size(), 1u);
+  EXPECT_EQ(emb_res->embeddings[0].size(), 1536u); // default dim
+}
+
+// ── MockBackend embed() 测试 ──────────────────────────────
+
+TEST_F(LLMKernelTest, MockEmbedDeterministic) {
+  MockLLMBackend mock;
+  EmbeddingRequest req;
+  req.inputs = {"hello world"};
+
+  auto r1 = mock.embed(req);
+  auto r2 = mock.embed(req);
+  ASSERT_TRUE(r1);
+  ASSERT_TRUE(r2);
+  // 同一输入生成的向量应完全相同
+  EXPECT_EQ(r1->embeddings[0], r2->embeddings[0]);
+}
+
+TEST_F(LLMKernelTest, MockEmbedNormalized) {
+  MockLLMBackend mock;
+  mock.set_embed_dim(128); // 小维度，加速测试
+  EmbeddingRequest req;
+  req.inputs = {"test normalization"};
+
+  auto res = mock.embed(req);
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->embeddings[0].size(), 128u);
+
+  // 验证 L2 归一化：||v|| ≈ 1.0
+  float norm_sq = 0.0f;
+  for (float v : res->embeddings[0])
+    norm_sq += v * v;
+  EXPECT_NEAR(norm_sq, 1.0f, 1e-4f);
+}
+
+TEST_F(LLMKernelTest, MockEmbedMultipleInputs) {
+  MockLLMBackend mock;
+  mock.set_embed_dim(64);
+  EmbeddingRequest req;
+  req.inputs = {"alpha", "beta", "gamma"};
+
+  auto res = mock.embed(req);
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->embeddings.size(), 3u);
+
+  // 不同输入产生不同向量
+  EXPECT_NE(res->embeddings[0], res->embeddings[1]);
+  EXPECT_NE(res->embeddings[1], res->embeddings[2]);
+}
+
+TEST_F(LLMKernelTest, MockEmbedTokenAccounting) {
+  MockLLMBackend mock;
+  EmbeddingRequest req;
+  req.inputs = {"short", "a longer test sentence for token estimation"};
+
+  auto res = mock.embed(req);
+  ASSERT_TRUE(res);
+  EXPECT_GT(res->total_tokens, 0u);
 }
 
 TEST_F(LLMKernelTest, MessageConstruction) {

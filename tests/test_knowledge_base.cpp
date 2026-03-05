@@ -181,3 +181,84 @@ TEST(KnowledgeBaseTest, LoadNonexistentReturnsFalse) {
   KnowledgeBase kb(mock_llm, 1536);
   EXPECT_FALSE(kb.load("/tmp/nonexistent_kb_dir_42"));
 }
+
+// ── 文档删除测试 ──────────────────────────────
+TEST(KnowledgeBaseTest, RemoveDocumentRemovesChunks) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  kb.ingest_text("doc_to_remove", "Content about Apple products.");
+  kb.ingest_text("doc_keep", "Content about banana smoothies.");
+
+  EXPECT_EQ(kb.document_count(), 2);
+  EXPECT_GE(kb.chunk_count(), 2);
+
+  // 删除 doc_to_remove
+  EXPECT_TRUE(kb.remove_document("doc_to_remove"));
+
+  // 搜索应不再返回已删除文档
+  auto results = kb.search("Apple products", 5);
+  for (const auto &r : results) {
+    EXPECT_NE(r.doc_id, "doc_to_remove");
+  }
+
+  // 保留的文档仍可搜到
+  auto banana_results = kb.search("banana smoothies", 1);
+  ASSERT_FALSE(banana_results.empty());
+  EXPECT_EQ(banana_results[0].doc_id, "doc_keep");
+}
+
+TEST(KnowledgeBaseTest, RemoveNonexistentDocReturnsFalse) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+  EXPECT_FALSE(kb.remove_document("nonexistent_doc"));
+}
+
+// ── 可配置 embedding 模型测试 ──────────────────
+TEST(KnowledgeBaseTest, EmbeddingModelConfigurable) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536, 100000, "custom-model-v1");
+
+  EXPECT_EQ(kb.embedding_model(), "custom-model-v1");
+
+  kb.set_embedding_model("custom-model-v2");
+  EXPECT_EQ(kb.embedding_model(), "custom-model-v2");
+}
+
+// ── 可配置分块参数测试 ──────────────────────────
+TEST(KnowledgeBaseTest, ChunkConfigurable) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  // 默认值
+  EXPECT_EQ(kb.chunk_size(), 500u);
+  EXPECT_EQ(kb.chunk_overlap(), 50u);
+
+  // 修改
+  kb.set_chunk_params(200, 30);
+  EXPECT_EQ(kb.chunk_size(), 200u);
+  EXPECT_EQ(kb.chunk_overlap(), 30u);
+
+  // 小 chunk 会产生更多分块
+  std::string long_text =
+      "This is a sentence about apples. Another sentence about bananas. "
+      "More text about oranges. Some content about grapes. Final words about "
+      "pears and melons for testing the chunking mechanism.";
+  kb.ingest_text("chunked_doc", long_text);
+  EXPECT_GE(kb.chunk_count(), 1u);
+}
+
+// ── 统计方法测试 ──────────────────────────────
+TEST(KnowledgeBaseTest, DocumentAndChunkCounts) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  EXPECT_EQ(kb.document_count(), 0u);
+  EXPECT_EQ(kb.chunk_count(), 0u);
+
+  kb.ingest_text("d1", "First document.");
+  kb.ingest_text("d2", "Second document.");
+
+  EXPECT_EQ(kb.document_count(), 2u);
+  EXPECT_GE(kb.chunk_count(), 2u);
+}
