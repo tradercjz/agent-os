@@ -66,6 +66,6 @@ TEST_F(MemorySystemTest, EmptyEmbeddingGracefulHandling) {
   auto res = mem_sys_->recall(empty_emb, {}, 5);
   ASSERT_TRUE(res);
   ASSERT_EQ(res->size(),
-            2); // 1 from STM, 1 from LTM since default importance = 0.8
+            2); // 1 from WM + 1 from STM（importance=0.5 < 0.7 阈值，不写入 LTM）
   EXPECT_EQ(res->front().entry.content, "Text only");
 }

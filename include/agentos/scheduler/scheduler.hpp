@@ -247,12 +247,12 @@ public:
 
     // 提交任务
     Result<TaskId> submit(TaskPtr task) {
-        // 验证依赖
+        // 先注册节点，再添加依赖边（否则 add_task 会覆盖 deps）
+        dep_graph_.add_task(task->id, task->priority);
         for (TaskId dep : task->depends_on) {
             auto res = dep_graph_.add_dependency(task->id, dep);
             if (!res) return make_unexpected(res.error());
         }
-        dep_graph_.add_task(task->id, task->priority);
 
         {
             std::lock_guard lk(mu_);

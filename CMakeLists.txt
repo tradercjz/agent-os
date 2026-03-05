@@ -74,11 +74,16 @@ target_link_libraries(graph_demo PRIVATE agentos)
 # ---- Tests ----
 enable_testing()
 add_executable(
-  test_agentos 
+  test_agentos
   tests/test_graph_memory.cpp
   tests/test_llm_kernel.cpp
   tests/test_memory_system.cpp
   tests/test_tool_manager.cpp
+  tests/test_scheduler.cpp
+  tests/test_context.cpp
+  tests/test_security.cpp
+  tests/test_bus.cpp
+  tests/test_agent.cpp
 )
 target_link_libraries(test_agentos PRIVATE agentos GTest::gtest_main GTest::gtest)
 include(GoogleTest)
