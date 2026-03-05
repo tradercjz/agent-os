@@ -71,7 +71,14 @@ target_link_libraries(openai_demo PRIVATE agentos)
 add_executable(graph_demo examples/graph_demo.cpp)
 target_link_libraries(graph_demo PRIVATE agentos)
 
+# ---- CSR Graph Engine Demo ----
+add_executable(csr_graph_demo examples/csr_graph_demo.cpp)
+target_link_libraries(csr_graph_demo PRIVATE agentos)
+
 # ---- Tests ----
+add_executable(benchmark_csr_graph tests/benchmark_csr_graph.cpp)
+target_link_libraries(benchmark_csr_graph PRIVATE agentos)
+
 enable_testing()
 add_executable(
   test_agentos
@@ -84,6 +91,7 @@ add_executable(
   tests/test_security.cpp
   tests/test_bus.cpp
   tests/test_agent.cpp
+  tests/test_csr_graph.cpp
 )
 target_link_libraries(test_agentos PRIVATE agentos GTest::gtest_main GTest::gtest)
 include(GoogleTest)
