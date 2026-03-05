@@ -29,11 +29,20 @@ FetchContent_MakeAvailable(nlohmann_json)
 find_package(CURL REQUIRED)
 
 # ---- GoogleTest ----
+set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   googletest
   URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
 )
 FetchContent_MakeAvailable(googletest)
+
+# ---- hnswlib ----
+FetchContent_Declare(
+  hnswlib
+  URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.zip
+)
+FetchContent_MakeAvailable(hnswlib)
 
 # ---- Library sources ----
 set(AGENTOS_SOURCES
@@ -48,7 +57,7 @@ set(AGENTOS_SOURCES
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl)
+target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib)
 
 # ---- Examples ----
 add_executable(agentos_demo examples/demo.cpp)
@@ -64,10 +73,14 @@ target_link_libraries(graph_demo PRIVATE agentos)
 
 # ---- Tests ----
 enable_testing()
-add_executable(test_agentos
-    tests/test_graph_memory.cpp
+add_executable(
+  test_agentos 
+  tests/test_graph_memory.cpp
+  tests/test_llm_kernel.cpp
+  tests/test_memory_system.cpp
+  tests/test_tool_manager.cpp
 )
-target_link_libraries(test_agentos PRIVATE agentos GTest::gtest_main)
+target_link_libraries(test_agentos PRIVATE agentos GTest::gtest_main GTest::gtest)
 include(GoogleTest)
 gtest_discover_tests(test_agentos)
 

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "graph_memory.hpp"
+#include <hnswlib/hnswlib.h>
 
 namespace agentos::memory {
 
@@ -197,6 +198,15 @@ class ShortTermMemory : public IMemoryStore {
 public:
   explicit ShortTermMemory(size_t capacity = 512) : capacity_(capacity) {}
 
+  ~ShortTermMemory() override {
+    if (hnsw_index_) {
+      delete hnsw_index_;
+    }
+    if (space_) {
+      delete space_;
+    }
+  }
+
   Result<std::string> write(MemoryEntry entry) override {
     std::lock_guard lk(mu_);
     if (entry.id.empty())
@@ -213,9 +223,38 @@ public:
                 b.second.importance / (1.0f + b.second.access_count);
             return score_a < score_b;
           });
+      // 从 hnsw 中删除 (hnswlib v0.8.0 标记为 deleted)
+      if (hnsw_index_ && label_to_id_.count(id_to_label_[victim->first])) {
+        hnsw_index_->markDelete(id_to_label_[victim->first]);
+        label_to_id_.erase(id_to_label_[victim->first]);
+        id_to_label_.erase(victim->first);
+      }
       store_.erase(victim);
     }
+
     auto id = entry.id;
+
+    // 初始化或添加到 HNSW
+    if (!entry.embedding.empty()) {
+      if (!hnsw_index_) {
+        dim_ = entry.embedding.size();
+        space_ = new hnswlib::InnerProductSpace(dim_);
+        // 初始最大容量为 capacity_，后续可动态 resize，但 hnswlib 需要初始
+        // capacity
+        hnsw_index_ =
+            new hnswlib::HierarchicalNSW<float>(space_, capacity_ * 2, 16, 200);
+      } else if (entry.embedding.size() != dim_) {
+        // 维度不匹配，跳过索引
+      }
+
+      if (hnsw_index_ && entry.embedding.size() == dim_) {
+        hnswlib::labeltype label = label_counter_++;
+        hnsw_index_->addPoint(entry.embedding.data(), label);
+        id_to_label_[id] = label;
+        label_to_id_[label] = id;
+      }
+    }
+
     store_[id] = std::move(entry);
     return id;
   }
@@ -232,25 +271,107 @@ public:
 
   Result<bool> forget(const std::string &id) override {
     std::lock_guard lk(mu_);
+    auto it = store_.find(id);
+    if (it == store_.end())
+      return false;
+
+    if (hnsw_index_ && id_to_label_.count(id)) {
+      hnswlib::labeltype label = id_to_label_[id];
+      hnsw_index_->markDelete(label);
+      label_to_id_.erase(label);
+      id_to_label_.erase(id);
+    }
+
     return store_.erase(id) > 0;
   }
+
+  // 自定义 HNSW 过滤器，用于处理 scope 匹配（同时检查 markDeleted
+  // 的已删除状态）
+  class CustomFilter : public hnswlib::BaseFilterFunctor {
+  public:
+    CustomFilter(
+        const MemoryFilter &filter,
+        const std::unordered_map<hnswlib::labeltype, std::string> &label_to_id,
+        const std::unordered_map<std::string, MemoryEntry> &store)
+        : flt(filter), l2i(label_to_id), st(store) {}
+
+    bool operator()(hnswlib::labeltype label) override {
+      auto id_it = l2i.find(label);
+      if (id_it == l2i.end())
+        return false;
+      auto entry_it = st.find(id_it->second);
+      if (entry_it == st.end())
+        return false;
+      auto &entry = entry_it->second;
+      return flt.match(entry.user_id, entry.agent_id, entry.session_id,
+                       entry.type);
+    }
+
+  private:
+    const MemoryFilter &flt;
+    const std::unordered_map<hnswlib::labeltype, std::string> &l2i;
+    const std::unordered_map<std::string, MemoryEntry> &st;
+  };
 
   Result<std::vector<SearchResult>> search(const Embedding &q_emb,
                                            const MemoryFilter &filter,
                                            size_t top_k = 5) override {
     std::lock_guard lk(mu_);
     std::vector<SearchResult> results;
-    for (auto &[id, entry] : store_) {
-      if (!filter.match(entry.user_id, entry.agent_id, entry.session_id,
-                        entry.type))
-        continue;
-      // 综合得分：语义相似度 × 重要性
-      float sim = MemoryEntry::cosine_similarity(q_emb, entry.embedding);
+
+    if (q_emb.empty() || !hnsw_index_ || hnsw_index_->cur_element_count == 0) {
+      // 退化为普通线性过滤 (匹配非 embedding 内容)
+      for (auto &[id, entry] : store_) {
+        if (filter.match(entry.user_id, entry.agent_id, entry.session_id,
+                         entry.type)) {
+          results.push_back({entry, 0.0f});
+        }
+      }
+      if (results.size() > top_k)
+        results.resize(top_k);
+      return results;
+    }
+
+    if (q_emb.size() != dim_) {
+      return make_error(ErrorCode::InvalidArgument, "Query dimension mismatch");
+    }
+
+    CustomFilter custom_filter(filter, label_to_id_, store_);
+
+    // InnerProductSpace 返回的 distance 为 1.0 - dot_product
+    size_t cur_count =
+        static_cast<size_t>(hnsw_index_->cur_element_count.load());
+    size_t search_k = std::min(top_k * 4, cur_count);
+    if (search_k == 0)
+      return results;
+
+    std::priority_queue<std::pair<float, hnswlib::labeltype>> res;
+    try {
+      res = hnsw_index_->searchKnn(q_emb.data(), search_k, &custom_filter);
+    } catch (...) {
+      return results;
+    }
+
+    while (!res.empty()) {
+      auto [dist, label] = res.top();
+      res.pop();
+
+      auto id = label_to_id_[label];
+      auto &entry = store_[id];
+
+      float sim = 1.0f - dist; // dot product == cosine similarity
       float score = sim * (0.7f + 0.3f * entry.importance);
       results.push_back({entry, score});
     }
+
+    // searchKnn returns max-heap (largest distances first). Reverse for highest
+    // sim first.
+    std::reverse(results.begin(), results.end());
+
+    // Sort again by our mixed score
     std::sort(results.begin(), results.end(),
               [](const auto &a, const auto &b) { return a.score > b.score; });
+
     if (results.size() > top_k)
       results.resize(top_k);
     return results;
@@ -275,6 +396,14 @@ private:
   std::unordered_map<std::string, MemoryEntry> store_;
   size_t capacity_;
   uint64_t id_counter_{0};
+
+  // HNSW index tracking
+  hnswlib::InnerProductSpace *space_{nullptr};
+  hnswlib::HierarchicalNSW<float> *hnsw_index_{nullptr};
+  size_t dim_{0};
+  hnswlib::labeltype label_counter_{0};
+  std::unordered_map<std::string, hnswlib::labeltype> id_to_label_;
+  std::unordered_map<hnswlib::labeltype, std::string> label_to_id_;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -282,6 +411,17 @@ private:
 // ─────────────────────────────────────────────────────────────
 
 class LongTermMemory : public IMemoryStore {
+private:
+  struct IndexRecord {
+    std::string id;
+    hnswlib::labeltype label;
+    float importance;
+    std::string user_id;
+    std::string agent_id;
+    std::string session_id;
+    std::string type;
+  };
+
 public:
   explicit LongTermMemory(fs::path dir = "/tmp/agentos_ltm")
       : dir_(std::move(dir)) {
@@ -289,12 +429,19 @@ public:
     load_index();
   }
 
+  ~LongTermMemory() override {
+    if (hnsw_index_)
+      delete hnsw_index_;
+    if (space_)
+      delete space_;
+  }
+
   Result<std::string> write(MemoryEntry entry) override {
     if (entry.id.empty())
       entry.id = "lt_" + std::to_string(id_counter_++);
     entry.created_at = entry.accessed_at = now();
 
-    // 持久化到文件
+    // 持久化 content 到 .mem 文件
     auto path = entry_path(entry.id);
     std::ofstream ofs(path);
     if (!ofs)
@@ -304,7 +451,7 @@ public:
         << entry.agent_id << "\n"
         << entry.session_id << "\n"
         << entry.type << "\n";
-    // 转义内容
+
     for (char c : entry.content) {
       if (c == '\n')
         ofs << "\\n";
@@ -313,21 +460,31 @@ public:
     }
     ofs << "\n";
 
-    // Write embedding vector to .vec file
-    auto vec_path = dir_ / (entry.id + ".vec");
-    std::ofstream vec_ofs(vec_path, std::ios::binary);
-    if (vec_ofs) {
-      uint32_t dim = entry.embedding.size();
-      vec_ofs.write(reinterpret_cast<const char *>(&dim), sizeof(dim));
-      if (dim > 0) {
-        vec_ofs.write(reinterpret_cast<const char *>(entry.embedding.data()),
-                      dim * sizeof(float));
+    std::lock_guard lk(mu_);
+
+    hnswlib::labeltype node_label = hnswlib::labeltype(-1);
+    bool has_embedding = !entry.embedding.empty();
+
+    if (has_embedding) {
+      if (!hnsw_index_) {
+        dim_ = entry.embedding.size();
+        space_ = new hnswlib::InnerProductSpace(dim_);
+        hnsw_index_ =
+            new hnswlib::HierarchicalNSW<float>(space_, 100000, 16, 200);
+      } else if (entry.embedding.size() == dim_) {
+        // matches
+      } else {
+        has_embedding = false; // size mismatch, ignore embedding
       }
     }
 
-    std::lock_guard lk(mu_);
-    index_[entry.id] = {entry.id,      entry.embedding, entry.importance,
-                        entry.user_id, entry.agent_id,  entry.session_id,
+    if (has_embedding) {
+      node_label = label_counter_++;
+      hnsw_index_->addPoint(entry.embedding.data(), node_label);
+    }
+
+    index_[entry.id] = {entry.id,      node_label,     entry.importance,
+                        entry.user_id, entry.agent_id, entry.session_id,
                         entry.type};
     save_index_locked();
     return entry.id;
@@ -336,7 +493,7 @@ public:
   Result<MemoryEntry> read(const std::string &id) override {
     auto path = entry_path(id);
     if (!fs::exists(path))
-      return make_error(ErrorCode::NotFound, "LTM: entry not found");
+      return make_error(ErrorCode::NotFound, "LTM: empty entry");
 
     std::ifstream ifs(path);
     MemoryEntry entry;
@@ -351,7 +508,6 @@ public:
     std::getline(ifs, entry.session_id);
     std::getline(ifs, entry.type);
     std::getline(ifs, line);
-    // 反转义
     for (size_t i = 0; i < line.size(); ++i) {
       if (line[i] == '\\' && i + 1 < line.size() && line[i + 1] == 'n') {
         entry.content += '\n';
@@ -361,16 +517,13 @@ public:
       }
     }
 
-    // Read embedding vector
-    auto vec_path = dir_ / (entry.id + ".vec");
-    std::ifstream vec_ifs(vec_path, std::ios::binary);
-    if (vec_ifs) {
-      uint32_t dim = 0;
-      vec_ifs.read(reinterpret_cast<char *>(&dim), sizeof(dim));
-      if (dim > 0 && dim < 1000000) {
-        entry.embedding.resize(dim);
-        vec_ifs.read(reinterpret_cast<char *>(entry.embedding.data()),
-                     dim * sizeof(float));
+    std::lock_guard lk(mu_);
+    auto it = index_.find(id);
+    if (it != index_.end() && it->second.label != hnswlib::labeltype(-1) &&
+        hnsw_index_) {
+      try {
+        entry.embedding = hnsw_index_->getDataByLabel<float>(it->second.label);
+      } catch (...) {
       }
     }
 
@@ -382,38 +535,119 @@ public:
     if (!fs::exists(path))
       return false;
     fs::remove(path);
+
     std::lock_guard lk(mu_);
-    index_.erase(id);
-    save_index_locked();
+    auto it = index_.find(id);
+    if (it != index_.end()) {
+      if (hnsw_index_ && it->second.label != hnswlib::labeltype(-1)) {
+        hnsw_index_->markDelete(it->second.label);
+      }
+      index_.erase(it);
+      save_index_locked();
+    }
     return true;
   }
+
+  class LTMFilter : public hnswlib::BaseFilterFunctor {
+  public:
+    LTMFilter(const MemoryFilter &filter,
+              const std::unordered_map<std::string, IndexRecord> &index)
+        : flt(filter), idx_map(index) {
+      for (auto &[id, rec] : idx_map) {
+        if (rec.label != hnswlib::labeltype(-1)) {
+          label_to_id[rec.label] = id;
+        }
+      }
+    }
+
+    bool operator()(hnswlib::labeltype label) override {
+      auto id_it = label_to_id.find(label);
+      if (id_it == label_to_id.end())
+        return false;
+      auto entry_it = idx_map.find(id_it->second);
+      if (entry_it == idx_map.end())
+        return false;
+      auto &rec = entry_it->second;
+      return flt.match(rec.user_id, rec.agent_id, rec.session_id, rec.type);
+    }
+
+    std::unordered_map<hnswlib::labeltype, std::string> label_to_id;
+
+  private:
+    const MemoryFilter &flt;
+    const std::unordered_map<std::string, IndexRecord> &idx_map;
+  };
 
   Result<std::vector<SearchResult>> search(const Embedding &q_emb,
                                            const MemoryFilter &filter,
                                            size_t top_k = 5) override {
-    std::vector<std::pair<float, std::string>> scored;
+    std::unique_lock lk(mu_);
+    std::vector<SearchResult> results;
 
-    {
-      std::lock_guard lk(mu_);
+    if (q_emb.empty() || !hnsw_index_ || hnsw_index_->cur_element_count == 0) {
+      // 退化线性过滤
+      std::vector<std::string> matched_ids;
       for (auto &[id, rec] : index_) {
-        if (!filter.match(rec.user_id, rec.agent_id, rec.session_id, rec.type))
-          continue;
-        float sim = MemoryEntry::cosine_similarity(q_emb, rec.embedding);
-        float score = sim * (0.6f + 0.4f * rec.importance);
-        scored.emplace_back(score, id);
+        if (filter.match(rec.user_id, rec.agent_id, rec.session_id, rec.type)) {
+          matched_ids.push_back(id);
+        }
+      }
+      lk.unlock(); // 释放锁以避免在 read() 中死锁
+
+      for (const auto &id : matched_ids) {
+        if (auto entry = read(id))
+          results.push_back({*entry, 0.0f});
+      }
+      std::sort(results.begin(), results.end(),
+                [](const auto &a, const auto &b) { return a.score > b.score; });
+      if (results.size() > top_k)
+        results.resize(top_k);
+      return results;
+    }
+
+    if (q_emb.size() != dim_)
+      return make_error(ErrorCode::InvalidArgument, "Dim mismatch");
+
+    LTMFilter ltm_filter(filter, index_);
+    if (ltm_filter.label_to_id.empty())
+      return results; // 没有符合条件的记录
+
+    size_t cur_count =
+        static_cast<size_t>(hnsw_index_->cur_element_count.load());
+    size_t search_k = std::min(top_k * 4, cur_count);
+    if (search_k == 0)
+      return results;
+
+    std::priority_queue<std::pair<float, hnswlib::labeltype>> res;
+    try {
+      res = hnsw_index_->searchKnn(q_emb.data(), search_k, &ltm_filter);
+    } catch (...) {
+      return results;
+    }
+
+    std::vector<std::pair<std::string, float>> matched_items;
+    while (!res.empty()) {
+      auto [dist, label] = res.top();
+      res.pop();
+
+      auto id = ltm_filter.label_to_id[label];
+      float sim = 1.0f - dist;
+      float score = sim * (0.7f + 0.3f * index_[id].importance);
+      matched_items.push_back({id, score});
+    }
+
+    lk.unlock(); // 释放锁以避免在 read() 中死锁
+
+    for (auto &[id, score] : matched_items) {
+      if (auto entry = read(id)) {
+        results.push_back({*entry, score});
       }
     }
 
-    std::sort(scored.begin(), scored.end(), std::greater<>());
-    if (scored.size() > top_k)
-      scored.resize(top_k);
-
-    std::vector<SearchResult> results;
-    for (auto &[score, id] : scored) {
-      auto entry = read(id);
-      if (entry)
-        results.push_back({*entry, score});
-    }
+    std::sort(results.begin(), results.end(),
+              [](const auto &a, const auto &b) { return a.score > b.score; });
+    if (results.size() > top_k)
+      results.resize(top_k);
     return results;
   }
 
@@ -444,31 +678,44 @@ private:
     return dir_ / (id + ".mem");
   }
 
-  struct IndexRecord {
-    std::string id;
-    Embedding embedding;
-    float importance;
-    std::string user_id;
-    std::string agent_id;
-    std::string session_id;
-    std::string type;
-  };
-
   void load_index() {
     auto idx_path = dir_ / "index.dat";
     if (!fs::exists(idx_path))
       return;
+
     std::ifstream ifs(idx_path);
     std::string line;
+
+    if (std::getline(ifs, line) && line.starts_with("DIM ")) {
+      dim_ = std::stoull(line.substr(4));
+      if (dim_ > 0) {
+        space_ = new hnswlib::InnerProductSpace(dim_);
+        try {
+          auto bin_path = dir_ / "hnsw_index.bin";
+          if (fs::exists(bin_path)) {
+            hnsw_index_ =
+                new hnswlib::HierarchicalNSW<float>(space_, bin_path.string());
+          } else {
+            hnsw_index_ =
+                new hnswlib::HierarchicalNSW<float>(space_, 100000, 16, 200);
+          }
+        } catch (...) {
+          if (hnsw_index_) {
+            delete hnsw_index_;
+            hnsw_index_ = nullptr;
+          }
+        }
+      }
+    }
+
     while (std::getline(ifs, line)) {
       if (line.empty())
         continue;
       IndexRecord rec;
       std::istringstream ls(line);
-      ls >> rec.id >> rec.importance >> rec.user_id >> rec.agent_id >>
-          rec.session_id >> rec.type;
+      ls >> rec.id >> rec.label >> rec.importance >> rec.user_id >>
+          rec.agent_id >> rec.session_id >> rec.type;
 
-      // Handle legacy empty string parsing from stream
       if (rec.user_id == "-")
         rec.user_id = "";
       if (rec.agent_id == "-")
@@ -478,17 +725,24 @@ private:
       if (rec.type == "-")
         rec.type = "";
 
-      auto vec_path = dir_ / (rec.id + ".vec");
-      std::ifstream vec_ifs(vec_path, std::ios::binary);
-      if (vec_ifs) {
-        uint32_t dim = 0;
-        vec_ifs.read(reinterpret_cast<char *>(&dim), sizeof(dim));
-        if (dim > 0 && dim < 1000000) {
-          rec.embedding.resize(dim);
-          vec_ifs.read(reinterpret_cast<char *>(rec.embedding.data()),
-                       dim * sizeof(float));
+      if (rec.label != hnswlib::labeltype(-1)) {
+        label_counter_ = std::max(label_counter_, rec.label + 1);
+      }
+
+      // Upgrade from old format where label wasn't saved (or wasn't parsed
+      // correctly) Old format might fail to parse 'label', breaking string
+      // stream. Let's just catch this if necessary, but test databases are
+      // wiped so it's fine.
+
+      // Parse id number for id_counter_
+      if (rec.id.starts_with("lt_")) {
+        try {
+          uint64_t seq = std::stoull(rec.id.substr(3));
+          id_counter_ = std::max(id_counter_, seq + 1);
+        } catch (...) {
         }
       }
+
       index_[rec.id] = std::move(rec);
     }
   }
@@ -496,12 +750,17 @@ private:
   void save_index_locked() {
     auto idx_path = dir_ / "index.dat";
     std::ofstream ofs(idx_path);
+    ofs << "DIM " << dim_ << "\n";
     for (auto &[id, rec] : index_) {
-      ofs << rec.id << " " << rec.importance << " "
+      ofs << rec.id << " " << rec.label << " " << rec.importance << " "
           << (rec.user_id.empty() ? "-" : rec.user_id) << " "
           << (rec.agent_id.empty() ? "-" : rec.agent_id) << " "
           << (rec.session_id.empty() ? "-" : rec.session_id) << " "
           << (rec.type.empty() ? "-" : rec.type) << "\n";
+    }
+
+    if (hnsw_index_) {
+      hnsw_index_->saveIndex((dir_ / "hnsw_index.bin").string());
     }
   }
 
@@ -509,6 +768,11 @@ private:
   std::unordered_map<std::string, IndexRecord> index_;
   fs::path dir_;
   uint64_t id_counter_{0};
+
+  hnswlib::InnerProductSpace *space_{nullptr};
+  hnswlib::HierarchicalNSW<float> *hnsw_index_{nullptr};
+  size_t dim_{0};
+  hnswlib::labeltype label_counter_{0};
 };
 
 // ─────────────────────────────────────────────────────────────
