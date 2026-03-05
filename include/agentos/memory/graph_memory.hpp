@@ -299,24 +299,29 @@ private:
       if (line.empty())
         continue;
       auto parts = split(line, ',');
-      if (parts.size() > 0) {
-        if (parts[0] == "N" && parts.size() >= 5) {
-          GraphNode n;
-          n.id = unescape(parts[1]);
-          n.type = unescape(parts[2]);
-          n.content = unescape(parts[3]);
-          n.created_at = std::stoull(parts[4]);
-          nodes_[n.id] = n;
-        } else if (parts[0] == "E" && parts.size() >= 7) {
-          GraphEdge e;
-          e.source_id = unescape(parts[1]);
-          e.target_id = unescape(parts[2]);
-          e.relation = unescape(parts[3]);
-          e.weight = std::stof(parts[4]);
-          e.start_ts = std::stoull(parts[5]);
-          e.end_ts = std::stoull(parts[6]);
-          edges_[e.source_id].push_back(e);
+      try {
+        if (parts.size() > 0) {
+          if (parts[0] == "N" && parts.size() >= 5) {
+            GraphNode n;
+            n.id = unescape(parts[1]);
+            n.type = unescape(parts[2]);
+            n.content = unescape(parts[3]);
+            n.created_at = std::stoull(parts[4]);
+            nodes_[n.id] = n;
+          } else if (parts[0] == "E" && parts.size() >= 7) {
+            GraphEdge e;
+            e.source_id = unescape(parts[1]);
+            e.target_id = unescape(parts[2]);
+            e.relation = unescape(parts[3]);
+            e.weight = std::stof(parts[4]);
+            e.start_ts = std::stoull(parts[5]);
+            e.end_ts = std::stoull(parts[6]);
+            edges_[e.source_id].push_back(e);
+          }
         }
+      } catch (...) {
+        // 跳过 WAL 中损坏的行
+        continue;
       }
     }
   }

@@ -80,7 +80,8 @@ public:
       req.model = "text-embedding-3-small";
 
       auto resp = llm_->embed(req);
-      if (resp && !resp->embeddings.empty()) {
+      if (resp && !resp->embeddings.empty() &&
+          resp->embeddings[0].size() == dim_) {
         // 动态扩容
         if (next_hnsw_id_ >= max_chunks_) {
           max_chunks_ *= 2;

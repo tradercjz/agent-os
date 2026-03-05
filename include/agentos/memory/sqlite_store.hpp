@@ -37,6 +37,7 @@ public:
     exec("PRAGMA synchronous=NORMAL");
     exec("PRAGMA cache_size=-65536"); // 64MB cache
     exec("PRAGMA temp_store=MEMORY");
+    opened_ = true;
     return true;
   }
 
@@ -52,6 +53,7 @@ public:
       sqlite3_close(db_);
       db_ = nullptr;
     }
+    opened_ = false;
   }
 
   ~SQLiteDB() { close(); }
@@ -60,7 +62,8 @@ public:
   SQLiteDB(const SQLiteDB &) = delete;
   SQLiteDB &operator=(const SQLiteDB &) = delete;
 
-  sqlite3 *raw() { return db_; }
+  bool is_open() const { return opened_; }
+  sqlite3 *raw() const { return db_; }
 
   bool exec(const std::string &sql) {
     char *err = nullptr;
@@ -71,8 +74,8 @@ public:
     return rc == SQLITE_OK;
   }
 
-  // 带语句缓存的 prepare
-  sqlite3_stmt *prepare(const std::string &sql) {
+  // 带语句缓存的 prepare（mutable: 语句缓存是逻辑 const 的优化）
+  sqlite3_stmt *prepare(const std::string &sql) const {
     auto it = stmt_cache_.find(sql);
     if (it != stmt_cache_.end()) {
       sqlite3_reset(it->second);
@@ -91,7 +94,8 @@ public:
 
 private:
   sqlite3 *db_{nullptr};
-  std::unordered_map<std::string, sqlite3_stmt *> stmt_cache_;
+  bool opened_{false};
+  mutable std::unordered_map<std::string, sqlite3_stmt *> stmt_cache_;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -120,6 +124,9 @@ public:
 
   Result<std::string> write(MemoryEntry entry) override {
     std::lock_guard lk(mu_);
+
+    if (!db_.is_open())
+      return make_error(ErrorCode::MemoryWriteFailed, "SQLiteLTM: DB not open");
 
     if (entry.id.empty())
       entry.id = "lt_" + std::to_string(id_counter_++);
@@ -272,8 +279,9 @@ public:
 
   size_t size() const override {
     std::lock_guard lk(mu_);
-    auto stmt = const_cast<SQLiteLongTermMemory *>(this)->db_.prepare(
-        "SELECT COUNT(*) FROM entries");
+    if (!db_.is_open())
+      return 0;
+    auto stmt = db_.prepare("SELECT COUNT(*) FROM entries");
     if (!stmt)
       return 0;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -536,48 +544,24 @@ private:
     if (entries_with_emb.empty())
       return;
 
-    // 尝试从 .bin 文件加载（更快），否则从 embedding 重建
+    // 从 SQLite embeddings 重建 HNSW（确保 label 映射一致）
     dim_ = entries_with_emb[0].second.size();
     space_ = std::make_unique<hnswlib::InnerProductSpace>(dim_);
 
-    auto bin_path = dir_ / "hnsw_index.bin";
-    bool loaded_from_bin = false;
+    size_t capacity =
+        std::max(max_elements_, entries_with_emb.size() * 2);
+    hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+        space_.get(), capacity, 16, 200);
 
-    if (fs::exists(bin_path)) {
-      try {
-        hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-            space_.get(), bin_path.string());
-        loaded_from_bin = true;
-      } catch (...) {
-        hnsw_index_.reset();
-      }
-    }
+    for (size_t i = 0; i < entries_with_emb.size(); ++i) {
+      auto &[id, emb] = entries_with_emb[i];
+      if (emb.size() != dim_)
+        continue;
 
-    if (loaded_from_bin) {
-      // 从 bin 加载成功，只需恢复 label 映射
-      // bin 里的 label 和我们当时存的一样，需要重建映射
-      // 为安全起见，直接重建更可靠
-      hnsw_index_.reset();
-      loaded_from_bin = false;
-    }
-
-    if (!loaded_from_bin) {
-      // 从 embeddings 重建
-      size_t capacity =
-          std::max(max_elements_, entries_with_emb.size() * 2);
-      hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-          space_.get(), capacity, 16, 200);
-
-      for (size_t i = 0; i < entries_with_emb.size(); ++i) {
-        auto &[id, emb] = entries_with_emb[i];
-        if (emb.size() != dim_)
-          continue;
-
-        hnswlib::labeltype label = label_counter_++;
-        hnsw_index_->addPoint(emb.data(), label);
-        id_to_label_[id] = label;
-        label_to_id_[label] = id;
-      }
+      hnswlib::labeltype label = label_counter_++;
+      hnsw_index_->addPoint(emb.data(), label);
+      id_to_label_[id] = label;
+      label_to_id_[label] = id;
     }
   }
 

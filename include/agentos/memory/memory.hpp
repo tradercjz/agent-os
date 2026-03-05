@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "graph_memory.hpp"
@@ -870,47 +871,34 @@ public:
     return wm_id;
   }
 
-  // 检索：L0 → L1 → L2 逐层查找
+  // 检索：L0 → L1 → L2 逐层查找（O(n) 去重）
   Result<std::vector<SearchResult>> recall(const Embedding &q_emb,
                                            const MemoryFilter &filter = {},
                                            size_t top_k = 5) {
     std::vector<SearchResult> results;
+    std::unordered_set<std::string> seen_ids; // O(1) 去重
+
+    auto merge = [&](Result<std::vector<SearchResult>> &r) {
+      if (!r)
+        return;
+      for (auto &sr : *r) {
+        if (seen_ids.insert(sr.entry.id).second) {
+          results.push_back(std::move(sr));
+        }
+      }
+    };
 
     // L0 工作记忆
-    if (auto r = working_->search(q_emb, filter, top_k)) {
-      for (auto &sr : *r)
-        results.push_back(sr);
-    }
+    auto r0 = working_->search(q_emb, filter, top_k);
+    merge(r0);
 
-    // L1 短期记忆（去重）
-    if (auto r = short_term_->search(q_emb, filter, top_k)) {
-      for (auto &sr : *r) {
-        bool dup = false;
-        for (auto &existing : results) {
-          if (existing.entry.id == sr.entry.id) {
-            dup = true;
-            break;
-          }
-        }
-        if (!dup)
-          results.push_back(sr);
-      }
-    }
+    // L1 短期记忆
+    auto r1 = short_term_->search(q_emb, filter, top_k);
+    merge(r1);
 
-    // L2 长期记忆（去重）
-    if (auto r = long_term_->search(q_emb, filter, top_k)) {
-      for (auto &sr : *r) {
-        bool dup = false;
-        for (auto &existing : results) {
-          if (existing.entry.id == sr.entry.id) {
-            dup = true;
-            break;
-          }
-        }
-        if (!dup)
-          results.push_back(sr);
-      }
-    }
+    // L2 长期记忆
+    auto r2 = long_term_->search(q_emb, filter, top_k);
+    merge(r2);
 
     // 全局排序取 Top-K
     std::sort(results.begin(), results.end(),

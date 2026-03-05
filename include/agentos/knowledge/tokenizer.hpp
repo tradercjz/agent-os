@@ -1,6 +1,10 @@
 #pragma once
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <cppjieba/Jieba.hpp>
+#pragma GCC diagnostic pop
 #include <memory>
 #include <mutex>
 #include <stdexcept>
