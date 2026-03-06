@@ -243,6 +243,10 @@ public:
       }
 
       if (hnsw_index_ && entry.embedding.size() == dim_) {
+        // 容量不足时动态扩容（与 LTM 一致）
+        if (hnsw_index_->cur_element_count >= hnsw_index_->max_elements_) {
+          hnsw_index_->resizeIndex(hnsw_index_->max_elements_ * 2);
+        }
         hnswlib::labeltype label = label_counter_++;
         hnsw_index_->addPoint(entry.embedding.data(), label);
         id_to_label_[id] = label;
@@ -426,6 +430,18 @@ public:
     load_index();
   }
 
+  ~LongTermMemory() {
+    // 析构时自动落盘脏索引
+    std::lock_guard lk(mu_);
+    if (index_dirty_) save_index_locked();
+  }
+
+  /// 显式刷新索引到磁盘（批量写入后调用）
+  void flush() {
+    std::lock_guard lk(mu_);
+    if (index_dirty_) save_index_locked();
+  }
+
   Result<std::string> write(MemoryEntry entry) override {
     if (entry.id.empty())
       entry.id = "lt_" + std::to_string(id_counter_++);
@@ -479,7 +495,7 @@ public:
     index_[entry.id] = {entry.id,      node_label,     entry.importance,
                         entry.user_id, entry.agent_id, entry.session_id,
                         entry.type};
-    save_index_locked();
+    index_dirty_ = true; // 延迟落盘，批量写入时避免 O(N²)
     return entry.id;
   }
 
@@ -723,6 +739,7 @@ private:
   }
 
   void save_index_locked() {
+    index_dirty_ = false;
     auto idx_path = dir_ / "index.dat";
     std::ofstream ofs(idx_path);
     ofs << "DIM " << dim_ << "\n";
@@ -744,6 +761,7 @@ private:
   fs::path dir_;
   uint64_t id_counter_{0};
   size_t max_elements_;
+  bool index_dirty_{false}; // 延迟索引落盘标记
 
   // HNSW 索引（unique_ptr 自动管理生命周期）
   std::unique_ptr<hnswlib::InnerProductSpace> space_;

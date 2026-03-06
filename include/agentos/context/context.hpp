@@ -269,6 +269,8 @@ public:
 
   // 从磁盘恢复上下文（断点续传）
   Result<void> restore(AgentId agent_id) {
+    std::lock_guard lk(mu_); // 锁覆盖整个操作（含文件 I/O），防止并发修改
+
     fs::path path = snapshot_dir_ / fmt::format("agent_{}_snap.txt", agent_id);
     if (!fs::exists(path))
       return make_error(ErrorCode::NotFound,
@@ -281,7 +283,6 @@ public:
     if (!snap)
       return make_error(ErrorCode::MemoryReadFailed, "Snapshot parse failed");
 
-    std::lock_guard lk(mu_);
     auto &win = windows_.emplace(agent_id, ContextWindow{8192}).first->second;
     win.reset();
     for (auto &m : snap->messages)

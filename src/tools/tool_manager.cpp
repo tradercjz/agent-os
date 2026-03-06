@@ -52,6 +52,15 @@ static size_t curl_write_callback(void *contents, size_t size, size_t nmemb,
   return new_len;
 }
 
+// RAII wrapper for CURL handle，避免异常时泄漏
+struct CurlGuard {
+  CURL *handle;
+  explicit CurlGuard(CURL *h) : handle(h) {}
+  ~CurlGuard() { if (handle) curl_easy_cleanup(handle); }
+  CurlGuard(const CurlGuard &) = delete;
+  CurlGuard &operator=(const CurlGuard &) = delete;
+};
+
 ToolResult HttpFetchTool::execute(const ParsedArgs &args) {
   auto url = args.get("url");
   if (url.empty())
@@ -59,23 +68,23 @@ ToolResult HttpFetchTool::execute(const ParsedArgs &args) {
   if (url.substr(0, 4) != "http")
     return ToolResult::fail("Only http/https URLs are allowed");
 
-  CURL *curl = curl_easy_init();
-  if (!curl)
+  CURL *raw = curl_easy_init();
+  if (!raw)
     return ToolResult::fail("Failed to initialize libcurl");
+  CurlGuard guard(raw); // RAII 保证 cleanup
 
   std::string output;
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &output);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);       // 10s 超时
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); // 允许重定向
-  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
+  curl_easy_setopt(raw, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(raw, CURLOPT_WRITEFUNCTION, curl_write_callback);
+  curl_easy_setopt(raw, CURLOPT_WRITEDATA, &output);
+  curl_easy_setopt(raw, CURLOPT_TIMEOUT, 10L);       // 10s 超时
+  curl_easy_setopt(raw, CURLOPT_FOLLOWLOCATION, 1L); // 允许重定向
+  curl_easy_setopt(raw, CURLOPT_MAXREDIRS, 3L);
 
-  CURLcode res = curl_easy_perform(curl);
+  CURLcode res = curl_easy_perform(raw);
 
-  long response_code;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-  curl_easy_cleanup(curl);
+  long response_code = 0;
+  curl_easy_getinfo(raw, CURLINFO_RESPONSE_CODE, &response_code);
 
   if (res != CURLE_OK && res != CURLE_WRITE_ERROR) {
     return ToolResult::fail(fmt::format(

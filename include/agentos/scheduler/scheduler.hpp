@@ -74,11 +74,19 @@ public:
         std::vector<TaskId> newly_ready;
         for (auto& [tid, node] : nodes_) {
             if (completed_.count(tid)) continue;
+            if (enqueued_.count(tid)) continue; // 已入队的不再返回，避免重复
             if (all_deps_satisfied_locked(tid)) {
+                enqueued_.insert(tid);
                 newly_ready.push_back(tid);
             }
         }
         return newly_ready;
+    }
+
+    // 标记任务已入队（避免 complete_task 重复返回）
+    void mark_enqueued(TaskId id) {
+        std::lock_guard lk(mu_);
+        enqueued_.insert(id);
     }
 
     // 检查任务是否就绪（所有依赖已完成）
@@ -205,6 +213,7 @@ private:
     mutable std::mutex                     mu_;
     std::unordered_map<TaskId, Node>       nodes_;
     std::unordered_set<TaskId>             completed_;
+    std::unordered_set<TaskId>             enqueued_; // 已入队的任务，避免 complete_task 重复返回
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -232,11 +241,10 @@ public:
     }
 
     void shutdown() {
-        {
-            std::lock_guard lk(mu_);
-            running_ = false;
-        }
+        bool was_running = running_.exchange(false);
+        if (!was_running) return; // 防止重复 shutdown
         cv_.notify_all();
+        done_cv_.notify_all();
         for (auto& w : workers_) if (w.joinable()) w.join();
         workers_.clear();
         if (dispatcher_.joinable()) {
@@ -259,6 +267,7 @@ public:
             all_tasks_[task->id] = task;
             // 若无未满足依赖，立即加入就绪队列
             if (dep_graph_.is_ready(task->id)) {
+                dep_graph_.mark_enqueued(task->id);
                 enqueue_ready_locked(task);
             }
         }
@@ -275,20 +284,15 @@ public:
         return true;
     }
 
-    // 等待任务完成（同步）
+    // 等待任务完成（同步），使用条件变量替代轮询
     bool wait_for(TaskId id, Duration timeout = Duration{10000}) {
-        auto deadline = now() + timeout;
-        while (now() < deadline) {
-            std::unique_lock lk(mu_);
-            auto it = all_tasks_.find(id);
-            if (it == all_tasks_.end()) return false;
+        std::unique_lock lk(mu_);
+        auto it = all_tasks_.find(id);
+        if (it == all_tasks_.end()) return false;
+        return done_cv_.wait_for(lk, timeout, [&] {
             auto state = it->second->state.load();
-            if (state == TaskState::Completed || state == TaskState::Failed)
-                return true;
-            lk.unlock();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        return false;
+            return state == TaskState::Completed || state == TaskState::Failed;
+        });
     }
 
     TaskState task_state(TaskId id) const {
@@ -333,6 +337,9 @@ private:
             } catch (const std::exception& e) {
                 task->state = TaskState::Failed;
             }
+
+            // 唤醒所有在 wait_for() 上等待的线程
+            done_cv_.notify_all();
 
             // 通知依赖该任务的下游任务就绪
             auto ready_ids = dep_graph_.complete_task(task->id);
@@ -420,7 +427,8 @@ private:
     std::queue<TaskPtr>                                        fifo_queue_;
 
     mutable std::mutex                         mu_;
-    std::condition_variable                    cv_;
+    std::condition_variable                    cv_;       // 工作线程调度用
+    std::condition_variable                    done_cv_;  // wait_for() 用
     std::atomic<bool>                          running_{false};
     std::vector<std::thread>                   workers_;
     std::jthread                               dispatcher_;

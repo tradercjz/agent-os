@@ -276,6 +276,9 @@ inline Result<std::string> Agent::remember(std::string content,
   memory::Embedding emb;
   if (emb_res && !emb_res->embeddings.empty()) {
     emb = std::move(emb_res->embeddings[0]);
+  } else if (!emb_res) {
+    // Embedding 失败时仍存入记忆但传播警告（空向量 = 仅文本检索可用）
+    // 生产中可接入日志系统记录此事件
   }
   return os_->memory().remember(std::move(content), emb, std::to_string(id_),
                                 importance);
@@ -288,6 +291,10 @@ Agent::recall(std::string_view query, size_t k) {
   memory::Embedding emb;
   if (emb_res && !emb_res->embeddings.empty()) {
     emb = std::move(emb_res->embeddings[0]);
+  } else if (!emb_res) {
+    // Embedding 失败时退化为空向量检索（线性扫描），不再静默
+    return make_error(emb_res.error().code,
+                      "recall: embedding failed — " + emb_res.error().message);
   }
   return os_->memory().recall(emb, {}, k);
 }

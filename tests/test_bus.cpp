@@ -139,6 +139,15 @@ TEST_F(AgentBusTest, AuditTrailRecorded) {
   EXPECT_GE(bus->audit_trail().size(), 1);
 }
 
+TEST_F(AgentBusTest, AuditTrailDequeCapBehavior) {
+  // 验证 deque 审计日志上限行为（不崩溃）
+  for (int i = 0; i < 200; ++i) {
+    bus->send(BusMessage::make_request(10, 20, "flood", std::to_string(i)));
+  }
+  EXPECT_LE(bus->audit_trail().size(), 10200u);
+  EXPECT_GE(bus->audit_trail().size(), 200u);
+}
+
 TEST(AgentBusSecurityTest, InjectionRedaction) {
   security::SecurityManager sec;
   sec.grant(10, "standard");

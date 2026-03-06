@@ -431,16 +431,21 @@ public:
   }
 
   // 生成工具列表供 LLM 使用
+  // 优化：直接拼接各工具的 JSON 字符串，避免 serialize→parse→serialize 往返
   std::string tools_json(const std::vector<std::string> &filter = {}) const {
-    Json arr = Json::array();
     auto schemas = registry_.list_schemas();
+    std::string result = "[";
+    bool first = true;
     for (auto &s : schemas) {
       if (!filter.empty() &&
           std::find(filter.begin(), filter.end(), s.id) == filter.end())
         continue;
-      arr.push_back(Json::parse(s.to_function_json()));
+      if (!first) result += ",";
+      result += s.to_function_json(); // 已是合法 JSON 字符串，无需再 parse
+      first = false;
     }
-    return arr.dump();
+    result += "]";
+    return result;
   }
 
 private:

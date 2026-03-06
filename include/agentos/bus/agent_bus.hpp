@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <deque>
 #include <queue>
 #include <string>
 #include <unordered_map>
@@ -240,7 +241,7 @@ public:
         monitors_.push_back(std::move(h));
     }
 
-    const std::vector<BusMessage>& audit_trail() const { return audit_trail_; }
+    const std::deque<BusMessage>& audit_trail() const { return audit_trail_; }
 
 private:
     BusMessage redact_if_needed(BusMessage msg, AgentId /*recipient*/) const {
@@ -251,17 +252,16 @@ private:
     void audit_push(const BusMessage& msg) {
         audit_trail_.push_back(msg);
         for (auto& m : monitors_) m(msg);
-        // 限制审计日志大小
-        if (audit_trail_.size() > 10000) {
-            audit_trail_.erase(audit_trail_.begin(),
-                               audit_trail_.begin() + 1000);
+        // 限制审计日志大小，deque 前端 pop 为 O(1)
+        while (audit_trail_.size() > 10000) {
+            audit_trail_.pop_front();
         }
     }
 
     mutable std::mutex mu_;
     std::unordered_map<AgentId, std::shared_ptr<Channel>> channels_;
     std::unordered_map<AgentId, std::unordered_set<std::string>> subscriptions_;
-    std::vector<BusMessage> audit_trail_;
+    std::deque<BusMessage> audit_trail_;  // deque 保证 O(1) pop_front
     std::vector<MessageHandler> monitors_;
     security::SecurityManager* security_; // 非拥有指针
 };

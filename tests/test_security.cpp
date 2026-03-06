@@ -194,3 +194,16 @@ TEST_F(ECLTest, AuditLogRecorded) {
   ecl.before_tool_call(1, "http_fetch", "{}");
   EXPECT_FALSE(ecl.audit_log().empty());
 }
+
+// ── SecurityManager 统一 Detector 测试 ──────────────────────
+
+TEST(SecurityManagerTest, DetectorIsUnifiedWithECL) {
+  SecurityManager sec;
+  // 通过 SecurityManager::detector() 添加模式
+  sec.detector().add_pattern("unified test pattern");
+
+  // ECL 内部的 detector 应该也有这个模式（因为是同一实例）
+  auto det = sec.ecl().detector().scan("this has unified test pattern inside");
+  EXPECT_TRUE(det.is_injection);
+  EXPECT_EQ(det.matched_pattern, "unified test pattern");
+}

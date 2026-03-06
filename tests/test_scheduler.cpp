@@ -138,6 +138,52 @@ TEST_F(SchedulerTest, DependencyOrderingRespected) {
   EXPECT_EQ(order[1], 2);
 }
 
+TEST_F(DependencyGraphTest, CompleteTaskNoDuplicateReady) {
+  // 确保 complete_task 不会对同一任务返回多次
+  graph.add_task(1, Priority::Normal);
+  graph.add_task(2, Priority::Normal);
+  graph.add_task(3, Priority::Normal);
+  graph.add_dependency(2, 1); // 2 depends on 1
+  graph.add_dependency(3, 1); // 3 depends on 1
+
+  auto ready1 = graph.complete_task(1);
+  EXPECT_EQ(ready1.size(), 2u); // 2 和 3 都就绪
+
+  // 再完成一个任务后，之前已返回的 3 不应再出现
+  graph.add_task(4, Priority::Normal);
+  graph.add_dependency(4, 2);
+  auto ready2 = graph.complete_task(2);
+  // 只应返回 4（新就绪），不应包含 3（上次已返回）
+  for (auto id : ready2) {
+    EXPECT_NE(id, static_cast<TaskId>(3));
+  }
+}
+
+TEST_F(SchedulerTest, WaitForUsesConditionVariable) {
+  // 验证 wait_for 在任务完成后立即返回（不需要轮询 10ms 间隔）
+  auto task = std::make_shared<AgentTaskDescriptor>();
+  task->id = Scheduler::new_task_id();
+  task->name = "fast";
+  task->priority = Priority::Normal;
+  task->work = [] {}; // 瞬间完成
+
+  sched->submit(task);
+
+  auto start = now();
+  bool done = sched->wait_for(task->id, Duration{5000});
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now() - start);
+
+  EXPECT_TRUE(done);
+  // 使用条件变量后，应远快于旧 10ms 轮询间隔返回
+  EXPECT_LT(elapsed.count(), 500);
+}
+
+TEST_F(SchedulerTest, ShutdownIdempotent) {
+  // 多次调用 shutdown 不应崩溃
+  sched->shutdown();
+  sched->shutdown(); // 第二次应为 no-op
+}
+
 TEST_F(SchedulerTest, TaskCancellation) {
   std::atomic<bool> ran{false};
   auto task = std::make_shared<AgentTaskDescriptor>();

@@ -357,6 +357,10 @@ public:
 
     void clear_audit_log() { audit_log_.clear(); }
 
+    // 暴露内部检测器，供 SecurityManager 统一使用（避免实例重复）
+    InjectionDetector& detector() { return injection_detector_; }
+    const InjectionDetector& detector() const { return injection_detector_; }
+
 private:
     std::shared_ptr<RBAC>         rbac_;
     std::shared_ptr<TaintTracker> taint_;
@@ -392,7 +396,8 @@ public:
     RBAC&                   rbac()   { return *rbac_; }
     TaintTracker&           taint()  { return *taint_; }
     ExecutionControlLayer&  ecl()    { return *ecl_; }
-    InjectionDetector&      detector() { return detector_; }
+    // 统一使用 ECL 内部的 InjectionDetector，避免两份实例不同步
+    InjectionDetector&      detector() { return ecl_->detector(); }
 
     // 快捷方法
     void grant(AgentId id, std::string_view role) { rbac_->assign_role(id, role); }
@@ -409,7 +414,6 @@ private:
     std::shared_ptr<RBAC>              rbac_;
     std::shared_ptr<TaintTracker>      taint_;
     std::unique_ptr<ExecutionControlLayer> ecl_;
-    InjectionDetector                  detector_;
 };
 
 } // namespace agentos::security
