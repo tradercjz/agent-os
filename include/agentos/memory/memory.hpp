@@ -739,9 +739,11 @@ private:
   }
 
   void save_index_locked() {
-    index_dirty_ = false;
+    // Write to temp file first, then rename (atomic swap)
     auto idx_path = dir_ / "index.dat";
-    std::ofstream ofs(idx_path);
+    auto tmp_path = dir_ / "index.dat.tmp";
+    std::ofstream ofs(tmp_path);
+    if (!ofs) return; // Can't write, keep dirty flag
     ofs << "DIM " << dim_ << "\n";
     for (auto &[id, rec] : index_) {
       ofs << rec.id << " " << rec.label << " " << rec.importance << " "
@@ -750,6 +752,15 @@ private:
           << (rec.session_id.empty() ? "-" : rec.session_id) << " "
           << (rec.type.empty() ? "-" : rec.type) << "\n";
     }
+    ofs.flush();
+    if (!ofs.good()) {
+      ofs.close();
+      fs::remove(tmp_path);
+      return; // Disk full — keep dirty flag, retry later
+    }
+    ofs.close();
+    fs::rename(tmp_path, idx_path);
+    index_dirty_ = false;
 
     if (hnsw_index_) {
       hnsw_index_->saveIndex((dir_ / "hnsw_index.bin").string());

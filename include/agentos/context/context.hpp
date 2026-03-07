@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -38,24 +39,34 @@ public:
     return true;
   }
 
-  // 强制添加（可能触发 LRU 驱逐）
+  // 强制添加（可能触发驱逐）
+  // 驱逐策略：优先驱逐 importance 最低的非 system 消息
+  // importance: System > Tool/Assistant > User（越老越低优先）
   void add_evict_if_needed(const kernel::Message &msg) {
     TokenCount cost = kernel::ILLMBackend::estimate_tokens(msg.content) + 4;
     while (!messages_.empty() && used_tokens_ + cost > max_tokens_) {
-      // 驱逐最老的（非 system）消息
-      bool evicted_one = false;
+      // 找到最佳驱逐候选：非 system、importance 最低
+      auto best = messages_.end();
+      float best_score = std::numeric_limits<float>::max();
+      float age_factor = 0.0f;
       for (auto it = messages_.begin(); it != messages_.end(); ++it) {
-        if (it->role != kernel::Role::System) {
-          evicted_.push_back(*it);
-          used_tokens_ -= kernel::ILLMBackend::estimate_tokens(it->content) + 4;
-          messages_.erase(it);
-          evicted_one = true;
-          break;
+        if (it->role == kernel::Role::System)
+          continue;
+        // 得分 = 角色权重 + 位置权重（越老得分越低，越容易被驱逐）
+        float role_w = (it->role == kernel::Role::Tool) ? 0.3f :
+                       (it->role == kernel::Role::Assistant) ? 0.5f : 0.1f;
+        float score = role_w + age_factor;
+        if (score < best_score) {
+          best_score = score;
+          best = it;
         }
+        age_factor += 0.01f; // 越新的位置值越大
       }
-      // 全是 system 消息且仍超预算时，退出循环避免死循环
-      if (!evicted_one)
-        break;
+      if (best == messages_.end())
+        break; // 全是 system 消息
+      evicted_.push_back(*best);
+      used_tokens_ -= kernel::ILLMBackend::estimate_tokens(best->content) + 4;
+      messages_.erase(best);
     }
     messages_.push_back(msg);
     used_tokens_ += cost;
@@ -63,6 +74,7 @@ public:
 
   const std::deque<kernel::Message> &messages() const { return messages_; }
   const std::deque<kernel::Message> &evicted() const { return evicted_; }
+  size_t message_count() const { return messages_.size(); }
   TokenCount used_tokens() const { return used_tokens_; }
   TokenCount max_tokens() const { return max_tokens_; }
   float utilization() const {
@@ -139,11 +151,15 @@ struct ContextSnapshot {
       if (line.starts_with("SNAP:")) {
         auto body = line.substr(5);
         auto agent_pos = body.find("agent=");
-        auto sess_pos = body.find("session=");
-        if (agent_pos != std::string::npos)
-          snap.agent_id = std::stoull(body.substr(agent_pos + 6));
+        auto sess_pos = body.find(",session=");
+        if (agent_pos != std::string::npos) {
+          auto agent_end = body.find(',', agent_pos);
+          auto agent_val = body.substr(agent_pos + 6,
+              agent_end != std::string::npos ? agent_end - agent_pos - 6 : std::string::npos);
+          snap.agent_id = std::stoull(agent_val);
+        }
         if (sess_pos != std::string::npos)
-          snap.session_id = body.substr(sess_pos + 8);
+          snap.session_id = body.substr(sess_pos + 9);
       } else if (line.starts_with("MSG:")) {
         auto rest = line.substr(4);
         auto colon = rest.find(':');
@@ -256,27 +272,37 @@ public:
   // 快照：将 Agent 上下文序列化到磁盘
   Result<fs::path> snapshot(AgentId agent_id,
                             const std::string &metadata = "{}") {
-    std::lock_guard lk(mu_);
-    auto it = windows_.find(agent_id);
-    if (it == windows_.end())
-      return make_error(ErrorCode::NotFound,
-                        fmt::format("No context for agent {}", agent_id));
-
+    // Phase 1: collect snapshot data under lock
     ContextSnapshot snap;
-    snap.agent_id = agent_id;
-    snap.session_id = std::to_string(agent_id);
-    snap.captured_at = now();
-    snap.metadata_json = metadata;
-    for (auto &m : it->second.messages())
-      snap.messages.push_back(m);
+    fs::path path;
+    {
+      std::lock_guard lk(mu_);
+      auto it = windows_.find(agent_id);
+      if (it == windows_.end())
+        return make_error(ErrorCode::NotFound,
+                          fmt::format("No context for agent {}", agent_id));
 
-    fs::path path = snapshot_dir_ / fmt::format("agent_{}_snap.txt", agent_id);
+      snap.agent_id = agent_id;
+      snap.session_id = std::to_string(agent_id);
+      snap.captured_at = now();
+      snap.metadata_json = metadata;
+      for (auto &m : it->second.messages())
+        snap.messages.push_back(m);
+      path = snapshot_dir_ / fmt::format("agent_{}_snap.txt", agent_id);
+    }
+
+    // Phase 2: file I/O outside lock
     std::ofstream ofs(path);
     if (!ofs)
       return make_error(
           ErrorCode::MemoryWriteFailed,
           fmt::format("Cannot write snapshot to {}", path.string()));
     ofs << snap.serialize();
+    ofs.flush();
+    if (!ofs.good())
+      return make_error(
+          ErrorCode::MemoryWriteFailed,
+          fmt::format("Write failed (disk full?) for {}", path.string()));
     return path;
   }
 

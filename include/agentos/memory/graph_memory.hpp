@@ -339,8 +339,13 @@ public:
       }
     }
     ofs.flush();
+    bool ok = ofs.good();
     ofs.close();
-    fs::rename(temp_wal, wal_path_);
+    if (ok) {
+      fs::rename(temp_wal, wal_path_);
+    } else {
+      fs::remove(temp_wal); // Don't replace good WAL with partial write
+    }
   }
 
 private:
@@ -580,10 +585,17 @@ private:
         }
       }
       ofs.flush();
+      bool write_ok = ofs.good();
       ofs.close();
-      fs::rename(temp_wal, wal_path_);
-      wal_ops_count_ = 0;
-      LOG_INFO("GraphMemory: WAL compacted");
+      if (write_ok) {
+        fs::rename(temp_wal, wal_path_);
+        wal_ops_count_ = 0;
+        LOG_INFO("GraphMemory: WAL compacted");
+      } else {
+        // Disk full or I/O error — remove partial temp file, keep original WAL
+        fs::remove(temp_wal);
+        LOG_WARN("GraphMemory: WAL compaction failed (disk full?), retaining original");
+      }
     }
   }
 
