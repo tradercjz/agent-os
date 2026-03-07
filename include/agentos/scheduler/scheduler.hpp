@@ -283,10 +283,13 @@ public:
 
     // 取消任务
     bool cancel(TaskId id) {
-        std::lock_guard lk(mu_);
-        auto it = all_tasks_.find(id);
-        if (it == all_tasks_.end()) return false;
-        it->second->state = TaskState::Cancelled;
+        {
+            std::lock_guard lk(mu_);
+            auto it = all_tasks_.find(id);
+            if (it == all_tasks_.end()) return false;
+            it->second->state = TaskState::Cancelled;
+        }
+        done_cv_.notify_all(); // Wake up wait_for() callers
         return true;
     }
 
@@ -297,7 +300,8 @@ public:
         if (it == all_tasks_.end()) return false;
         return done_cv_.wait_for(lk, timeout, [&] {
             auto state = it->second->state.load();
-            return state == TaskState::Completed || state == TaskState::Failed;
+            return state == TaskState::Completed || state == TaskState::Failed
+                || state == TaskState::Cancelled;
         });
     }
 
