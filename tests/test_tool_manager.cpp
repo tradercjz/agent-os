@@ -108,3 +108,44 @@ TEST_F(ToolManagerTest, ToolDispatchAndExecution) {
   EXPECT_FALSE(restrict_res.success);
   EXPECT_NE(restrict_res.error.find("not in allowed set"), std::string::npos);
 }
+
+// ── ShellTool Security Tests ──────────────────────────────
+
+TEST(ShellToolTest, BlocksUnsafeCharacters) {
+  ShellTool shell({"echo", "ls"});
+  ParsedArgs args;
+  args.values["cmd"] = "echo hello; rm -rf /";
+  auto result = shell.execute(args);
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("Unsafe characters"), std::string::npos);
+}
+
+TEST(ShellToolTest, BlocksNullBytes) {
+  ShellTool shell({"echo"});
+  ParsedArgs args;
+  std::string cmd_with_null = "echo hello";
+  cmd_with_null += '\0';
+  cmd_with_null += "rm -rf /";
+  args.values["cmd"] = cmd_with_null;
+  auto result = shell.execute(args);
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("Null bytes"), std::string::npos);
+}
+
+TEST(ShellToolTest, BlocksCommandNotInAllowlist) {
+  ShellTool shell({"echo"});
+  ParsedArgs args;
+  args.values["cmd"] = "rm file.txt";
+  auto result = shell.execute(args);
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("not in allowlist"), std::string::npos);
+}
+
+TEST(ShellToolTest, AllowsValidCommand) {
+  ShellTool shell({"echo"});
+  ParsedArgs args;
+  args.values["cmd"] = "echo hello world";
+  auto result = shell.execute(args);
+  EXPECT_TRUE(result.success);
+  EXPECT_NE(result.output.find("hello world"), std::string::npos);
+}
