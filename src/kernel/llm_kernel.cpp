@@ -150,7 +150,7 @@ struct StreamContext {
             usage["completion_tokens"].is_number_integer())
           response->completion_tokens = usage["completion_tokens"].get<int>();
       }
-    } catch (...) {
+    } catch (const std::exception &) {
       // 忽略单个 SSE chunk 的解析错误，继续处理后续数据
     }
   }
@@ -477,7 +477,7 @@ Result<EmbeddingResponse> OpenAIBackend::embed(const EmbeddingRequest &req) {
         }
       }
     }
-  } catch (...) {
+  } catch (const std::exception &) {
     return make_error(ErrorCode::LLMBackendError,
                       "Failed to parse embeddings JSON");
   }

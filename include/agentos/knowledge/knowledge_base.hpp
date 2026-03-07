@@ -139,7 +139,12 @@ public:
 
     // 2. HNSW 索引
     if (hnsw_ && next_hnsw_id_ > 0) {
-      hnsw_->saveIndex((dir / "hnsw_index.bin").string());
+      try {
+        hnsw_->saveIndex((dir / "hnsw_index.bin").string());
+      } catch (const std::exception &e) {
+        std::cerr << "[KB] Failed to save HNSW index: " << e.what() << "\n";
+        return false;
+      }
     }
 
     // 3. chunk 映射（chunk_content_ + chunk_docs_ + hnsw_id_to_chunk_）

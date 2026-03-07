@@ -338,7 +338,7 @@ public:
             auto msg = fmt::format(
                 "[ALERT] Injection detected in tool '{}' args: pattern='{}'",
                 tool_id, det.matched_pattern);
-            audit_log_.push_back(msg);
+            audit(msg);
             LOG_WARN(msg);
             }
             return make_error(ErrorCode::InjectionDetected,
@@ -354,7 +354,7 @@ public:
             }
         }
 
-        audit_log_.push_back(fmt::format(
+        audit(fmt::format(
             "[OK] agent={} tool={} args_len={}", agent_id, tool_id, args_json.size()));
         return {};
     }
@@ -365,7 +365,7 @@ public:
         // 扫描文本输出中的注入尝试
         auto det = injection_detector_.scan(response.content);
         if (det.is_injection && det.confidence > 0.8f) {
-            audit_log_.push_back(fmt::format(
+            audit(fmt::format(
                 "[WARN] LLM output injection suspicion: agent={} pattern='{}'",
                 agent_id, det.matched_pattern));
             // 警告但不阻断（低置信度时仅记录）
@@ -403,6 +403,15 @@ private:
     std::unordered_set<std::string> critical_tools_{"send_email", "db_delete"};
 
     std::vector<std::string> audit_log_;
+    static constexpr size_t max_audit_log_size_ = 10000;
+
+    void audit(std::string msg) {
+        if (audit_log_.size() >= max_audit_log_size_) {
+            audit_log_.erase(audit_log_.begin(),
+                             audit_log_.begin() + static_cast<long>(max_audit_log_size_ / 2));
+        }
+        audit_log_.push_back(std::move(msg));
+    }
 };
 
 // ─────────────────────────────────────────────────────────────
