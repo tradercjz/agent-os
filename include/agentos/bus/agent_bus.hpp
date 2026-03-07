@@ -72,12 +72,18 @@ struct BusMessage {
 
 class Channel {
 public:
-    explicit Channel(AgentId owner) : owner_(owner) {}
+    explicit Channel(AgentId owner, size_t max_depth = 10000)
+        : owner_(owner), max_depth_(max_depth) {}
 
-    void push(BusMessage msg) {
+    // Returns false if queue is full (backpressure)
+    bool push(BusMessage msg) {
         std::lock_guard lk(mu_);
+        if (queue_.size() >= max_depth_) {
+            return false; // Backpressure: caller should handle
+        }
         queue_.push(std::move(msg));
         cv_.notify_one();
+        return true;
     }
 
     // 阻塞等待消息
@@ -85,7 +91,7 @@ public:
         std::unique_lock lk(mu_);
         if (!cv_.wait_for(lk, timeout, [this] { return !queue_.empty(); }))
             return std::nullopt;
-        auto msg = queue_.front();
+        auto msg = std::move(queue_.front());
         queue_.pop();
         return msg;
     }
@@ -94,7 +100,7 @@ public:
     std::optional<BusMessage> try_recv() {
         std::lock_guard lk(mu_);
         if (queue_.empty()) return std::nullopt;
-        auto msg = queue_.front();
+        auto msg = std::move(queue_.front());
         queue_.pop();
         return msg;
     }
@@ -108,6 +114,7 @@ public:
 
 private:
     AgentId owner_;
+    size_t max_depth_;
     std::queue<BusMessage> queue_;
     mutable std::mutex mu_;
     std::condition_variable cv_;
@@ -153,11 +160,13 @@ public:
     void publish(BusMessage event) {
         if (event.type != MessageType::Event) return;
 
-        // 安全扫描
+        // 安全扫描：检查 payload 注入
         if (security_) {
-            auto det = security_->ecl().scan_llm_output(event.from,
-                                                         kernel::LLMResponse{});
-            // 内容扫描（简化，仅记录）
+            auto det = security_->detector().scan(event.payload);
+            if (det.is_injection) {
+                event.payload = "[REDACTED: injection detected in event]";
+                event.redacted = true;
+            }
         }
 
         std::lock_guard lk(mu_);

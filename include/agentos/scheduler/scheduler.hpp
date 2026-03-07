@@ -245,11 +245,17 @@ public:
         if (!was_running) return; // 防止重复 shutdown
         cv_.notify_all();
         done_cv_.notify_all();
-        for (auto& w : workers_) if (w.joinable()) w.join();
+        auto this_id = std::this_thread::get_id();
+        for (auto& w : workers_) {
+            // Avoid self-join if shutdown called from worker thread
+            if (w.joinable() && w.get_id() != this_id)
+                w.join();
+        }
         workers_.clear();
         if (dispatcher_.joinable()) {
             dispatcher_.request_stop();
-            dispatcher_.join();
+            if (dispatcher_.get_id() != this_id)
+                dispatcher_.join();
         }
     }
 

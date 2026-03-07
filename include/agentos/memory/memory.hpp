@@ -124,7 +124,7 @@ public:
     entry.created_at = entry.accessed_at = now();
 
     // LRU 驱逐
-    if (store_.size() >= capacity_) {
+    if (store_.size() >= capacity_ && !store_.empty()) {
       auto oldest = std::min_element(
           store_.begin(), store_.end(), [](const auto &a, const auto &b) {
             return a.second.accessed_at < b.second.accessed_at;
@@ -443,11 +443,11 @@ public:
   }
 
   Result<std::string> write(MemoryEntry entry) override {
-    if (entry.id.empty())
-      entry.id = "lt_" + std::to_string(id_counter_++);
     entry.created_at = entry.accessed_at = now();
 
     std::lock_guard lk(mu_);
+    if (entry.id.empty())
+      entry.id = "lt_" + std::to_string(id_counter_++);
 
     // 持久化 content 到 .mem 文件（锁内执行，避免并发写同一文件竞态）
     auto path = entry_path(entry.id);
@@ -912,12 +912,18 @@ public:
 
   // 将工作记忆中的重要内容晋升到长期记忆
   void consolidate(float importance_threshold = 0.6f) {
-    // 检索所有工作记忆条目
     auto r = working_->get_all();
+    bool wrote_any = false;
     for (auto &entry : r) {
       if (entry.importance >= importance_threshold) {
         long_term_->write(entry);
+        wrote_any = true;
       }
+    }
+    // Flush LTM index once after batch write (avoids O(N²) index saves)
+    if (wrote_any) {
+      if (auto *ltm = dynamic_cast<LongTermMemory *>(long_term_.get()))
+        ltm->flush();
     }
   }
 

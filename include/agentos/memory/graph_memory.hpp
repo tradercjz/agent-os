@@ -88,6 +88,8 @@ public:
     // Optional: flush remaining states or compact WAL on shutdown
   }
 
+  static constexpr size_t WAL_COMPACT_THRESHOLD = 5000;
+
   Result<bool> add_node(GraphNode node) override {
     std::lock_guard lk(mu_);
     if (node.created_at == 0)
@@ -99,6 +101,7 @@ public:
     // Append to WAL
     append_wal("N," + escape(node.id) + "," + escape(node.type) + "," +
                escape(node.content) + "," + std::to_string(node.created_at));
+    maybe_compact_locked();
     return true;
   }
 
@@ -147,6 +150,7 @@ public:
                "," + escape(edge.relation) + "," + std::to_string(edge.weight) +
                "," + std::to_string(edge.start_ts) + "," +
                std::to_string(edge.end_ts));
+    maybe_compact_locked();
     return true;
   }
 
@@ -420,9 +424,40 @@ private:
     }
   }
 
+  // Auto-compact WAL when it grows too large (called under lock)
+  void maybe_compact_locked() {
+    wal_ops_count_++;
+    if (wal_ops_count_ >= WAL_COMPACT_THRESHOLD) {
+      // Compact: rewrite WAL with only current state
+      fs::path temp_wal = wal_path_.string() + ".tmp";
+      std::ofstream ofs(temp_wal);
+      if (!ofs) return;
+
+      for (const auto &[id, n] : nodes_) {
+        std::string record = "N," + escape(n.id) + "," + escape(n.type) + "," +
+                             escape(n.content) + "," + std::to_string(n.created_at);
+        ofs << record << "|CRC:" << crc32(record) << "\n";
+      }
+      for (const auto &[id, edge_list] : edges_) {
+        for (const auto &e : edge_list) {
+          std::string record = "E," + escape(e.source_id) + "," + escape(e.target_id) + "," +
+                               escape(e.relation) + "," + std::to_string(e.weight) + "," +
+                               std::to_string(e.start_ts) + "," + std::to_string(e.end_ts);
+          ofs << record << "|CRC:" << crc32(record) << "\n";
+        }
+      }
+      ofs.flush();
+      ofs.close();
+      fs::rename(temp_wal, wal_path_);
+      wal_ops_count_ = 0;
+      LOG_INFO("GraphMemory: WAL compacted");
+    }
+  }
+
   mutable std::mutex mu_;
   fs::path dir_;
   fs::path wal_path_;
+  size_t wal_ops_count_{0};
 
   std::unordered_map<std::string, GraphNode> nodes_;
   std::unordered_map<std::string, std::vector<GraphEdge>>

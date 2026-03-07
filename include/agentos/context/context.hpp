@@ -225,19 +225,32 @@ public:
 
   // 当上下文接近满时，用摘要替换历史
   void compress(AgentId agent_id, SummarizeFn summarize) {
-    std::lock_guard lk(mu_);
-    auto it = windows_.find(agent_id);
-    if (it == windows_.end())
-      return;
-    auto &win = it->second;
-    if (!win.is_near_full())
-      return;
+    std::vector<kernel::Message> all;
 
-    // 收集所有消息做摘要
-    std::vector<kernel::Message> all{win.messages().begin(), win.messages().end()};
+    // Phase 1: collect messages under lock
+    {
+      std::lock_guard lk(mu_);
+      auto it = windows_.find(agent_id);
+      if (it == windows_.end())
+        return;
+      auto &win = it->second;
+      if (!win.is_near_full())
+        return;
+      all.assign(win.messages().begin(), win.messages().end());
+    }
+
+    // Phase 2: call summarize callback WITHOUT lock (may call LLM)
     std::string summary = summarize(all);
-    win.reset();
-    win.inject_summary(std::move(summary));
+
+    // Phase 3: apply summary under lock
+    {
+      std::lock_guard lk(mu_);
+      auto it = windows_.find(agent_id);
+      if (it == windows_.end())
+        return;
+      it->second.reset();
+      it->second.inject_summary(std::move(summary));
+    }
   }
 
   // 快照：将 Agent 上下文序列化到磁盘
@@ -269,9 +282,13 @@ public:
 
   // 从磁盘恢复上下文（断点续传）
   Result<void> restore(AgentId agent_id) {
-    std::lock_guard lk(mu_); // 锁覆盖整个操作（含文件 I/O），防止并发修改
+    // Phase 1: File I/O outside lock to avoid blocking other agents
+    fs::path path;
+    {
+      std::lock_guard lk(mu_);
+      path = snapshot_dir_ / fmt::format("agent_{}_snap.txt", agent_id);
+    }
 
-    fs::path path = snapshot_dir_ / fmt::format("agent_{}_snap.txt", agent_id);
     if (!fs::exists(path))
       return make_error(ErrorCode::NotFound,
                         fmt::format("Snapshot not found: {}", path.string()));
@@ -283,6 +300,8 @@ public:
     if (!snap)
       return make_error(ErrorCode::MemoryReadFailed, "Snapshot parse failed");
 
+    // Phase 2: Apply under lock
+    std::lock_guard lk(mu_);
     auto &win = windows_.emplace(agent_id, ContextWindow{8192}).first->second;
     win.reset();
     for (auto &m : snap->messages)
