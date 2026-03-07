@@ -58,6 +58,19 @@ public:
   virtual Result<bool> add_node(GraphNode node) = 0;
   virtual Result<bool> add_edge(GraphEdge edge) = 0;
 
+  // Update node content/type (returns false if node doesn't exist)
+  virtual Result<bool> update_node(const std::string &node_id,
+                                   std::string new_content,
+                                   std::string new_type = "") = 0;
+
+  // Delete a node and all its edges
+  virtual Result<bool> delete_node(const std::string &node_id) = 0;
+
+  // Delete a specific edge
+  virtual Result<bool> delete_edge(const std::string &source_id,
+                                   const std::string &target_id,
+                                   const std::string &relation) = 0;
+
   // Quick adjacent search
   virtual Result<std::vector<GraphEdge>>
   get_edges(const std::string &node_id) = 0;
@@ -68,6 +81,9 @@ public:
   // Semantic K-hop Subgraph retrieval
   virtual Result<Subgraph> k_hop_search(const std::string &start_node_id, int k,
                                         uint64_t current_ts = 0) = 0;
+
+  // Prune expired edges (end_ts < cutoff_ts), returns count removed
+  virtual Result<size_t> cleanup_before(uint64_t cutoff_ts) = 0;
 
   virtual void save_snapshot() = 0;
 };
@@ -152,6 +168,88 @@ public:
                std::to_string(edge.end_ts));
     maybe_compact_locked();
     return true;
+  }
+
+  Result<bool> update_node(const std::string &node_id,
+                           std::string new_content,
+                           std::string new_type = "") override {
+    std::lock_guard lk(mu_);
+    auto it = nodes_.find(node_id);
+    if (it == nodes_.end())
+      return false;
+    it->second.content = std::move(new_content);
+    if (!new_type.empty())
+      it->second.type = std::move(new_type);
+    auto &n = it->second;
+    append_wal("U," + escape(n.id) + "," + escape(n.type) + "," +
+               escape(n.content) + "," + std::to_string(n.created_at));
+    maybe_compact_locked();
+    return true;
+  }
+
+  Result<bool> delete_node(const std::string &node_id) override {
+    std::lock_guard lk(mu_);
+    auto it = nodes_.find(node_id);
+    if (it == nodes_.end())
+      return false;
+    nodes_.erase(it);
+    // Remove outgoing edges
+    edges_.erase(node_id);
+    // Remove incoming edges from all adjacency lists
+    for (auto &[src, edge_list] : edges_) {
+      edge_list.erase(
+          std::remove_if(edge_list.begin(), edge_list.end(),
+                         [&](const GraphEdge &e) {
+                           return e.target_id == node_id;
+                         }),
+          edge_list.end());
+    }
+    append_wal("DN," + escape(node_id));
+    maybe_compact_locked();
+    return true;
+  }
+
+  Result<bool> delete_edge(const std::string &source_id,
+                           const std::string &target_id,
+                           const std::string &relation) override {
+    std::lock_guard lk(mu_);
+    auto it = edges_.find(source_id);
+    if (it == edges_.end())
+      return false;
+    auto &edge_list = it->second;
+    auto before_size = edge_list.size();
+    edge_list.erase(
+        std::remove_if(edge_list.begin(), edge_list.end(),
+                       [&](const GraphEdge &e) {
+                         return e.target_id == target_id &&
+                                e.relation == relation;
+                       }),
+        edge_list.end());
+    if (edge_list.size() == before_size)
+      return false; // Edge not found
+    append_wal("DE," + escape(source_id) + "," + escape(target_id) + "," +
+               escape(relation));
+    maybe_compact_locked();
+    return true;
+  }
+
+  Result<size_t> cleanup_before(uint64_t cutoff_ts) override {
+    std::lock_guard lk(mu_);
+    size_t removed = 0;
+    for (auto &[src, edge_list] : edges_) {
+      auto new_end = std::remove_if(
+          edge_list.begin(), edge_list.end(),
+          [&](const GraphEdge &e) {
+            return e.end_ts < cutoff_ts && e.end_ts != 0;
+          });
+      removed += std::distance(new_end, edge_list.end());
+      edge_list.erase(new_end, edge_list.end());
+    }
+    if (removed > 0) {
+      // Compact WAL to reflect removals
+      maybe_compact_locked();
+    }
+    return removed;
   }
 
   Result<std::vector<GraphEdge>>
@@ -394,6 +492,41 @@ private:
             n.content = unescape(parts[3]);
             n.created_at = std::stoull(parts[4]);
             nodes_[n.id] = n;
+          } else if (parts[0] == "U" && parts.size() >= 5) {
+            // Update node
+            std::string id = unescape(parts[1]);
+            auto nit = nodes_.find(id);
+            if (nit != nodes_.end()) {
+              nit->second.type = unescape(parts[2]);
+              nit->second.content = unescape(parts[3]);
+            }
+          } else if (parts[0] == "DN" && parts.size() >= 2) {
+            // Delete node
+            std::string id = unescape(parts[1]);
+            nodes_.erase(id);
+            edges_.erase(id);
+            for (auto &[src, el] : edges_) {
+              el.erase(std::remove_if(el.begin(), el.end(),
+                                      [&](const GraphEdge &e) {
+                                        return e.target_id == id;
+                                      }),
+                       el.end());
+            }
+          } else if (parts[0] == "DE" && parts.size() >= 4) {
+            // Delete edge
+            std::string src = unescape(parts[1]);
+            std::string tgt = unescape(parts[2]);
+            std::string rel = unescape(parts[3]);
+            auto eit = edges_.find(src);
+            if (eit != edges_.end()) {
+              auto &el = eit->second;
+              el.erase(std::remove_if(el.begin(), el.end(),
+                                      [&](const GraphEdge &e) {
+                                        return e.target_id == tgt &&
+                                               e.relation == rel;
+                                      }),
+                       el.end());
+            }
           } else if (parts[0] == "E" && parts.size() >= 7) {
             GraphEdge e;
             e.source_id = unescape(parts[1]);

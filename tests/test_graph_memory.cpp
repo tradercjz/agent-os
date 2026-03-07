@@ -152,6 +152,148 @@ TEST(GraphMemoryTest, WALReplayDeduplicatesEdges) {
   std::filesystem::remove_all(test_dir);
 }
 
+TEST(GraphMemoryTest, UpdateNode) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_update";
+  std::filesystem::remove_all(test_dir);
+
+  memory::LocalGraphMemory graph(test_dir);
+  graph.add_node(memory::GraphNode{.id = "X", .type = "Person", .content = "old"});
+
+  // Update content only
+  auto r1 = graph.update_node("X", "new content");
+  ASSERT_TRUE(r1.has_value());
+  EXPECT_TRUE(*r1);
+
+  // Update content and type
+  auto r2 = graph.update_node("X", "newer", "Company");
+  ASSERT_TRUE(r2.has_value());
+  EXPECT_TRUE(*r2);
+
+  // Non-existent node returns false
+  auto r3 = graph.update_node("NonExistent", "data");
+  ASSERT_TRUE(r3.has_value());
+  EXPECT_FALSE(*r3);
+
+  // Verify via WAL persistence
+  {
+    memory::LocalGraphMemory graph2(test_dir);
+    auto edges = graph2.k_hop_search("X", 0);
+    ASSERT_TRUE(edges.has_value());
+    ASSERT_EQ(edges->nodes.size(), 1);
+    EXPECT_EQ(edges->nodes[0].content, "newer");
+    EXPECT_EQ(edges->nodes[0].type, "Company");
+  }
+  std::filesystem::remove_all(test_dir);
+}
+
+TEST(GraphMemoryTest, DeleteNode) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_delnode";
+  std::filesystem::remove_all(test_dir);
+
+  memory::LocalGraphMemory graph(test_dir);
+  graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "B", .relation = "r1"});
+  graph.add_edge(memory::GraphEdge{
+      .source_id = "B", .target_id = "C", .relation = "r2"});
+  graph.add_edge(memory::GraphEdge{
+      .source_id = "C", .target_id = "B", .relation = "r3"});
+
+  // Delete B — should remove outgoing edges from B and incoming edges to B
+  auto r = graph.delete_node("B");
+  ASSERT_TRUE(r.has_value());
+  EXPECT_TRUE(*r);
+
+  // A's edges to B should be gone
+  auto edges_a = graph.get_edges("A");
+  ASSERT_TRUE(edges_a.has_value());
+  EXPECT_EQ(edges_a->size(), 0);
+
+  // B's outgoing edges should be gone
+  auto edges_b = graph.get_edges("B");
+  ASSERT_TRUE(edges_b.has_value());
+  EXPECT_EQ(edges_b->size(), 0);
+
+  // C's edge to B should be gone
+  auto edges_c = graph.get_edges("C");
+  ASSERT_TRUE(edges_c.has_value());
+  EXPECT_EQ(edges_c->size(), 0);
+
+  // Non-existent returns false
+  auto r2 = graph.delete_node("NonExistent");
+  ASSERT_TRUE(r2.has_value());
+  EXPECT_FALSE(*r2);
+
+  // WAL persistence
+  {
+    memory::LocalGraphMemory graph2(test_dir);
+    auto edges = graph2.get_edges("A");
+    ASSERT_TRUE(edges.has_value());
+    EXPECT_EQ(edges->size(), 0);
+  }
+  std::filesystem::remove_all(test_dir);
+}
+
+TEST(GraphMemoryTest, DeleteEdge) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_deledge";
+  std::filesystem::remove_all(test_dir);
+
+  memory::LocalGraphMemory graph(test_dir);
+  graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "B", .relation = "r1"});
+  graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "B", .relation = "r2"});
+
+  // Delete one edge
+  auto r = graph.delete_edge("A", "B", "r1");
+  ASSERT_TRUE(r.has_value());
+  EXPECT_TRUE(*r);
+
+  auto edges = graph.get_edges("A");
+  ASSERT_TRUE(edges.has_value());
+  ASSERT_EQ(edges->size(), 1);
+  EXPECT_EQ(edges.value()[0].relation, "r2");
+
+  // Non-existent edge
+  auto r2 = graph.delete_edge("A", "B", "r_nonexistent");
+  ASSERT_TRUE(r2.has_value());
+  EXPECT_FALSE(*r2);
+
+  // WAL persistence
+  {
+    memory::LocalGraphMemory graph2(test_dir);
+    auto edges2 = graph2.get_edges("A");
+    ASSERT_TRUE(edges2.has_value());
+    ASSERT_EQ(edges2->size(), 1);
+    EXPECT_EQ(edges2.value()[0].relation, "r2");
+  }
+  std::filesystem::remove_all(test_dir);
+}
+
+TEST(GraphMemoryTest, CleanupBefore) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_cleanup";
+  std::filesystem::remove_all(test_dir);
+
+  memory::LocalGraphMemory graph(test_dir);
+  // Edge with end_ts=100 (expired)
+  graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "B", .relation = "old",
+      .weight = 1.0f, .start_ts = 10, .end_ts = 100});
+  // Edge with end_ts=UINT64_MAX (indefinite)
+  graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "C", .relation = "current"});
+
+  auto removed = graph.cleanup_before(200);
+  ASSERT_TRUE(removed.has_value());
+  EXPECT_EQ(*removed, 1);
+
+  auto edges = graph.get_edges("A");
+  ASSERT_TRUE(edges.has_value());
+  EXPECT_EQ(edges->size(), 1);
+  EXPECT_EQ(edges.value()[0].relation, "current");
+
+  std::filesystem::remove_all(test_dir);
+}
+
 TEST(GraphMemoryTest, HighLevelMemoryAPI) {
   std::filesystem::path test_dir = "/tmp/agentos_test_graph_high_level";
   std::filesystem::remove_all(test_dir);

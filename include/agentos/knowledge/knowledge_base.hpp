@@ -85,13 +85,14 @@ public:
     graph_ = std::move(graph);
   }
 
-  // ── 文本摄入 ───────────────────────────────────────
-  void ingest_text(const std::string &doc_id, const std::string &text) {
+  // ── 文本摄入（返回成功摄入的 chunk 数量）─────────────
+  Result<size_t> ingest_text(const std::string &doc_id, const std::string &text) {
     std::lock_guard lk(mu_);
     auto chunks = chunk_text(text, chunk_size_, chunk_overlap_);
     std::cout << "[KB Ingestion] Document [" << doc_id << "] parsed into "
               << chunks.size() << " chunks.\n";
 
+    size_t ingested = 0;
     for (size_t i = 0; i < chunks.size(); ++i) {
       std::string chunk_id = doc_id + "_chunk_" + std::to_string(i);
 
@@ -120,7 +121,9 @@ public:
         hnsw_id_to_chunk_[next_hnsw_id_] = chunk_id;
         next_hnsw_id_++;
       }
+      ++ingested;
     }
+    return ingested;
   }
 
   // ── 持久化 ───────────────────────────────────────

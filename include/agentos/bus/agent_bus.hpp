@@ -184,7 +184,8 @@ public:
     }
 
     // ── Request/Response ────────────────────────────────────
-    void send(BusMessage msg) {
+    // Returns false if any target channel rejected the message (backpressure)
+    bool send(BusMessage msg) {
         // Hub 做安全过滤：Spoke 间不允许直接通信，必须经 Hub
         if (security_) {
             // 扫描 payload 中的注入尝试
@@ -199,17 +200,21 @@ public:
         std::lock_guard lk(mu_);
         audit_push(msg);
 
+        bool all_accepted = true;
         if (msg.to == 0) {
             // 广播
             for (auto& [id, ch] : channels_) {
-                if (id != msg.from) ch->push(msg);
+                if (id != msg.from) {
+                    if (!ch->push(msg)) all_accepted = false;
+                }
             }
         } else {
             auto it = channels_.find(msg.to);
             if (it != channels_.end()) {
-                it->second->push(msg);
+                if (!it->second->push(msg)) all_accepted = false;
             }
         }
+        return all_accepted;
     }
 
     // 同步 RPC：发送 Request 并等待 Response
