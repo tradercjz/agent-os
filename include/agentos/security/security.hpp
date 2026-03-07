@@ -3,6 +3,7 @@
 // AgentOS :: Module 6 — Security Layer
 // RBAC 权限控制 / ECL 执行控制层 / 污点追踪 / 注入防御
 // ============================================================
+#include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
 #include <cstring>
 #include <agentos/kernel/llm_kernel.hpp>
@@ -235,7 +236,8 @@ public:
         for (char c : text)
           lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
-        for (auto& pat : patterns_) {
+        std::lock_guard lk(mu_);
+        for (const auto& pat : patterns_) {
             if (lower.find(pat) != std::string::npos) {
                 return {true, pat, 0.9f};
             }
@@ -257,11 +259,36 @@ public:
         return {false, "", 0.0f};
     }
 
+    // Thread-safe: add pattern at runtime (hot-reload)
     void add_pattern(std::string pat) {
+        std::lock_guard lk(mu_);
         patterns_.push_back(std::move(pat));
     }
 
+    // Thread-safe: remove pattern by value
+    bool remove_pattern(const std::string &pat) {
+        std::lock_guard lk(mu_);
+        auto it = std::find(patterns_.begin(), patterns_.end(), pat);
+        if (it != patterns_.end()) {
+            patterns_.erase(it);
+            return true;
+        }
+        return false;
+    }
+
+    // Thread-safe: replace all patterns at once
+    void set_patterns(std::vector<std::string> pats) {
+        std::lock_guard lk(mu_);
+        patterns_ = std::move(pats);
+    }
+
+    size_t pattern_count() const {
+        std::lock_guard lk(mu_);
+        return patterns_.size();
+    }
+
 private:
+    mutable std::mutex mu_;
     std::vector<std::string> patterns_;
 };
 
@@ -307,9 +334,13 @@ public:
         // 3. 注入检测（检查 args 是否包含注入尝试）
         auto det = injection_detector_.scan(args_json);
         if (det.is_injection) {
-            audit_log_.push_back(fmt::format(
+            {
+            auto msg = fmt::format(
                 "[ALERT] Injection detected in tool '{}' args: pattern='{}'",
-                tool_id, det.matched_pattern));
+                tool_id, det.matched_pattern);
+            audit_log_.push_back(msg);
+            LOG_WARN(msg);
+            }
             return make_error(ErrorCode::InjectionDetected,
                 fmt::format("Prompt injection detected: {}", det.matched_pattern));
         }

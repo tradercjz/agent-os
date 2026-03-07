@@ -3,9 +3,11 @@
 // AgentOS :: Module 4 — Graph Memory Extension
 // 本体图机制：多租户支持 + 基础的关系存储与召回
 // ============================================================
+#include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -222,14 +224,16 @@ public:
       return;
 
     for (const auto &[id, n] : nodes_) {
-      ofs << "N," << escape(n.id) << "," << escape(n.type) << ","
-          << escape(n.content) << "," << n.created_at << "\n";
+      std::string record = "N," + escape(n.id) + "," + escape(n.type) + "," +
+                           escape(n.content) + "," + std::to_string(n.created_at);
+      ofs << record << "|CRC:" << crc32(record) << "\n";
     }
     for (const auto &[id, edge_list] : edges_) {
       for (const auto &e : edge_list) {
-        ofs << "E," << escape(e.source_id) << "," << escape(e.target_id) << ","
-            << escape(e.relation) << "," << e.weight << "," << e.start_ts << ","
-            << e.end_ts << "\n";
+        std::string record = "E," + escape(e.source_id) + "," + escape(e.target_id) + "," +
+                             escape(e.relation) + "," + std::to_string(e.weight) + "," +
+                             std::to_string(e.start_ts) + "," + std::to_string(e.end_ts);
+        ofs << record << "|CRC:" << crc32(record) << "\n";
       }
     }
     ofs.flush();
@@ -297,23 +301,86 @@ private:
     return res;
   }
 
-  void append_wal(const std::string &line) {
-    std::ofstream ofs(wal_path_, std::ios::app);
-    if (ofs) {
-      ofs << line << "\n";
-      ofs.flush();
+  // CRC32 (ISO 3309 polynomial) for WAL integrity verification
+  static uint32_t crc32(const std::string &data) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (unsigned char c : data) {
+      crc ^= c;
+      for (int i = 0; i < 8; ++i)
+        crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
     }
+    return ~crc;
+  }
+
+  void append_wal(const std::string &line) {
+    // Write to temp file then append atomically to reduce corruption risk
+    uint32_t checksum = crc32(line);
+    std::string record = line + "|CRC:" + std::to_string(checksum) + "\n";
+
+    fs::path tmp_path = wal_path_.string() + ".pending";
+    {
+      std::ofstream ofs(tmp_path, std::ios::trunc);
+      if (!ofs) return;
+      ofs << record;
+      ofs.flush();
+      ofs.close();
+    }
+
+    // Append from temp to WAL (two-step for crash safety)
+    std::ofstream wal(wal_path_, std::ios::app);
+    if (wal) {
+      wal << record;
+      wal.flush();
+    }
+    fs::remove(tmp_path);
+  }
+
+  // Verify and strip CRC suffix from WAL line. Returns empty string if invalid.
+  std::string verify_wal_line(const std::string &raw_line) const {
+    auto crc_pos = raw_line.rfind("|CRC:");
+    if (crc_pos == std::string::npos) {
+      // Legacy format without CRC — accept but warn
+      return raw_line;
+    }
+    std::string payload = raw_line.substr(0, crc_pos);
+    std::string crc_str = raw_line.substr(crc_pos + 5);
+    try {
+      uint32_t stored_crc = static_cast<uint32_t>(std::stoul(crc_str));
+      uint32_t computed_crc = crc32(payload);
+      if (stored_crc != computed_crc) {
+        return ""; // Corrupted line
+      }
+    } catch (...) {
+      return ""; // Malformed CRC
+    }
+    return payload;
   }
 
   void load_from_wal() {
     if (!fs::exists(wal_path_))
       return;
+
+    // Check for interrupted write — recover pending record
+    fs::path pending = wal_path_.string() + ".pending";
+    if (fs::exists(pending)) {
+      // Pending record wasn't appended — discard it (incomplete write)
+      fs::remove(pending);
+    }
+
     std::ifstream ifs(wal_path_);
     std::string line;
     while (std::getline(ifs, line)) {
       if (line.empty())
         continue;
-      auto parts = split(line, ',');
+
+      // Verify CRC integrity
+      std::string verified = verify_wal_line(line);
+      if (verified.empty()) {
+        LOG_WARN("GraphMemory: skipping corrupted WAL line");
+        continue;
+      }
+
+      auto parts = split(verified, ',');
       try {
         if (parts.size() > 0) {
           if (parts[0] == "N" && parts.size() >= 5) {

@@ -3,6 +3,7 @@
 // AgentOS :: Module 5 — Tool Manager
 // 工具注册、发现、动态加载、沙箱隔离执行
 // ============================================================
+#include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
 #include <agentos/kernel/llm_kernel.hpp>
 #include <agentos/memory/memory.hpp>
@@ -118,7 +119,8 @@ inline ParsedArgs parse_args(const std::string &json_str) {
         }
       }
     }
-  } catch (...) {
+  } catch (const std::exception &e) {
+    LOG_WARN(fmt::format("parse_args: invalid JSON input: {}", e.what()));
   }
   return args;
 }

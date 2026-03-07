@@ -4,6 +4,7 @@
 // ============================================================
 #include <agentos/bus/agent_bus.hpp>
 #include <agentos/context/context.hpp>
+#include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
 #include <agentos/kernel/llm_kernel.hpp>
 #include <agentos/memory/memory.hpp>
@@ -277,8 +278,7 @@ inline Result<std::string> Agent::remember(std::string content,
   if (emb_res && !emb_res->embeddings.empty()) {
     emb = std::move(emb_res->embeddings[0]);
   } else if (!emb_res) {
-    // Embedding 失败时仍存入记忆但传播警告（空向量 = 仅文本检索可用）
-    // 生产中可接入日志系统记录此事件
+    LOG_WARN(fmt::format("Agent {}: embedding failed for remember(), storing without vector", id_));
   }
   return os_->memory().remember(std::move(content), emb, std::to_string(id_),
                                 importance);

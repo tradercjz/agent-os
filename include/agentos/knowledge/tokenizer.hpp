@@ -1,31 +1,36 @@
 #pragma once
 
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#ifdef AGENTOS_ENABLE_JIEBA
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-variable"
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <cppjieba/Jieba.hpp>
 #pragma GCC diagnostic pop
-#include <memory>
-#include <mutex>
-#include <stdexcept>
-#include <string>
-#include <vector>
 
 // Ensure the dict path is provided via CMake compile definitions
 #ifndef CPPJIEBA_DICT_DIR
 #error "CPPJIEBA_DICT_DIR must be defined during compilation"
 #endif
 
-// We expand the macro to a const char*
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
+
+#endif // AGENTOS_ENABLE_JIEBA
 
 namespace agentos::knowledge {
 
 /**
- * @brief Singleton wrapper around cppjieba to prevent multiple initializations.
- * cppjieba takes ~500MB RAM and 1s to boot reading dictionaries, so it must be
- * shared.
+ * @brief Singleton tokenizer. When AGENTOS_ENABLE_JIEBA is defined, uses
+ * cppjieba for Chinese segmentation. Otherwise falls back to simple
+ * whitespace/punctuation splitting.
  */
 class Tokenizer {
 public:
@@ -34,19 +39,33 @@ public:
     return instance_;
   }
 
-  // Thread-safe segmentation
   std::vector<std::string> cut(const std::string &text) {
     std::vector<std::string> words;
-    // jieba->CutForSearch internally does read operations, which are
-    // thread-safe.
+#ifdef AGENTOS_ENABLE_JIEBA
     jieba_->CutForSearch(text, words, true);
+#else
+    // Fallback: split on whitespace and common punctuation
+    std::string token;
+    for (char c : text) {
+      if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+          c == ',' || c == '.' || c == '!' || c == '?' ||
+          c == ';' || c == ':') {
+        if (!token.empty()) {
+          words.push_back(token);
+          token.clear();
+        }
+      } else {
+        token += c;
+      }
+    }
+    if (!token.empty()) words.push_back(token);
+#endif
     return words;
   }
 
 private:
-  std::unique_ptr<cppjieba::Jieba> jieba_;
-
   Tokenizer() {
+#ifdef AGENTOS_ENABLE_JIEBA
     const std::string dict_path =
         std::string(CPPJIEBA_DICT_DIR) + "/jieba.dict.utf8";
     const std::string hmm_path =
@@ -59,11 +78,15 @@ private:
 
     jieba_ = std::make_unique<cppjieba::Jieba>(dict_path, hmm_path, user_dict,
                                                idf_path, stop_word);
+#endif
   }
 
-  // Disable copy/move
   Tokenizer(const Tokenizer &) = delete;
   Tokenizer &operator=(const Tokenizer &) = delete;
+
+#ifdef AGENTOS_ENABLE_JIEBA
+  std::unique_ptr<cppjieba::Jieba> jieba_;
+#endif
 };
 
 } // namespace agentos::knowledge

@@ -69,3 +69,6 @@ Testing/
 .cache/
 
 build_release/*
+
+# Reference system (exploration, not part of core)
+refSys/

@@ -50,23 +50,27 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(hnswlib)
 
-# ---- cppjieba ----
-FetchContent_Declare(
-  cppjieba
-  GIT_REPOSITORY https://github.com/yanyiwu/cppjieba.git
-  GIT_TAG v5.4.0
-  GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(cppjieba)
+# ---- cppjieba (optional) ----
+option(AGENTOS_ENABLE_JIEBA "Enable cppjieba Chinese tokenization support" ON)
 
-if(NOT TARGET cppjieba::cppjieba)
-    add_library(cppjieba_iface INTERFACE)
-    target_include_directories(cppjieba_iface INTERFACE
-        ${cppjieba_SOURCE_DIR}/include
-        ${cppjieba_SOURCE_DIR}/deps
-        ${cppjieba_SOURCE_DIR}/deps/limonp/include
+if(AGENTOS_ENABLE_JIEBA)
+    FetchContent_Declare(
+      cppjieba
+      GIT_REPOSITORY https://github.com/yanyiwu/cppjieba.git
+      GIT_TAG v5.4.0
+      GIT_SHALLOW TRUE
     )
-    add_library(cppjieba::cppjieba ALIAS cppjieba_iface)
+    FetchContent_MakeAvailable(cppjieba)
+
+    if(NOT TARGET cppjieba::cppjieba)
+        add_library(cppjieba_iface INTERFACE)
+        target_include_directories(cppjieba_iface INTERFACE
+            ${cppjieba_SOURCE_DIR}/include
+            ${cppjieba_SOURCE_DIR}/deps
+            ${cppjieba_SOURCE_DIR}/deps/limonp/include
+        )
+        add_library(cppjieba::cppjieba ALIAS cppjieba_iface)
+    endif()
 endif()
 
 # ---- Library sources ----
@@ -83,8 +87,15 @@ set(AGENTOS_SOURCES
 add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(agentos PUBLIC ${SQLITE3_INCLUDE_DIRS})
-target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib cppjieba::cppjieba ${SQLITE3_LIBRARIES})
-target_compile_definitions(agentos PUBLIC CPPJIEBA_DICT_DIR="${cppjieba_SOURCE_DIR}/dict")
+target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_LIBRARIES})
+
+if(AGENTOS_ENABLE_JIEBA)
+    target_link_libraries(agentos PUBLIC cppjieba::cppjieba)
+    target_compile_definitions(agentos PUBLIC
+        AGENTOS_ENABLE_JIEBA=1
+        CPPJIEBA_DICT_DIR="${cppjieba_SOURCE_DIR}/dict"
+    )
+endif()
 
 # ---- Examples ----
 add_executable(agentos_demo examples/demo.cpp)
@@ -118,11 +129,14 @@ add_executable(
   tests/test_scheduler.cpp
   tests/test_context.cpp
   tests/test_security.cpp
+  tests/test_security_enhanced.cpp
   tests/test_bus.cpp
   tests/test_agent.cpp
   tests/test_csr_graph.cpp
   tests/test_knowledge_base.cpp
   tests/test_sqlite_store.cpp
+  tests/test_integration.cpp
+  tests/test_logger.cpp
 )
 target_link_libraries(test_agentos PRIVATE agentos GTest::gtest_main GTest::gtest)
 include(GoogleTest)
