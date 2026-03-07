@@ -333,9 +333,11 @@ private:
             TaskPtr task = dequeue_task();
             if (!task) continue;
 
-            auto state = task->state.load();
-            if (state == TaskState::Cancelled) continue;
-            task->state = TaskState::Running;
+            // Atomic state transition: only run if still Pending
+            auto expected = TaskState::Pending;
+            if (!task->state.compare_exchange_strong(expected, TaskState::Running)) {
+                continue; // Cancelled or already running
+            }
 
             try {
                 task->work();

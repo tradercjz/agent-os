@@ -16,7 +16,11 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
         fmt::format("Command '{}' not in allowlist", cmd_name));
   }
 
-  // 防注入：禁止 shell 元字符
+  // 防注入：禁止 null 字节和 shell 元字符
+  if (cmd.find('\0') != std::string::npos) {
+    LOG_WARN("ShellTool: blocked null byte in command");
+    return ToolResult::fail("Null bytes are not allowed in commands.");
+  }
   std::string unsafe_chars = "&|;$\n\r`()<>\\\"'{}[]!#~";
   if (cmd.find_first_of(unsafe_chars) != std::string::npos) {
     LOG_WARN(fmt::format("ShellTool: blocked unsafe characters in command '{}'", cmd_name));
@@ -36,6 +40,15 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
     return ToolResult::fail("Too many arguments (max 20)");
   }
 
+  // RAII wrapper for popen/pclose
+  struct PipeGuard {
+    FILE *fp;
+    explicit PipeGuard(FILE *f) : fp(f) {}
+    ~PipeGuard() { if (fp) pclose(fp); }
+    PipeGuard(const PipeGuard &) = delete;
+    PipeGuard &operator=(const PipeGuard &) = delete;
+  };
+
   // 限制输出长度
   std::string safe_cmd = cmd + " 2>&1 | head -100";
   std::array<char, 2048> buf{};
@@ -43,9 +56,9 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
   FILE *pipe = popen(safe_cmd.c_str(), "r");
   if (!pipe)
     return ToolResult::fail("Failed to open pipe");
+  PipeGuard guard(pipe);
   while (fgets(buf.data(), buf.size(), pipe) != nullptr)
     output += buf.data();
-  pclose(pipe);
 
   // 截断过长输出，以防恶意产生巨大输出
   if (output.size() > 10240) {
@@ -174,6 +187,9 @@ ToolResult HttpFetchTool::execute(const ParsedArgs &args) {
         "curl failed: {} (code: {})", curl_easy_strerror(res), response_code));
   }
 
+  if (response_code == 0) {
+    return ToolResult::fail("HTTP request failed: no response received");
+  }
   if (response_code >= 400 && response_code < 600) {
     return ToolResult::fail(
         fmt::format("HTTP Request failed with status code {}", response_code));

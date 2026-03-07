@@ -165,7 +165,7 @@ public:
   }
 
   // ── 提交异步任务 ────────────────────────────────────────
-  TaskId submit_task(std::string name, std::function<void()> work,
+  Result<TaskId> submit_task(std::string name, std::function<void()> work,
                      AgentId agent_id = 0, Priority priority = Priority::Normal,
                      std::vector<TaskId> deps = {}) {
     auto task = std::make_shared<scheduler::AgentTaskDescriptor>();
@@ -176,8 +176,7 @@ public:
     task->priority = priority;
     task->depends_on = std::move(deps);
 
-    auto result = scheduler_->submit(task);
-    return result.value_or(0);
+    return scheduler_->submit(task);
   }
 
   // ── 子系统访问器 ────────────────────────────────────────

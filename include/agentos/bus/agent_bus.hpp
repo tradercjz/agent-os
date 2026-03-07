@@ -45,23 +45,26 @@ struct BusMessage {
     TimePoint           timestamp{now()};
     bool                redacted{false}; // Hub 脱敏标记
 
+    // Unified ID generator — avoids collisions between request/response/event IDs
+    static uint64_t next_id() {
+        static std::atomic<uint64_t> id_gen{1};
+        return id_gen++;
+    }
+
     static BusMessage make_request(AgentId from, AgentId to,
                                    std::string topic, std::string payload) {
-        static std::atomic<uint64_t> id_gen{1};
-        return {id_gen++, MessageType::Request, from, to,
+        return {next_id(), MessageType::Request, from, to,
                 std::move(topic), std::move(payload)};
     }
 
     static BusMessage make_response(const BusMessage& req, std::string payload) {
-        static std::atomic<uint64_t> id_gen{100000};
-        return {id_gen++, MessageType::Response, req.to, req.from,
+        return {next_id(), MessageType::Response, req.to, req.from,
                 req.topic, std::move(payload), req.id};
     }
 
     static BusMessage make_event(AgentId from, std::string topic,
                                   std::string payload) {
-        static std::atomic<uint64_t> id_gen{200000};
-        return {id_gen++, MessageType::Event, from, 0,
+        return {next_id(), MessageType::Event, from, 0,
                 std::move(topic), std::move(payload)};
     }
 };

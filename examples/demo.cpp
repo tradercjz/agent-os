@@ -528,7 +528,8 @@ void demo_full_system() {
       },
       0, Priority::Low);
 
-  os.scheduler().wait_for(task_id, Duration{3000});
+  if (task_id.has_value())
+    os.scheduler().wait_for(*task_id, Duration{3000});
   ok(fmt::format("后台记忆巩固任务: {}", task_done ? "完成" : "超时"));
 
   // 快照所有 Agent

@@ -78,8 +78,8 @@ TEST_F(IntegrationTest, MultiAgentCommunication) {
 TEST_F(IntegrationTest, TaskSubmissionAndDependencies) {
   std::atomic<int> counter{0};
 
-  auto t1 = os_->submit_task("task1", [&] { counter += 1; });
-  auto t2 = os_->submit_task("task2", [&] { counter += 10; }, 0, Priority::Normal, {t1});
+  auto t1 = *os_->submit_task("task1", [&] { counter += 1; });
+  auto t2 = *os_->submit_task("task2", [&] { counter += 10; }, 0, Priority::Normal, {t1});
 
   EXPECT_TRUE(os_->scheduler().wait_for(t2, Duration{5000}));
   EXPECT_EQ(counter.load(), 11);
@@ -126,8 +126,8 @@ TEST_F(IntegrationTest, ConcurrentTaskSubmission) {
 
   std::vector<TaskId> ids;
   for (int i = 0; i < N; ++i) {
-    auto tid = os_->submit_task("concurrent_" + std::to_string(i),
-                                [&] { completed++; });
+    auto tid = *os_->submit_task("concurrent_" + std::to_string(i),
+                                 [&] { completed++; });
     ids.push_back(tid);
   }
 

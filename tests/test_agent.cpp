@@ -128,7 +128,9 @@ TEST_F(AgentOSTest, SystemStatus) {
 
 TEST_F(AgentOSTest, SubmitAsyncTask) {
   std::atomic<int> counter{0};
-  auto tid = os_->submit_task("test_task", [&] { counter++; });
+  auto tid_result = os_->submit_task("test_task", [&] { counter++; });
+  ASSERT_TRUE(tid_result.has_value());
+  auto tid = *tid_result;
   EXPECT_GT(tid, 0);
 
   os_->scheduler().wait_for(tid, Duration{5000});
