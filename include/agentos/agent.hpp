@@ -61,7 +61,7 @@ public:
   Result<std::string> remember(std::string content, float importance = 0.5f);
   Result<std::vector<memory::SearchResult>> recall(std::string_view query,
                                                    size_t k = 5);
-  void send(AgentId target, std::string topic, std::string payload);
+  bool send(AgentId target, std::string topic, std::string payload);
   std::optional<bus::BusMessage> recv(Duration timeout = Duration{3000});
 
   AgentId id() const { return id_; }
@@ -299,10 +299,10 @@ Agent::recall(std::string_view query, size_t k) {
   return os_->memory().recall(emb, {}, k);
 }
 
-inline void Agent::send(AgentId target, std::string topic,
+inline bool Agent::send(AgentId target, std::string topic,
                         std::string payload) {
-  os_->bus().send(bus::BusMessage::make_request(id_, target, std::move(topic),
-                                                std::move(payload)));
+  return os_->bus().send(bus::BusMessage::make_request(id_, target, std::move(topic),
+                                                       std::move(payload)));
 }
 
 inline std::optional<bus::BusMessage> Agent::recv(Duration timeout) {

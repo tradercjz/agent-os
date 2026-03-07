@@ -910,21 +910,22 @@ public:
     long_term_->forget(id);
   }
 
-  // 将工作记忆中的重要内容晋升到长期记忆
-  void consolidate(float importance_threshold = 0.6f) {
+  // 将工作记忆中的重要内容晋升到长期记忆，返回晋升数量
+  size_t consolidate(float importance_threshold = 0.6f) {
     auto r = working_->get_all();
-    bool wrote_any = false;
+    size_t promoted = 0;
     for (auto &entry : r) {
       if (entry.importance >= importance_threshold) {
         long_term_->write(entry);
-        wrote_any = true;
+        ++promoted;
       }
     }
     // Flush LTM index once after batch write (avoids O(N²) index saves)
-    if (wrote_any) {
+    if (promoted > 0) {
       if (auto *ltm = dynamic_cast<LongTermMemory *>(long_term_.get()))
         ltm->flush();
     }
+    return promoted;
   }
 
   WorkingMemory &working() { return *working_; }

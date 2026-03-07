@@ -340,86 +340,37 @@ public:
 
   // 主要入口：带限流的同步推理
   Result<LLMResponse> infer(const LLMRequest &req) {
-    // 估算本次请求的 token 消耗
-    TokenCount estimated = 0;
-    for (auto &m : req.messages)
-      estimated += ILLMBackend::estimate_tokens(m.content);
-    estimated += req.max_tokens;
-
-    // 限流检查（重试最多 3 次，等待后重试）
-    for (int attempt = 0; attempt < 3; ++attempt) {
-      auto [ok, wait] = rate_limiter_.try_consume(estimated);
-      if (ok)
-        break;
-      if (attempt == 2) {
-        metrics_.rate_limit_hits++;
-        return make_error(
-            ErrorCode::RateLimitExceeded,
-            fmt::format("Rate limit: need {}ms wait", wait.count()));
-      }
-      std::this_thread::sleep_for(wait);
-    }
+    TokenCount estimated = estimate_request_tokens(req);
+    if (auto err = acquire_rate_limit(estimated))
+      return make_unexpected(*err);
 
     metrics_.total_requests++;
     auto result = backend_->complete(req);
-    if (result) {
-      metrics_.total_tokens += result->total_tokens();
-    } else {
-      metrics_.errors++;
-    }
+    track_result(result);
     return result;
   }
 
   // 流式推理：在推理过程中通过回调函数实时返回生成的 token
   Result<LLMResponse> stream_infer(const LLMRequest &req,
                                    ILLMBackend::TokenCallback cb) {
-    TokenCount estimated = 0;
-    for (auto &m : req.messages)
-      estimated += ILLMBackend::estimate_tokens(m.content);
-    estimated += req.max_tokens;
-
-    for (int attempt = 0; attempt < 3; ++attempt) {
-      auto [ok, wait] = rate_limiter_.try_consume(estimated);
-      if (ok)
-        break;
-      if (attempt == 2) {
-        metrics_.rate_limit_hits++;
-        return make_error(
-            ErrorCode::RateLimitExceeded,
-            fmt::format("Rate limit: need {}ms wait", wait.count()));
-      }
-      std::this_thread::sleep_for(wait);
-    }
+    TokenCount estimated = estimate_request_tokens(req);
+    if (auto err = acquire_rate_limit(estimated))
+      return make_unexpected(*err);
 
     metrics_.total_requests++;
     auto result = backend_->stream(req, std::move(cb));
-    if (result) {
-      metrics_.total_tokens += result->total_tokens();
-    } else {
-      metrics_.errors++;
-    }
+    track_result(result);
     return result;
   }
 
   // 获取文本向量嵌入
   Result<EmbeddingResponse> embed(const EmbeddingRequest &req) {
     TokenCount estimated = 0;
-    for (const auto &text : req.inputs) {
+    for (const auto &text : req.inputs)
       estimated += ILLMBackend::estimate_tokens(text);
-    }
 
-    for (int attempt = 0; attempt < 3; ++attempt) {
-      auto [ok, wait] = rate_limiter_.try_consume(estimated);
-      if (ok)
-        break;
-      if (attempt == 2) {
-        metrics_.rate_limit_hits++;
-        return make_error(
-            ErrorCode::RateLimitExceeded,
-            fmt::format("Rate limit: need {}ms wait", wait.count()));
-      }
-      std::this_thread::sleep_for(wait);
-    }
+    if (auto err = acquire_rate_limit(estimated))
+      return make_unexpected(*err);
 
     metrics_.total_requests++;
     auto result = backend_->embed(req);
@@ -436,6 +387,40 @@ public:
   std::string model_name() const { return backend_->name(); }
 
 private:
+  // Estimate total tokens for a chat request
+  static TokenCount estimate_request_tokens(const LLMRequest &req) {
+    TokenCount estimated = 0;
+    for (auto &m : req.messages)
+      estimated += ILLMBackend::estimate_tokens(m.content);
+    estimated += req.max_tokens;
+    return estimated;
+  }
+
+  // Try to acquire rate limit tokens, retrying up to 3 times
+  std::optional<Error> acquire_rate_limit(TokenCount estimated) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      auto [ok, wait] = rate_limiter_.try_consume(estimated);
+      if (ok)
+        return std::nullopt;
+      if (attempt == 2) {
+        metrics_.rate_limit_hits++;
+        return Error{ErrorCode::RateLimitExceeded,
+                     fmt::format("Rate limit: need {}ms wait", wait.count())};
+      }
+      std::this_thread::sleep_for(wait);
+    }
+    return std::nullopt;
+  }
+
+  // Track metrics after LLM call
+  void track_result(const Result<LLMResponse> &result) {
+    if (result) {
+      metrics_.total_tokens += result->total_tokens();
+    } else {
+      metrics_.errors++;
+    }
+  }
+
   std::unique_ptr<ILLMBackend> backend_;
   TokenBucketRateLimiter rate_limiter_;
   KernelMetrics metrics_;
