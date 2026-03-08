@@ -173,7 +173,8 @@ public:
   std::vector<MemoryEntry> get_all() override {
     std::lock_guard lk(mu_);
     std::vector<MemoryEntry> results;
-    for (auto &[id, entry] : store_)
+    results.reserve(store_.size());
+    for (const auto &[id, entry] : store_)
       results.push_back(entry);
     return results;
   }
@@ -380,7 +381,8 @@ public:
   std::vector<MemoryEntry> get_all() override {
     std::lock_guard lk(mu_);
     std::vector<MemoryEntry> results;
-    for (auto &[id, entry] : store_)
+    results.reserve(store_.size());
+    for (const auto &[id, entry] : store_)
       results.push_back(entry);
     return results;
   }
@@ -618,7 +620,8 @@ public:
   std::vector<MemoryEntry> get_all() override {
     std::lock_guard lk(mu_);
     std::vector<MemoryEntry> results;
-    for (auto &[id, rec] : index_) {
+    results.reserve(index_.size());
+    for (const auto &[id, rec] : index_) {
       if (auto entry = read_locked(id))
         results.push_back(std::move(*entry));
     }

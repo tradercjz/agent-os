@@ -97,7 +97,7 @@ public:
       std::string chunk_id = doc_id + "_chunk_" + std::to_string(i);
 
       // 去重：跳过已存在的 chunk
-      if (chunk_content_.count(chunk_id))
+      if (chunk_content_.contains(chunk_id))
         continue;
 
       bm25_.add_document(chunk_id, chunks[i]);
@@ -372,6 +372,7 @@ public:
       size_t k = std::min(internal_k, available);
       if (k > 0) {
         auto result = hnsw_->searchKnn(emb_resp->embeddings[0].data(), k);
+        dense_results.reserve(k);
         while (!result.empty()) {
           auto item = result.top();
           auto it = hnsw_id_to_chunk_.find(item.second);
@@ -380,6 +381,7 @@ public:
           }
           result.pop();
         }
+        // HNSW returns max-heap (highest distance first); reverse for ascending order
         std::reverse(dense_results.begin(), dense_results.end());
       }
     }

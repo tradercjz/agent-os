@@ -285,6 +285,8 @@ inline Result<std::string> Agent::remember(std::string content,
 
 inline Result<std::vector<memory::SearchResult>>
 Agent::recall(std::string_view query, size_t k) {
+  if (query.empty())
+    return make_error(ErrorCode::InvalidArgument, "recall: query must not be empty");
   kernel::EmbeddingRequest req{{std::string(query)}, ""};
   auto emb_res = os_->kernel().embed(req);
   memory::Embedding emb;
