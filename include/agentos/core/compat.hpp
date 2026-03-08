@@ -41,6 +41,8 @@ public:
     // 值构造
     Expected(T val) : data_(std::in_place_index<0>, std::move(val)) {}
 
+    ~Expected() noexcept = default;
+
     // 错误构造
     Expected(Unexpected<E> u)
         : data_(std::in_place_index<1>, std::move(u.err)) {}
@@ -84,6 +86,8 @@ class [[nodiscard]] Expected<void, E> {
 public:
     Expected() noexcept : has_value_(true) {}
     Expected(Unexpected<E> u) : has_value_(false), err_(std::move(u.err)) {}
+
+    ~Expected() noexcept = default;
 
     bool has_value() const noexcept { return has_value_; }
     explicit operator bool() const noexcept { return has_value_; }

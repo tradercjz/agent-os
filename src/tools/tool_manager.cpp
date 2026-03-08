@@ -163,10 +163,15 @@ static size_t curl_write_callback(void *contents, size_t size, size_t nmemb,
 // RAII wrapper for CURL handle，避免异常时泄漏
 struct CurlGuard {
   CURL *handle;
-  explicit CurlGuard(CURL *h) : handle(h) {}
-  ~CurlGuard() { if (handle) curl_easy_cleanup(handle); }
+  explicit CurlGuard(CURL *h) noexcept : handle(h) {}
+  ~CurlGuard() noexcept { if (handle) curl_easy_cleanup(handle); }
   CurlGuard(const CurlGuard &) = delete;
   CurlGuard &operator=(const CurlGuard &) = delete;
+  CurlGuard(CurlGuard &&other) noexcept : handle(other.handle) { other.handle = nullptr; }
+  CurlGuard &operator=(CurlGuard &&other) noexcept {
+    if (this != &other) { if (handle) curl_easy_cleanup(handle); handle = other.handle; other.handle = nullptr; }
+    return *this;
+  }
 };
 
 // SSRF protection: block requests to private/internal networks
@@ -181,7 +186,7 @@ static bool is_private_ip(const std::string &hostname) {
   // Replace manual freeaddrinfo with RAII guard to prevent leak on exception path
   struct AddrInfoGuard {
     struct addrinfo *ptr = nullptr;
-    ~AddrInfoGuard() { if (ptr) freeaddrinfo(ptr); }
+    ~AddrInfoGuard() noexcept { if (ptr) freeaddrinfo(ptr); }
   } addr_guard;
 
   struct addrinfo hints{};

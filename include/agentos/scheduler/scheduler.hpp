@@ -14,6 +14,7 @@
 #include <optional>
 #include <queue>
 #include <set>
+#include <span>
 #include <stack>
 #include <thread>
 #include <unordered_map>
@@ -150,7 +151,7 @@ public:
     }
 
     // 死锁检测：检查是否存在循环等待
-    bool detect_deadlock(const std::vector<TaskId>& waiting_tasks) {
+    bool detect_deadlock(std::span<const TaskId> waiting_tasks) {
         std::lock_guard lk(mu_);
         // 构建等待图并检测环路
         std::unordered_set<TaskId> waiting_set(waiting_tasks.begin(),
@@ -310,7 +311,11 @@ public:
         }
     }
 
-    // 提交任务
+    /// Submit a task for execution.
+    /// @return Task ID on success, error on failure.
+    /// @exception_safety Basic guarantee: if an exception occurs during
+    /// dependency graph registration, the task may be partially registered.
+    /// Caller should cancel() in that case.
     [[nodiscard]] Result<TaskId> submit(TaskPtr task) {
         // 先注册节点，再添加依赖边（否则 add_task 会覆盖 deps）
         dep_graph_.add_task(task->id, task->priority);
@@ -441,7 +446,7 @@ private:
     void worker_loop() {
         while (running_) {
             TaskPtr task = dequeue_task();
-            if (!task) continue;
+            if (!task) [[unlikely]] continue;
 
             // Task state is already transitioned to Running by dequeue_task under lock
             try {
@@ -480,7 +485,7 @@ private:
                 cv_.wait_for(lk, std::chrono::milliseconds(kDispatchLoopInterval.count()),
                              [&st] { return st.stop_requested(); });
             }
-            if (st.stop_requested()) break;
+            if (st.stop_requested()) [[unlikely]] break;
             metrics_.dispatch_cycles++;
             // 死锁检测：snapshot tasks while holding lock, then release before detection
             std::vector<TaskId> waiting;
@@ -534,7 +539,7 @@ private:
                    !priority_queue_.empty() ||
                    !fifo_queue_.empty();
         });
-        if (!running_) return nullptr;
+        if (!running_) [[unlikely]] return nullptr;
 
         TaskPtr task = nullptr;
         // INVARIANT: mu_ must be held when accessing task->state to prevent
@@ -576,7 +581,7 @@ private:
     // ── 优先级队列（最大堆）────────────────────────────────────
     using PQEntry = std::pair<int, TaskPtr>;
     struct PQCmp {
-        bool operator()(const PQEntry& a, const PQEntry& b) const {
+        bool operator()(const PQEntry& a, const PQEntry& b) const noexcept {
             return a.first < b.first; // 高优先级在顶
         }
     };

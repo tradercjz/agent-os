@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -158,25 +159,26 @@ struct TaintedData {
 class TaintTracker : private NonCopyable {
 public:
     // 注册数据来源
-    void taint(const std::string& data_id, TrustLevel level,
+    void taint(std::string_view data_id, TrustLevel level,
                std::string source = "") {
         std::lock_guard lk(mu_);
+        std::string data_id_str(data_id);
         // R7-20: Use LRU-like eviction when map is full
-        if (taint_map_.size() >= kMaxTaintEntries && !taint_map_.contains(data_id)) {
+        if (taint_map_.size() >= kMaxTaintEntries && !taint_map_.contains(data_id_str)) {
             // Evict the oldest entry (first in insertion order for unordered_map — imprecise but functional)
             // For true LRU, would need ordered container; for now evict first entry as simple strategy
             auto victim = taint_map_.begin();
             LOG_WARN(fmt::format("[Security:TaintTracker] Evicting oldest taint entry '{}' "
                                  "to make room for '{}' (map full at {} entries)",
-                                 victim->first, data_id, kMaxTaintEntries));
+                                 victim->first, data_id_str, kMaxTaintEntries));
             taint_map_.erase(victim);
         }
-        taint_map_[data_id] = {data_id, level, std::move(source)};
+        taint_map_[data_id_str] = {data_id_str, level, std::move(source)};
     }
 
-    TrustLevel get_trust(const std::string& data_id) const noexcept {
+    TrustLevel get_trust(std::string_view data_id) const noexcept {
         std::lock_guard lk(mu_);
-        auto it = taint_map_.find(data_id);
+        auto it = taint_map_.find(std::string(data_id));
         if (it == taint_map_.end()) return TrustLevel::Trusted;
         return it->second.trust;
     }
@@ -482,14 +484,14 @@ private:
     mutable std::mutex audit_mu_;
     static constexpr size_t kAuditLogCapacity = 1000;
 
-    void audit(std::string msg) {
+    void audit(std::string_view event) {
         std::lock_guard<std::mutex> lock(audit_mu_);
         // Format: [ISO8601_timestamp] event
         auto now = std::chrono::system_clock::now();
         auto t   = std::chrono::system_clock::to_time_t(now);
         char ts[32];
         std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
-        std::string entry = fmt::format("[{}] {}", ts, msg);
+        std::string entry = fmt::format("[{}] {}", ts, event);
 
         if (audit_log_.size() >= kAuditLogCapacity) {
             // Drop oldest half to make room

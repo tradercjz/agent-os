@@ -216,7 +216,7 @@ public:
                 auto it = channels_.find(agent_id);
                 if (it != channels_.end()) {
                     auto redacted_event = redact_if_needed(event, agent_id);
-                    it->second->push(redacted_event);
+                    (void)it->second->push(redacted_event);  // drop on full is by-design
                 }
             }
         }

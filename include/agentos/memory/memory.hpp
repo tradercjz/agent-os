@@ -257,7 +257,7 @@ public:
       }
 
       // FIX #21: Reject dimension mismatch instead of warning
-      if (hnsw_index_ && entry.embedding.size() != dim_) {
+      if (hnsw_index_ && entry.embedding.size() != dim_) [[unlikely]] {
         return make_error(ErrorCode::InvalidArgument,
                          fmt::format("ShortTermMemory: embedding dimension mismatch: "
                                     "expected {}, got {}",
@@ -354,7 +354,7 @@ public:
     std::lock_guard lk(mu_);
     std::vector<SearchResult> results;
 
-    if (q_emb.empty() || !hnsw_index_ || hnsw_index_->cur_element_count == 0) {
+    if (q_emb.empty() || !hnsw_index_ || hnsw_index_->cur_element_count == 0) [[unlikely]] {
       // 退化为线性过滤（无 embedding 或索引为空时）
       for (auto &[id, entry] : store_) {
         if (filter.match(entry.user_id, entry.agent_id, entry.session_id,
@@ -367,7 +367,7 @@ public:
       return results;
     }
 
-    if (q_emb.size() != dim_) {
+    if (q_emb.size() != dim_) [[unlikely]] {
       return make_error(ErrorCode::InvalidArgument, "Query dimension mismatch");
     }
 

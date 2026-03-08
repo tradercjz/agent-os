@@ -35,6 +35,8 @@ public:
     return logger;
   }
 
+  static constexpr LogLevel kDefaultLogLevel = LogLevel::Warn;
+
   void set_level(LogLevel level) { level_ = level; }
   LogLevel level() const { return level_; }
 
@@ -92,7 +94,7 @@ public:
 
 private:
   Logger() = default;
-  LogLevel level_{LogLevel::Warn}; // Default: only warnings and errors
+  LogLevel level_{kDefaultLogLevel}; // Default: only warnings and errors
   LogSink custom_sink_;
   std::mutex mu_;
 };

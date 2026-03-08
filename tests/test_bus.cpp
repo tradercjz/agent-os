@@ -10,7 +10,7 @@ using namespace agentos::bus;
 TEST(ChannelTest, PushAndRecv) {
   Channel ch(1);
   auto msg = BusMessage::make_event(1, "test", "hello");
-  ch.push(msg);
+  (void)ch.push(msg);
 
   auto recv = ch.recv(Duration{1000});
   ASSERT_TRUE(recv.has_value());
@@ -32,8 +32,8 @@ TEST(ChannelTest, RecvTimeoutReturnsNullopt) {
 
 TEST(ChannelTest, FIFOOrdering) {
   Channel ch(1);
-  ch.push(BusMessage::make_event(1, "t1", "first"));
-  ch.push(BusMessage::make_event(1, "t2", "second"));
+  (void)ch.push(BusMessage::make_event(1, "t1", "first"));
+  (void)ch.push(BusMessage::make_event(1, "t2", "second"));
 
   auto m1 = ch.recv(Duration{100});
   auto m2 = ch.recv(Duration{100});

@@ -120,7 +120,7 @@ public:
   ConsumeResult try_consume(TokenCount n) {
     std::lock_guard lk(mu_);
     refill_locked();
-    if (bucket_ >= static_cast<double>(n)) {
+    if (bucket_ >= static_cast<double>(n)) [[likely]] {
       bucket_ -= n;
       return {true, Duration{0}};
     }

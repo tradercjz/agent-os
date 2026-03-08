@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -151,12 +152,12 @@ inline Result<void> validate_tool_args(const ToolSchema &schema,
 }
 
 // 使用 nlohmann::json 解析参数
-inline ParsedArgs parse_args(const std::string &json_str) {
+inline ParsedArgs parse_args(std::string_view json_str) {
   ParsedArgs args;
   if (json_str.empty())
     return args;
   try {
-    Json j = Json::parse(json_str);
+    Json j = Json::parse(std::string(json_str));
     if (j.is_object()) {
       for (const auto &[key, value] : j.items()) {
         if (value.is_string()) {
@@ -186,6 +187,9 @@ struct ToolResult {
   static ToolResult fail(std::string err) {
     return {false, "", std::move(err), false};
   }
+
+  // C++20 defaulted equality comparison
+  friend bool operator==(const ToolResult&, const ToolResult&) = default;
 };
 
 class ITool {
