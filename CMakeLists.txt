@@ -207,6 +207,7 @@ add_executable(
   tests/test_tool_manager.cpp
   tests/test_scheduler.cpp
   tests/test_context.cpp
+  tests/test_shortterm_regression.cpp
   tests/test_security.cpp
   tests/test_security_enhanced.cpp
   tests/test_bus.cpp

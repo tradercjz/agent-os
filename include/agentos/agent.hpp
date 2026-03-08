@@ -450,6 +450,10 @@ Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
   if (!os)
     return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
 
+  // R7-12: Validate user_msg is not empty
+  if (user_msg.empty())
+    return make_error(ErrorCode::InvalidArgument, "think: user_msg must not be empty");
+
   // Middleware: before think
   HookContext hook_ctx{id_, "think", user_msg, false, {}};
   if (!run_before_hooks(hook_ctx))
@@ -630,8 +634,9 @@ inline Result<std::string> ReActAgent::run(std::string user_input) {
     }
   }
 
-  return make_error(ErrorCode::Unknown,
-                    "ReAct loop exceeded max steps without reaching stop");
+  return make_error(ErrorCode::Timeout,
+                    fmt::format("ReActAgent: exceeded max_steps={} without producing final answer. "
+                                "Increase max_steps in AgentConfig or simplify the task.", MAX_STEPS));
 }
 
 } // namespace agentos

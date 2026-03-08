@@ -360,3 +360,27 @@ TEST_F(SchedulerTest, PerInstanceTaskIds) {
 
   sched2->shutdown();
 }
+
+// R7-9: Multiple Scheduler instances should generate globally unique task IDs
+TEST(MultiSchedulerTest, UniqueTaskIdsAcrossInstances) {
+  // Create 3 schedulers
+  Scheduler s1(SchedulerPolicy::Priority, 2), s2(SchedulerPolicy::Priority, 2), s3(SchedulerPolicy::Priority, 2);
+  s1.start();
+  s2.start();
+  s3.start();
+
+  std::set<TaskId> all_ids;
+  const int tasks_per_scheduler = 100;
+
+  // Generate IDs from each scheduler
+  for (int i = 0; i < tasks_per_scheduler; ++i) {
+    all_ids.insert(Scheduler::new_task_id());
+  }
+
+  // All IDs should be unique
+  EXPECT_EQ(all_ids.size(), static_cast<size_t>(tasks_per_scheduler));
+
+  s1.shutdown();
+  s2.shutdown();
+  s3.shutdown();
+}

@@ -317,7 +317,10 @@ public:
                          std::string base_url = "https://api.openai.com/v1",
                          std::string default_model = "gpt-4o-mini")
       : api_key_(std::move(api_key)), base_url_(std::move(base_url)),
-        default_model_(std::move(default_model)) {}
+        default_model_(std::move(default_model)) {
+    // R7-17: Validate base URL against SSRF attacks
+    validate_and_warn_ssrf();
+  }
 
   [[nodiscard]] Result<LLMResponse> complete(const LLMRequest &req) override;
   [[nodiscard]] Result<LLMResponse> stream(const LLMRequest &req, TokenCallback cb) override;
@@ -329,6 +332,9 @@ private:
   Result<LLMResponse> parse_response(const std::string &json_str) const;
   Result<std::string> http_post(const std::string &endpoint,
                                 const std::string &body) const;
+
+  // R7-17: SSRF validation
+  void validate_and_warn_ssrf() const;
 
   std::string api_key_;
   std::string base_url_;

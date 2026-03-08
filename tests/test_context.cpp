@@ -216,3 +216,11 @@ TEST(ContextSnapshotTest, DeserializeRejectsOversizedInput) {
   auto result = ContextSnapshot::deserialize(huge);
   EXPECT_FALSE(result.has_value());
 }
+
+// R7-7: Edge case — empty message handling
+TEST_F(ContextWindowTest, EmptyMessageHandling) {
+  // Empty messages should still be addable (the validator is in Agent::think, not ContextWindow)
+  win.add_evict_if_needed(Message::user(""));
+  EXPECT_EQ(win.message_count(), 1);
+  EXPECT_EQ(win.messages().back().content, "");
+}

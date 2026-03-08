@@ -275,15 +275,6 @@ enum class SchedulerPolicy { FIFO, RoundRobin, Priority };
 
 class Scheduler : private NonCopyable {
 public:
-    // Named constants for limits and defaults
-    static constexpr uint32_t kDefaultThreadPoolSize = 4;
-    static constexpr size_t kMaxDependencyGraphNodes = 100000;
-    static constexpr size_t kMaxDFSStackSize = 100000;
-    static constexpr Duration kDefaultTaskTimeout{30000};       // 30 seconds
-    static constexpr Duration kDefaultWaitTimeout{10000};       // 10 seconds
-    static constexpr Duration kDispatchLoopInterval{500};       // 500 milliseconds
-    static constexpr TaskId kInitialTaskId = 1000;
-
     explicit Scheduler(SchedulerPolicy policy = SchedulerPolicy::Priority,
                        uint32_t thread_pool_size = kDefaultThreadPoolSize)
         : policy_(policy), thread_pool_size_(thread_pool_size) {}
@@ -366,7 +357,7 @@ public:
         });
     }
 
-    TaskState task_state(TaskId id) const noexcept {
+    [[nodiscard]] TaskState task_state(TaskId id) const noexcept {
         std::lock_guard lk(mu_);
         auto it = all_tasks_.find(id);
         if (it == all_tasks_.end()) return TaskState::Failed;
@@ -378,7 +369,7 @@ public:
     SchedulerMetrics& metrics() noexcept { return metrics_; }
     const SchedulerMetrics& metrics() const noexcept { return metrics_; }
 
-    bool is_running() const noexcept { return running_.load(); }
+    [[nodiscard]] bool is_running() const noexcept { return running_.load(); }
 
     /// Returns current task execution order for debugging/testing.
     /// Thread-safe: acquires internal lock.
@@ -388,7 +379,7 @@ public:
     }
 
     /// Drain: wait for all pending/running tasks to finish (up to timeout)
-    bool drain(Duration timeout = Duration{kDefaultWaitTimeout}) {
+    [[nodiscard]] bool drain(Duration timeout = Duration{kDefaultWaitTimeout}) {
       std::unique_lock lk(mu_);
       bool success = done_cv_.wait_for(lk, timeout, [this] {
         for (auto &[id, task] : all_tasks_) {
@@ -416,7 +407,7 @@ public:
     }
 
     /// Number of pending + running tasks
-    size_t active_task_count() const {
+    [[nodiscard]] size_t active_task_count() const {
       std::lock_guard lk(mu_);
       size_t count = 0;
       for (auto &[id, task] : all_tasks_) {

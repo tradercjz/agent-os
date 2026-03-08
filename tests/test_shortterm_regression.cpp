@@ -6,9 +6,13 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <set>
 
 using namespace agentos;
 using namespace agentos::memory;
+
 
 // ── Fix #21 regression: dimension mismatch must return error ─
 TEST(ShortTermMemoryTest, DimensionMismatchReturnsError) {
@@ -108,4 +112,76 @@ TEST(MemoryEntryTest, CosineSimilarityNonEmptyVectors) {
 
   EXPECT_NEAR(sim_ortho, 0.0f, 1e-5f);
   EXPECT_NEAR(sim_same,  1.0f, 1e-5f);
+}
+
+// R7-8: Search on empty STM returns empty results (not crash/error)
+TEST(ShortTermMemoryTest, SearchOnEmptyStoreReturnsEmpty) {
+  // Create STM with no data written
+  ShortTermMemory empty_stm(128);
+
+  // Search should return empty results, not crash
+  Embedding query = {0.1f, 0.2f, 0.3f, 0.4f};
+  MemoryFilter f;
+  auto result = empty_stm.search(query, f, 5);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_TRUE(result->empty());
+}
+
+// R7-8: Recall on empty store
+TEST(ShortTermMemoryTest, RecallEmptyStoreGraceful) {
+  ShortTermMemory empty_stm(128);
+  Embedding query = {1.0f, 0.0f, 0.0f, 0.0f};
+  MemoryFilter f;
+  auto result = empty_stm.search(query, f, 10);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_EQ(result->size(), 0u);
+}
+
+// R7-11: Concurrent stress test — multiple threads writing + searching simultaneously
+TEST(ShortTermMemoryTest, ConcurrentWriteSearchStress) {
+  constexpr int kWriteThreads = 8;
+  constexpr int kSearchThreads = 4;
+  constexpr int kOpsPerThread = 50;
+
+  ShortTermMemory stm(512);
+  std::atomic<int> writes_done{0};
+  std::atomic<int> searches_done{0};
+  std::atomic<bool> has_error{false};
+
+  // Writer threads
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kWriteThreads; ++t) {
+    threads.emplace_back([&, t]() {
+      for (int i = 0; i < kOpsPerThread; ++i) {
+        MemoryEntry e;
+        e.id = fmt::format("stress_{}_{}", t, i);
+        e.content = "stress test entry";
+        e.embedding = {static_cast<float>(t), static_cast<float>(i), 0.5f, 0.5f};
+        e.importance = 0.5f;
+        auto r = stm.write(e);
+        if (!r) has_error.store(true);
+        ++writes_done;
+      }
+    });
+  }
+
+  // Searcher threads (run concurrently with writers)
+  for (int t = 0; t < kSearchThreads; ++t) {
+    threads.emplace_back([&, t]() {
+      MemoryFilter f;
+      for (int i = 0; i < kOpsPerThread; ++i) {
+        Embedding q = {static_cast<float>(t), 0.0f, 0.5f, 0.5f};
+        auto r = stm.search(q, f, 5);
+        // Search may return empty or results — both OK
+        if (!r) has_error.store(true);
+        ++searches_done;
+      }
+    });
+  }
+
+  for (auto &th : threads) th.join();
+
+  EXPECT_FALSE(has_error.load());
+  EXPECT_EQ(writes_done.load(), kWriteThreads * kOpsPerThread);
+  EXPECT_EQ(searches_done.load(), kSearchThreads * kOpsPerThread);
 }

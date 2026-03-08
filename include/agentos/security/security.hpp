@@ -161,11 +161,15 @@ public:
     void taint(const std::string& data_id, TrustLevel level,
                std::string source = "") {
         std::lock_guard lk(mu_);
-        // Cap map size to prevent unbounded memory growth
+        // R7-20: Use LRU-like eviction when map is full
         if (taint_map_.size() >= kMaxTaintEntries && !taint_map_.contains(data_id)) {
-            LOG_WARN(fmt::format("Taint map full (size={}, limit={}): dropped data_id='{}'",
-                                  taint_map_.size(), kMaxTaintEntries, data_id));
-            return; // reject when full
+            // Evict the oldest entry (first in insertion order for unordered_map — imprecise but functional)
+            // For true LRU, would need ordered container; for now evict first entry as simple strategy
+            auto victim = taint_map_.begin();
+            LOG_WARN(fmt::format("[Security:TaintTracker] Evicting oldest taint entry '{}' "
+                                 "to make room for '{}' (map full at {} entries)",
+                                 victim->first, data_id, kMaxTaintEntries));
+            taint_map_.erase(victim);
         }
         taint_map_[data_id] = {data_id, level, std::move(source)};
     }

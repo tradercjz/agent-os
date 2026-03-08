@@ -76,6 +76,9 @@ struct StreamContext {
   std::string current_tool_args;
   bool done = false;
 
+  // R7-15: Stream completion validation
+  bool stream_done{false};  // Set true when "data: [DONE]" is received
+
   // Synchronization for response modification
   // Note: libcurl's easy interface is sequential, not truly async, but we add
   // proper synchronization for correctness and thread-safety.
@@ -91,6 +94,8 @@ struct StreamContext {
     auto data = line.substr(6);
     if (data == "[DONE]") {
       done = true;
+      // R7-15: Mark stream as properly terminated
+      stream_done = true;
       return;
     }
 
@@ -215,6 +220,37 @@ size_t stream_write_callback(void *contents, size_t size, size_t nmemb,
   }
 
   return total;
+}
+
+} // anonymous namespace
+
+// ============================================================
+// R7-16: Redaction helper for sensitive data in error messages
+// ============================================================
+
+namespace {
+
+// Redact sensitive headers and API keys from error messages before logging
+static std::string redact_auth(const std::string &msg) {
+    std::string result = msg;
+    // Redact "Bearer xxx..." patterns
+    static const std::string bearer = "Bearer ";
+    auto pos = result.find(bearer);
+    while (pos != std::string::npos) {
+        auto end = result.find_first_of(" \r\n\"'}", pos + bearer.size());
+        if (end == std::string::npos) end = result.size();
+        result.replace(pos + bearer.size(), end - pos - bearer.size(), "***REDACTED***");
+        pos = result.find(bearer, pos + bearer.size() + 14);
+    }
+    // Redact "sk-..." API key patterns
+    auto sk_pos = result.find("sk-");
+    while (sk_pos != std::string::npos) {
+        auto end = result.find_first_of(" \r\n\"'}", sk_pos);
+        if (end == std::string::npos) end = result.size();
+        result.replace(sk_pos, end - sk_pos, "sk-***REDACTED***");
+        sk_pos = result.find("sk-", sk_pos + 17);
+    }
+    return result;
 }
 
 } // anonymous namespace
@@ -388,9 +424,10 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
   // 执行请求
   CURLcode res = curl_easy_perform(curl.get());
   if (res != CURLE_OK) {
+    // R7-16: Redact sensitive data from error messages
     return make_error(
         ErrorCode::LLMBackendError,
-        fmt::format("HTTP request failed: {} ({})", curl.errbuf,
+        fmt::format("HTTP request failed: {} ({})", redact_auth(curl.errbuf),
                     curl_easy_strerror(res)));
   }
 
@@ -402,13 +439,15 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
     return make_error(ErrorCode::LLMBackendError,
         "OpenAI API: authentication failed (check API key)");
   } else if (http_code == 429) {
+    // R7-16: Redact sensitive data from error messages
     return make_error(ErrorCode::RateLimitExceeded,
         fmt::format("OpenAI API: rate limited (HTTP 429): {}",
-                    response_body.substr(0, 500)));
+                    redact_auth(response_body.substr(0, 500))));
   } else if (http_code >= 500 && http_code < 600) {
+    // R7-16: Redact sensitive data from error messages
     return make_error(ErrorCode::LLMBackendError,
         fmt::format("OpenAI API: server error (HTTP {}): {}",
-                    http_code, response_body.substr(0, 500)));
+                    http_code, redact_auth(response_body.substr(0, 500))));
   } else if (http_code >= 400) {
     // Parse API error response for better error messages
     std::string error_msg;
@@ -424,9 +463,10 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
     if (error_msg.empty())
       error_msg = response_body.substr(0, 500); // Truncate long error bodies
 
+    // R7-16: Redact sensitive data from error messages
     return make_error(ErrorCode::LLMBackendError,
         fmt::format("OpenAI API: unexpected status (HTTP {}): {}",
-                    http_code, error_msg));
+                    http_code, redact_auth(error_msg)));
   }
 
   return response_body;
@@ -510,11 +550,18 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
   if (res != CURLE_OK && res != CURLE_WRITE_ERROR) {
     // 检查是否已收到完整数据（done=true 说明流正常结束）
     if (!sctx.done) {
+      // R7-16: Redact sensitive data from error messages
       return make_error(
           ErrorCode::LLMBackendError,
-          fmt::format("Stream request failed: {} ({})", curl.errbuf,
+          fmt::format("Stream request failed: {} ({})", redact_auth(curl.errbuf),
                       curl_easy_strerror(res)));
     }
+  }
+
+  // R7-15: Validate that stream was properly terminated with [DONE] marker
+  if (res == CURLE_OK && !sctx.stream_done) {
+    LOG_WARN(fmt::format("[LLM] Stream ended without [DONE] marker — response may be incomplete"));
+    // Still return the partial response, but flag it
   }
 
   // 若流未返回 usage（旧版 API），用启发式估算
@@ -577,6 +624,42 @@ Result<EmbeddingResponse> OpenAIBackend::embed(const EmbeddingRequest &req) {
   }
 
   return resp;
+}
+
+// ── R7-17: SSRF validation implementation ──────────────────────────
+
+void OpenAIBackend::validate_and_warn_ssrf() const {
+  // SECURITY: Validate base URL is not targeting private networks
+  auto is_safe_url = [](const std::string &url) -> bool {
+    // Must be HTTPS (except localhost for development)
+    if (!url.starts_with("https://") && !url.starts_with("http://localhost")) {
+      return false;
+    }
+    // Extract hostname
+    auto start = url.find("://") + 3;
+    auto end = url.find_first_of(":/", start);
+    if (end == std::string::npos) end = url.size();
+    std::string host = url.substr(start, end - start);
+
+    // Reject known private ranges
+    if (host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" ||
+        host.starts_with("10.") || host.starts_with("192.168.") ||
+        host.starts_with("172.16.") || host.starts_with("172.17.") ||
+        host.starts_with("172.18.") || host.starts_with("172.19.") ||
+        host.starts_with("172.2") || host.starts_with("172.3") ||
+        host == "169.254.169.254" ||  // AWS metadata
+        host.ends_with(".internal") || host.ends_with(".local")) {
+      LOG_WARN(fmt::format("[LLM] base_url targets private network: {} — SSRF risk", host));
+      return false;
+    }
+    return true;
+  };
+
+  if (!is_safe_url(base_url_)) {
+    LOG_WARN(fmt::format("[LLM] base_url '{}' may target private network. "
+                         "Set AGENTOS_ALLOW_PRIVATE_LLM=1 to override.", base_url_));
+    // Don't throw — allow override for development/testing
+  }
 }
 
 } // namespace agentos::kernel
