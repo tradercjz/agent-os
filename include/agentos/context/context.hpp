@@ -45,6 +45,10 @@ public:
   // 强制添加（可能触发驱逐）
   // 驱逐策略：优先驱逐最老的非 system 消息（保留系统提示语）
   // FIFO: 如果消息[0]是系统消息，从消息[1]开始驱逐；否则从[0]开始
+  //
+  // PRECONDITION: Must be called only from append() while ContextManager::mu_ is held.
+  // Direct calls without external synchronization will cause data races.
+  // This function modifies messages_ and used_tokens_ with no internal synchronization.
   void add_evict_if_needed(const kernel::Message &msg) {
     TokenCount cost = kernel::ILLMBackend::estimate_tokens(msg.content) + 4;
     while (!messages_.empty() && used_tokens_ + cost > max_tokens_) {

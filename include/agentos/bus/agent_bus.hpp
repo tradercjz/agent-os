@@ -236,6 +236,10 @@ public:
                     all_accepted = false;
                     failed_recipients.push_back(msg.to);
                 }
+            } else {
+                all_accepted = false;
+                failed_recipients.push_back(msg.to);
+                LOG_WARN(fmt::format("[AgentBus] Message dropped: agent {} not registered", msg.to));
             }
         }
 

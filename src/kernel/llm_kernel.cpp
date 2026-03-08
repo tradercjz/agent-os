@@ -171,8 +171,8 @@ struct StreamContext {
           response->completion_tokens = static_cast<uint32_t>(std::max(0, usage["completion_tokens"].get<int>()));
         }
       }
-    } catch (const std::exception &) {
-      // 忽略单个 SSE chunk 的解析错误，继续处理后续数据
+    } catch (const std::exception &e) {
+      LOG_WARN(fmt::format("[SSE] JSON parse error on chunk: {}", e.what()));
     }
   }
 };
@@ -181,6 +181,7 @@ struct StreamContext {
 size_t stream_write_callback(void *contents, size_t size, size_t nmemb,
                               void *userp) {
   auto *ctx = static_cast<StreamContext *>(userp);
+  if (nmemb != 0 && size > (SIZE_MAX / nmemb)) return 0;  // abort curl transfer
   size_t total = size * nmemb;
 
   // Safety: cap line buffer at 1 MiB to prevent DoS via no-newline streams
@@ -465,7 +466,7 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
   resp.finish_reason = "stop";
 
   StreamContext sctx;
-  sctx.token_cb = std::move(cb);
+  sctx.token_cb = cb;  // copy, not move — cb may still be needed by caller
   sctx.response = &resp;
 
   curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());

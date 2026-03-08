@@ -461,7 +461,13 @@ public:
               fmt::format("Tool '{}' timed out after {}ms",
                           call.name, schema.timeout_ms));
         }
-        return future.get();
+        try {
+          return future.get();
+        } catch (const std::exception &e) {
+          return ToolResult{false, fmt::format("Tool threw exception: {}", e.what()), {}};
+        } catch (...) {
+          return ToolResult{false, "Tool threw unknown exception", {}};
+        }
       }
       return tool->execute(args);
     } catch (const std::exception &e) {

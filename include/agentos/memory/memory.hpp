@@ -76,10 +76,9 @@ struct MemoryEntry {
   // FIX #17: Precondition: both vectors must be non-empty and same size.
   // Returns normalized cosine similarity (assumes inputs are L2-normalized).
   static float cosine_similarity(const Embedding &a, const Embedding &b) {
-    // Precondition check: both vectors must be non-empty to distinguish from invalid input
-    assert(!a.empty() && !b.empty() && "cosine_similarity requires non-empty vectors");
-    if (a.size() != b.size())
-      return 0.0f;
+    // Runtime guards that work in release builds
+    if (a.empty() || b.empty()) return 0.0f;
+    if (a.size() != b.size()) return 0.0f;
     float dot = std::inner_product(a.begin(), a.end(), b.begin(), 0.0f);
     return dot; // 已归一化时 dot == cosine
   }
@@ -317,9 +316,9 @@ public:
   public:
     CustomFilter(
         const MemoryFilter &filter,
-        const std::unordered_map<hnswlib::labeltype, std::string> &label_to_id,
-        const std::unordered_map<std::string, MemoryEntry> &store)
-        : flt(filter), l2i(label_to_id), st(store) {}
+        std::unordered_map<hnswlib::labeltype, std::string> label_to_id,
+        std::unordered_map<std::string, MemoryEntry> store)
+        : flt(filter), l2i(std::move(label_to_id)), st(std::move(store)) {}
 
     bool operator()(hnswlib::labeltype label) override {
       auto id_it = l2i.find(label);
@@ -369,7 +368,7 @@ public:
     auto l2i_copy = label_to_id_;
     auto store_copy = store_;
 
-    CustomFilter custom_filter(filter, l2i_copy, store_copy);
+    CustomFilter custom_filter(filter, std::move(l2i_copy), std::move(store_copy));
 
     // InnerProductSpace: distance = 1.0 - dot_product
     size_t cur_count =
@@ -726,6 +725,9 @@ private:
       return make_error(ErrorCode::NotFound, "LTM: entry not found");
 
     std::ifstream ifs(path);
+    if (!ifs.is_open()) {
+      return make_error(ErrorCode::NotFound, fmt::format("Cannot open memory file: {}", path.string()));
+    }
     MemoryEntry entry;
     std::string line;
     std::getline(ifs, entry.id);

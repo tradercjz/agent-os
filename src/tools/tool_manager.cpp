@@ -192,12 +192,21 @@ ToolResult HttpFetchTool::execute(const ParsedArgs &args) {
   CurlGuard guard(raw); // RAII 保证 cleanup
 
   std::string output;
-  curl_easy_setopt(raw, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(raw, CURLOPT_WRITEFUNCTION, curl_write_callback);
-  curl_easy_setopt(raw, CURLOPT_WRITEDATA, &output);
-  curl_easy_setopt(raw, CURLOPT_TIMEOUT, 10L);       // 10s 超时
-  curl_easy_setopt(raw, CURLOPT_FOLLOWLOCATION, 1L); // 允许重定向
-  curl_easy_setopt(raw, CURLOPT_MAXREDIRS, 3L);
+
+  // Helper lambda to check curl_easy_setopt return codes
+  auto check_opt = [&](CURLcode code, const char* opt_name) {
+    if (code != CURLE_OK) {
+      LOG_WARN(fmt::format("[HttpTool] curl_easy_setopt({}) failed: {}",
+                           opt_name, curl_easy_strerror(code)));
+    }
+  };
+
+  check_opt(curl_easy_setopt(raw, CURLOPT_URL, url.c_str()), "CURLOPT_URL");
+  check_opt(curl_easy_setopt(raw, CURLOPT_WRITEFUNCTION, curl_write_callback), "CURLOPT_WRITEFUNCTION");
+  check_opt(curl_easy_setopt(raw, CURLOPT_WRITEDATA, &output), "CURLOPT_WRITEDATA");
+  check_opt(curl_easy_setopt(raw, CURLOPT_TIMEOUT, 10L), "CURLOPT_TIMEOUT");
+  check_opt(curl_easy_setopt(raw, CURLOPT_FOLLOWLOCATION, 1L), "CURLOPT_FOLLOWLOCATION");
+  check_opt(curl_easy_setopt(raw, CURLOPT_MAXREDIRS, 3L), "CURLOPT_MAXREDIRS");
 
   CURLcode res = curl_easy_perform(raw);
 

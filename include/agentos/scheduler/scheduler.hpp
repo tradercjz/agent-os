@@ -433,7 +433,12 @@ private:
     // 调度分发循环（死锁监控）
     void dispatch_loop(std::stop_token st) {
         while (!st.stop_requested()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(kDispatchLoopInterval.count()));
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_.wait_for(lk, std::chrono::milliseconds(kDispatchLoopInterval.count()),
+                             [&st] { return st.stop_requested(); });
+            }
+            if (st.stop_requested()) break;
             // 死锁检测：snapshot tasks while holding lock, then release before detection
             std::vector<TaskId> waiting;
             {
@@ -483,7 +488,10 @@ private:
         if (!running_) return nullptr;
 
         TaskPtr task = nullptr;
-        // Atomically check state and transition while holding lock to prevent TOCTOU
+        // INVARIANT: mu_ must be held when accessing task->state to prevent
+        // TOCTOU race between dequeue_task() and boost_critical_path().
+        // The CAS is atomic but the queue check + CAS sequence is not atomic,
+        // so we hold mu_ throughout to ensure consistency.
         if (policy_ == SchedulerPolicy::Priority && !priority_queue_.empty()) {
             task = priority_queue_.top().second;
             auto expected = TaskState::Pending;

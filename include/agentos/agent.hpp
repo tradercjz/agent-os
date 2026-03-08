@@ -343,8 +343,9 @@ private:
 
 inline Result<kernel::LLMResponse>
 Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
-  // Capture os_ in a local variable at the start to ensure it doesn't become
-  // null between the check and subsequent uses (protects against concurrent nullification)
+  // THREAD-SAFETY NOTE: os_ capture is not atomic. think() must not be called
+  // concurrently with detach()/destroy operations. Users are responsible for
+  // ensuring agent lifetime outlives all think() calls.
   AgentOS *os = os_;
   if (!os)
     return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
@@ -362,7 +363,11 @@ Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
   req.agent_id = id_;
   req.priority = config_.priority;
   auto &win = os->ctx().get_window(id_, config_.context_limit);
-  req.messages = {win.messages().begin(), win.messages().end()};
+  req.messages.clear();
+  req.messages.reserve(win.messages().size());
+  for (const auto &m : win.messages()) {
+    req.messages.push_back(m);
+  }
 
   // 将工具 Schema 注入请求（供真实 LLM function calling 使用）
   if (!config_.allowed_tools.empty()) {

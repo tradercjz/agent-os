@@ -247,9 +247,10 @@ public:
         // Input must not exceed kMaxScanLength to prevent truncation bypass attacks
         // Attackers could embed payloads past the truncation point
         if (text.size() > kMaxScanLength) {
-            LOG_ERROR(fmt::format("Input exceeds maximum scan length: {} > {} bytes",
-                                   text.size(), kMaxScanLength));
-            return {true, "input exceeds kMaxScanLength", 0.95f};
+            LOG_WARN(fmt::format("[Security] Input too large to scan: {} bytes (limit: {})",
+                                 text.size(), kMaxScanLength));
+            // Treat oversized input as suspicious but not certain injection
+            return {true, "input_too_large_for_scan", 0.5f};
         }
 
         // Normalize: lowercase + collapse whitespace (defeat spacing bypass)

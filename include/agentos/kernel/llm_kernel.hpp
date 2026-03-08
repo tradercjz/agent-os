@@ -125,8 +125,10 @@ public:
     }
     // 计算需要等待多少毫秒（clamp to sane range）
     double deficit = n - bucket_;
-    auto wait_ms = static_cast<int64_t>(
-        std::clamp(deficit / refill_rate_ * 1000.0, 0.0, static_cast<double>(kMaxWaitMs)));
+    double raw_wait = deficit / refill_rate_ * 1000.0;
+    if (raw_wait > static_cast<double>(kMaxWaitMs)) raw_wait = static_cast<double>(kMaxWaitMs);
+    if (raw_wait < 0.0) raw_wait = 0.0;
+    auto wait_ms = static_cast<int64_t>(raw_wait);
     return {false, Duration{wait_ms}};
   }
 
