@@ -73,8 +73,8 @@ public:
         completed_.insert(id);
         std::vector<TaskId> newly_ready;
         for (auto& [tid, node] : nodes_) {
-            if (completed_.count(tid)) continue;
-            if (enqueued_.count(tid)) continue; // 已入队的不再返回，避免重复
+            if (completed_.contains(tid)) continue;
+            if (enqueued_.contains(tid)) continue; // 已入队的不再返回，避免重复
             if (all_deps_satisfied_locked(tid)) {
                 enqueued_.insert(tid);
                 newly_ready.push_back(tid);
@@ -139,7 +139,7 @@ private:
         auto it = nodes_.find(id);
         if (it == nodes_.end()) return true;
         for (TaskId dep : it->second.deps) {
-            if (!completed_.count(dep)) return false;
+            if (!completed_.contains(dep)) return false;
         }
         return true;
     }
@@ -147,7 +147,7 @@ private:
     bool has_cycle_locked() const {
         std::unordered_set<TaskId> visited, in_stack;
         for (auto& [id, _] : nodes_) {
-            if (!visited.count(id) && dfs_cycle(id, visited, in_stack))
+            if (!visited.contains(id) && dfs_cycle(id, visited, in_stack))
                 return true;
         }
         return false;
@@ -161,9 +161,9 @@ private:
         auto it = nodes_.find(id);
         if (it != nodes_.end()) {
             for (TaskId dep : it->second.deps) {
-                if (!visited.count(dep)) {
+                if (!visited.contains(dep)) {
                     if (dfs_cycle(dep, visited, in_stack)) return true;
-                } else if (in_stack.count(dep)) {
+                } else if (in_stack.contains(dep)) {
                     return true;
                 }
             }
@@ -181,7 +181,7 @@ private:
             if (it == nodes_.end()) return false;
             for (TaskId dep : it->second.deps) {
                 if (dep == start) return true;
-                if (waiting.count(dep) && dfs(dep)) return true;
+                if (waiting.contains(dep) && dfs(dep)) return true;
             }
             return false;
         };
@@ -191,7 +191,7 @@ private:
     std::vector<TaskId> topological_sort_locked() const {
         std::unordered_map<TaskId, int> in_degree;
         for (auto& [id, node] : nodes_) {
-            if (!in_degree.count(id)) in_degree[id] = 0;
+            if (!in_degree.contains(id)) in_degree[id] = 0;
             for (TaskId dep : node.deps) in_degree[dep]++;
         }
         std::queue<TaskId> q;

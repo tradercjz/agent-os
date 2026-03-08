@@ -176,7 +176,7 @@ public:
         audit_push(event);
 
         for (auto& [agent_id, topics] : subscriptions_) {
-            if (topics.count(event.topic)) {
+            if (topics.contains(event.topic)) {
                 auto it = channels_.find(agent_id);
                 if (it != channels_.end()) {
                     auto redacted_event = redact_if_needed(event, agent_id);

@@ -171,7 +171,7 @@ public:
             "file_write", "db_write", "http_post"
         };
 
-        if (!sensitive_tools.count(target_tool)) return {};
+        if (!sensitive_tools.contains(target_tool)) return {};
 
         auto trust = get_trust(data_id);
         if (trust >= TrustLevel::External) {
@@ -316,9 +316,9 @@ public:
         // 1. RBAC 检查
         if (rbac_) {
             Permission required = Permission::ToolReadOnly;
-            if (dangerous_tools_.count(tool_id))
+            if (dangerous_tools_.contains(tool_id))
                 required = Permission::ToolDangerous;
-            else if (write_tools_.count(tool_id))
+            else if (write_tools_.contains(tool_id))
                 required = Permission::ToolWrite;
 
             auto r = rbac_->check(agent_id, required);
@@ -346,7 +346,7 @@ public:
         }
 
         // 4. 高风险操作需要人工批准
-        if (human_approval_ && critical_tools_.count(tool_id)) {
+        if (human_approval_ && critical_tools_.contains(tool_id)) {
             bool approved = human_approval_(agent_id, tool_id, args_json);
             if (!approved) {
                 return make_error(ErrorCode::PermissionDenied,

@@ -11,7 +11,7 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
   auto cmd = args.get("cmd");
   // 提取第一个词（命令名）
   std::string cmd_name = cmd.substr(0, cmd.find(' '));
-  if (!allowed_cmds_.count(cmd_name)) {
+  if (!allowed_cmds_.contains(cmd_name)) {
     return ToolResult::fail(
         fmt::format("Command '{}' not in allowlist", cmd_name));
   }

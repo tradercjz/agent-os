@@ -304,7 +304,7 @@ public:
 
   bool has(const std::string &id) const {
     std::lock_guard lk(mu_);
-    return registry_.count(id) > 0;
+    return registry_.contains(id);
   }
 
   void unregister(const std::string &id) {
@@ -411,7 +411,7 @@ public:
   dispatch(const kernel::ToolCallRequest &call,
            const std::unordered_set<std::string> &allowed_tools = {}) {
     // 检查工具是否被允许
-    if (!allowed_tools.empty() && !allowed_tools.count(call.name)) {
+    if (!allowed_tools.empty() && !allowed_tools.contains(call.name)) {
       return ToolResult::fail(
           fmt::format("Tool '{}' not in allowed set", call.name));
     }
