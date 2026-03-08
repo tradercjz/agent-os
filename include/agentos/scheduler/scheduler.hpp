@@ -469,7 +469,9 @@ private:
                 if (oldest.has_value()) {
                     auto expected = TaskState::Pending;
                     if (all_tasks_[*oldest]->state.compare_exchange_strong(
-                            expected, TaskState::Cancelled)) {
+                            expected, TaskState::Cancelled,
+                            std::memory_order_acq_rel,
+                            std::memory_order_acquire)) {
                         dep_graph_.complete_task(*oldest); // 强制解除阻塞
                         done_cv_.notify_all();
                     }
@@ -480,6 +482,8 @@ private:
 
     TaskPtr dequeue_task() {
         std::unique_lock lk(mu_);
+        // cv_.wait with predicate is already spurious-wakeup-safe: lambda is re-evaluated each time.
+        // The !running_ check after wait ensures clean shutdown even if a task was enqueued simultaneously.
         cv_.wait(lk, [this] {
             return !running_ ||
                    !priority_queue_.empty() ||
@@ -495,7 +499,9 @@ private:
         if (policy_ == SchedulerPolicy::Priority && !priority_queue_.empty()) {
             task = priority_queue_.top().second;
             auto expected = TaskState::Pending;
-            if (task->state.compare_exchange_strong(expected, TaskState::Running)) {
+            if (task->state.compare_exchange_strong(expected, TaskState::Running,
+                                                    std::memory_order_acq_rel,
+                                                    std::memory_order_acquire)) {
                 priority_queue_.pop();
             } else {
                 // Task state changed (cancelled/running), skip it
@@ -504,7 +510,9 @@ private:
         } else if (!fifo_queue_.empty()) {
             task = fifo_queue_.front();
             auto expected = TaskState::Pending;
-            if (task->state.compare_exchange_strong(expected, TaskState::Running)) {
+            if (task->state.compare_exchange_strong(expected, TaskState::Running,
+                                                    std::memory_order_acq_rel,
+                                                    std::memory_order_acquire)) {
                 fifo_queue_.pop();
             } else {
                 // Task state changed (cancelled/running), skip it

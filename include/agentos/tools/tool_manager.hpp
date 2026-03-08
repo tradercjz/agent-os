@@ -443,7 +443,8 @@ public:
     // 解析参数并执行
     auto args = parse_args(call.args_json);
 
-    // Validate required parameters
+    // Validate required arguments before spawning async task (early return avoids
+    // creating unnecessary threads for malformed requests)
     auto schema = tool->schema();
     if (auto v = validate_tool_args(schema, args); !v)
       return ToolResult::fail(v.error().message);

@@ -120,15 +120,22 @@ static bool is_private_ip(const std::string &hostname) {
     return true;
 
   // Resolve and check IP ranges
-  struct addrinfo hints{}, *result = nullptr;
+  // Replace manual freeaddrinfo with RAII guard to prevent leak on exception path
+  struct AddrInfoGuard {
+    struct addrinfo *ptr = nullptr;
+    ~AddrInfoGuard() { if (ptr) freeaddrinfo(ptr); }
+  } addr_guard;
+
+  struct addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
 
-  if (getaddrinfo(hostname.c_str(), nullptr, &hints, &result) != 0)
-    return true; // Fail-closed: unresolvable = blocked
+  if (getaddrinfo(hostname.c_str(), nullptr, &hints, &addr_guard.ptr) != 0)
+    return true;  // Fail-safe: treat resolve failure as private
 
   bool is_private = false;
-  for (auto *rp = result; rp != nullptr; rp = rp->ai_next) {
+  // Use addr_guard.ptr instead of result
+  for (auto *rp = addr_guard.ptr; rp != nullptr; rp = rp->ai_next) {
     if (rp->ai_family == AF_INET) {
       auto *addr = reinterpret_cast<struct sockaddr_in *>(rp->ai_addr);
       uint32_t ip = ntohl(addr->sin_addr.s_addr);
@@ -154,7 +161,7 @@ static bool is_private_ip(const std::string &hostname) {
       }
     }
   }
-  freeaddrinfo(result);
+  // NO explicit freeaddrinfo needed — guard destructor handles it
   return is_private;
 }
 

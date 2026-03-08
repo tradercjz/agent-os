@@ -527,12 +527,18 @@ public:
     std::ofstream ofs(path);
     if (!ofs)
       return make_error(ErrorCode::MemoryWriteFailed, "LTM: cannot write file");
+
+    // Write metadata fields
     ofs << entry.id << "\n" << entry.source << "\n" << entry.importance << "\n";
     ofs << entry.user_id << "\n"
         << entry.agent_id << "\n"
         << entry.session_id << "\n"
         << entry.type << "\n";
 
+    if (!ofs.good())
+      return make_error(ErrorCode::MemoryWriteFailed, "LTM: metadata write failed");
+
+    // Write content (with escape logic)
     for (char c : entry.content) {
       if (c == '\n')
         ofs << "\\n";
@@ -540,9 +546,10 @@ public:
         ofs << c;
     }
     ofs << "\n";
+
     ofs.flush();
     if (!ofs.good())
-      return make_error(ErrorCode::MemoryWriteFailed, "LTM: disk write failed (disk full?)");
+      return make_error(ErrorCode::MemoryWriteFailed, "LTM: content flush failed (disk full?)");
 
     hnswlib::labeltype node_label = hnswlib::labeltype(-1);
     bool has_embedding = !entry.embedding.empty();

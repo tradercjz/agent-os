@@ -48,7 +48,8 @@ struct BusMessage {
     // Unified ID generator — avoids collisions between request/response/event IDs
     static uint64_t next_id() {
         static std::atomic<uint64_t> id_gen{1};
-        return id_gen++;
+        // Relaxed ordering sufficient for monotonic ID counter (no data published via this store)
+        return id_gen.fetch_add(1, std::memory_order_relaxed);
     }
 
     static BusMessage make_request(AgentId from, AgentId to,

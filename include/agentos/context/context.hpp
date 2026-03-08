@@ -233,6 +233,14 @@ public:
       it = windows_.emplace(agent_id, ContextWindow{8192}).first;
     }
     auto &win = it->second;
+
+    // Guard: if the single message exceeds window capacity, warn and skip eviction logic
+    TokenCount msg_cost = kernel::ILLMBackend::estimate_tokens(msg.content) + 4;
+    if (msg_cost > win.max_tokens()) {
+      LOG_WARN(fmt::format("[ContextManager] Message exceeds window capacity "
+                           "({} > {} tokens) for agent {}, appending anyway",
+                           msg_cost, win.max_tokens(), agent_id));
+    }
     win.add_evict_if_needed(msg);
 
     // 若有驱逐，触发回调

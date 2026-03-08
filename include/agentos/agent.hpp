@@ -81,6 +81,8 @@ public:
   think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb = nullptr);
   [[nodiscard]] Result<tools::ToolResult> act(const kernel::ToolCallRequest &call);
   Result<std::string> remember(std::string content, float importance = 0.5f);
+  /// \param query Query string. Internally copied on first use, so the view
+  /// need not remain valid beyond this call.
   Result<std::vector<memory::SearchResult>> recall(std::string_view query,
                                                    size_t k = 5);
   bool send(AgentId target, std::string topic, std::string payload);
@@ -88,6 +90,11 @@ public:
 
   // ── 异步执行 ────────────────────────────────────────────────
   /// Run agent asynchronously, returning a future for the result
+  /// PRECONDITION: The caller must ensure this Agent's lifetime exceeds the
+  /// returned future. Capturing `this` by raw pointer means undefined behavior
+  /// if the Agent is destroyed before future.get() is called.
+  /// Recommended usage: only call run_async() on Agents managed via shared_ptr
+  /// and keep the shared_ptr alive until the future completes.
   std::future<Result<std::string>> run_async(std::string user_input) {
     return std::async(std::launch::async,
                       [this, input = std::move(user_input)]() mutable {
@@ -253,6 +260,9 @@ public:
   }
 
   // ── 查找 Agent ────────────────────────────────────────────
+  /// THREAD-SAFETY: Returns shared_ptr with incremented refcount under lock.
+  /// Caller can safely use the returned pointer even if destroy_agent() runs
+  /// concurrently—the Agent stays alive as long as the shared_ptr exists.
   std::shared_ptr<Agent> find_agent(AgentId id) const {
     std::lock_guard lk(agents_mu_);
     auto it = agents_.find(id);
@@ -474,14 +484,16 @@ inline std::optional<bus::BusMessage> Agent::recv(Duration timeout) {
 
 inline Result<std::string> ReActAgent::run(std::string user_input) {
   // 先从记忆中检索相关上下文
-  if (auto memories = recall(user_input, 3)) {
-    if (!memories->empty()) {
-      std::string mem_ctx = "相关记忆：\n";
-      for (auto &sr : *memories) {
-        mem_ctx += "- " + sr.entry.content + "\n";
-      }
-      os_->ctx().append(id_, kernel::Message::system(mem_ctx));
+  auto recall_result = recall(user_input, 3);
+  if (!recall_result) {
+    LOG_WARN(fmt::format("[ReActAgent] recall failed: {}", recall_result.error().message));
+    // Continue without memory context (degraded mode)
+  } else if (!recall_result->empty()) {
+    std::string mem_ctx = "相关记忆：\n";
+    for (auto &sr : *recall_result) {
+      mem_ctx += "- " + sr.entry.content + "\n";
     }
+    os_->ctx().append(id_, kernel::Message::system(mem_ctx));
   }
 
   for (int step = 0; step < MAX_STEPS; ++step) {

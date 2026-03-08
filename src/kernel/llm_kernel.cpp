@@ -383,6 +383,7 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
   curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response_body);
   curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 60L);
   curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 10L);
+  curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 5L);  // Prevent redirect loops
 
   // 执行请求
   CURLcode res = curl_easy_perform(curl.get());
@@ -468,6 +469,10 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
   StreamContext sctx;
   sctx.token_cb = cb;  // copy, not move — cb may still be needed by caller
   sctx.response = &resp;
+  // NOTE: StreamContext holds raw pointer to resp (stack variable).
+  // This is safe because curl_easy_perform() is synchronous: all write
+  // callbacks complete before curl_easy_perform() returns, so resp is
+  // always valid during callback execution.
 
   curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.list);
@@ -478,6 +483,7 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
   curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &sctx);
   curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 120L);
   curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 10L);
+  curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 5L);  // Prevent redirect loops
 
   CURLcode res = curl_easy_perform(curl.get());
 
