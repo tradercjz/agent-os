@@ -397,7 +397,19 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
   // 检查 HTTP 状态码
   long http_code = 0;
   curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_code);
-  if (http_code >= 400) {
+
+  if (http_code == 401) {
+    return make_error(ErrorCode::LLMBackendError,
+        "OpenAI API: authentication failed (check API key)");
+  } else if (http_code == 429) {
+    return make_error(ErrorCode::RateLimitExceeded,
+        fmt::format("OpenAI API: rate limited (HTTP 429): {}",
+                    response_body.substr(0, 500)));
+  } else if (http_code >= 500 && http_code < 600) {
+    return make_error(ErrorCode::LLMBackendError,
+        fmt::format("OpenAI API: server error (HTTP {}): {}",
+                    http_code, response_body.substr(0, 500)));
+  } else if (http_code >= 400) {
     // Parse API error response for better error messages
     std::string error_msg;
     try {
@@ -412,15 +424,9 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
     if (error_msg.empty())
       error_msg = response_body.substr(0, 500); // Truncate long error bodies
 
-    // Distinguish transient from permanent errors
-    ErrorCode code = ErrorCode::LLMBackendError;
-    if (http_code == 429) {
-      code = ErrorCode::RateLimitExceeded;
-    }
-
-    return make_error(
-        code,
-        fmt::format("HTTP {} error: {}", http_code, error_msg));
+    return make_error(ErrorCode::LLMBackendError,
+        fmt::format("OpenAI API: unexpected status (HTTP {}): {}",
+                    http_code, error_msg));
   }
 
   return response_body;
@@ -429,10 +435,23 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
 // ── complete: 同步推理 ─────────────────────────────────────
 
 Result<LLMResponse> OpenAIBackend::complete(const LLMRequest &req) {
-  std::string body = build_request_json(req);
+  // Auto-generate request_id for tracing if not provided
+  LLMRequest req_copy = req;
+  if (req_copy.request_id.empty()) {
+    static std::atomic<uint64_t> req_counter{0};
+    req_copy.request_id = fmt::format("req_{:x}_{}",
+        std::chrono::steady_clock::now().time_since_epoch().count(),
+        req_counter.fetch_add(1, std::memory_order_relaxed));
+  }
+
+  LOG_INFO(fmt::format("[LLM:{}] Sending request to /chat/completions", req_copy.request_id));
+  std::string body = build_request_json(req_copy);
   auto http_result = http_post("/chat/completions", body);
-  if (!http_result)
+  if (!http_result) {
+    LOG_ERROR(fmt::format("[LLM:{}] Request failed: {}", req_copy.request_id, http_result.error().message));
     return make_unexpected(http_result.error());
+  }
+  LOG_INFO(fmt::format("[LLM:{}] Request completed", req_copy.request_id));
   return parse_response(*http_result);
 }
 

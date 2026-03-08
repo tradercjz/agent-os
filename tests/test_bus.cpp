@@ -230,7 +230,7 @@ TEST(ChannelTest, BackpressureDropTracking) {
 }
 
 TEST_F(AgentBusTest, TotalDroppedAcrossChannels) {
-  EXPECT_EQ(bus->total_dropped(), 0);
+  EXPECT_EQ(bus->total_dropped_messages(), 0);
 }
 
 TEST_F(AgentBusTest, ChannelDepthQuery) {

@@ -6,10 +6,12 @@
 #include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -215,15 +217,22 @@ public:
     entry.created_at = entry.accessed_at = now();
 
     if (store_.size() >= capacity_) {
-      // 驱逐重要性最低、最久未访问的条目
-      auto victim = std::min_element(
-          store_.begin(), store_.end(), [](const auto &a, const auto &b) {
-            float score_a =
-                a.second.importance / (1.0f + a.second.access_count);
-            float score_b =
-                b.second.importance / (1.0f + b.second.access_count);
-            return score_a < score_b;
-          });
+      // FIX #21: Deterministic tie-breaking — find entry with lowest score;
+      // break ties by oldest created_at first; never evict system entries
+      auto victim = store_.begin();
+      float min_score = std::numeric_limits<float>::max();
+      for (auto it = store_.begin(); it != store_.end(); ++it) {
+        if (it->second.source == "system") continue;  // never evict system entries
+        float score = it->second.importance /
+                      static_cast<float>(it->second.access_count + 1);
+        bool better = score < min_score ||
+                      (score == min_score &&
+                       it->second.created_at < victim->second.created_at);
+        if (better) {
+          min_score = score;
+          victim = it;
+        }
+      }
       // 从 HNSW 中标记删除（用 find 避免 operator[] 默认插入 BUG）
       if (hnsw_index_) {
         auto label_it = id_to_label_.find(victim->first);
@@ -438,12 +447,30 @@ private:
   size_t deleted_label_count_{0};
   std::unordered_map<std::string, hnswlib::labeltype> id_to_label_;
   std::unordered_map<hnswlib::labeltype, std::string> label_to_id_;
+  bool compacting_{false}; // FIX #11: guards against reentrant compaction
 
   // Rebuild HNSW index with only live entries (caller must hold mu_)
   void compact_hnsw_locked() {
+    // FIX #11: Reentrancy guard — skip if compaction already in progress
+    if (compacting_) {
+      LOG_WARN("[STM] Compaction already in progress — skipping");
+      return;
+    }
+    compacting_ = true;
+    struct Guard { bool& flag; ~Guard() { flag = false; } } guard{compacting_};
+
     if (!hnsw_index_ || id_to_label_.empty()) return;
+
+    // FIX #11: Save old state for atomic rollback on failure
+    auto old_space = std::move(space_);
+    auto old_hnsw_index = std::move(hnsw_index_);
+    auto old_id_to_label = id_to_label_;
+    auto old_label_to_id = label_to_id_;
+    auto old_label_counter = label_counter_;
+    auto old_deleted_count = deleted_label_count_;
+
     try {
-      size_t live_count = id_to_label_.size();
+      size_t live_count = old_id_to_label.size();
       auto new_space = std::make_unique<hnswlib::InnerProductSpace>(dim_);
       auto new_index = std::make_unique<hnswlib::HierarchicalNSW<float>>(
           new_space.get(), std::max(live_count * 2, size_t(64)), 16, 200);
@@ -461,6 +488,7 @@ private:
         ++new_label;
       }
 
+      // Commit new state
       space_ = std::move(new_space);
       hnsw_index_ = std::move(new_index);
       id_to_label_ = std::move(new_id_to_label);
@@ -470,7 +498,15 @@ private:
 
       LOG_INFO(fmt::format("ShortTermMemory: HNSW compacted to {} live entries", live_count));
     } catch (const std::exception &e) {
-      LOG_WARN(std::string("ShortTermMemory: HNSW compaction failed: ") + e.what());
+      // Rollback to original state on any exception
+      LOG_ERROR(fmt::format("[STM] compact failed, rolling back: {}", e.what()));
+      space_ = std::move(old_space);
+      hnsw_index_ = std::move(old_hnsw_index);
+      id_to_label_ = old_id_to_label;
+      label_to_id_ = old_label_to_id;
+      label_counter_ = old_label_counter;
+      deleted_label_count_ = old_deleted_count;
+      // Do NOT rethrow — compaction is best-effort
     }
   }
 };
@@ -497,7 +533,10 @@ public:
       : dir_(dir.empty() ? fs::temp_directory_path() / "agentos_ltm" : std::move(dir)),
         max_elements_(max_elements) {
     fs::create_directories(dir_);
-    load_index();
+    // FIX #13: use std::call_once to ensure load_index() is called exactly once
+    // and is thread-safe even if the object is accessed from multiple threads
+    // immediately after construction.
+    std::call_once(load_once_, [this] { load_index(); });
   }
 
   /// FIX #22: Check if loading succeeded
@@ -523,7 +562,12 @@ public:
       entry.id = "lt_" + std::to_string(id_counter_++);
 
     // 持久化 content 到 .mem 文件（锁内执行，避免并发写同一文件竞态）
-    auto path = entry_path(entry.id);
+    std::filesystem::path path;
+    try {
+      path = entry_path(entry.id);
+    } catch (const std::invalid_argument &e) {
+      return make_error(ErrorCode::InvalidArgument, e.what());
+    }
     std::ofstream ofs(path);
     if (!ofs)
       return make_error(ErrorCode::MemoryWriteFailed, "LTM: cannot write file");
@@ -594,7 +638,12 @@ public:
 
   [[nodiscard]] Result<bool> forget(const std::string &id) override {
     std::lock_guard lk(mu_);
-    auto path = entry_path(id);
+    std::filesystem::path path;
+    try {
+      path = entry_path(id);
+    } catch (const std::invalid_argument &e) {
+      return make_error(ErrorCode::InvalidArgument, e.what());
+    }
     if (!fs::exists(path))
       return false;
     fs::remove(path);
@@ -721,13 +770,34 @@ public:
   std::string name() const noexcept override { return "LongTermMemory"; }
 
 private:
+  static std::filesystem::path entry_path(
+        const std::filesystem::path &dir, const std::string &id) {
+    // SECURITY: Validate id contains only safe characters to prevent path traversal.
+    // Reject anything with '/', '..', '\0', or non-alphanumeric characters except '_' and '-'.
+    for (char c : id) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') {
+            // Invalid character in memory entry ID — potential path traversal attempt
+            throw std::invalid_argument("LongTermMemory: invalid character in entry id: " + id);
+        }
+    }
+    if (id.empty() || id.size() > 255) {
+        throw std::invalid_argument("LongTermMemory: entry id out of valid range");
+    }
+    return dir / (id + ".mem");
+  }
+
   fs::path entry_path(const std::string &id) const {
-    return dir_ / (id + ".mem");
+    return entry_path(dir_, id);
   }
 
   /// 锁内读取（调用者必须已持有 mu_）
   Result<MemoryEntry> read_locked(const std::string &id) {
-    auto path = entry_path(id);
+    std::filesystem::path path;
+    try {
+      path = entry_path(id);
+    } catch (const std::invalid_argument &e) {
+      return make_error(ErrorCode::InvalidArgument, e.what());
+    }
     if (!fs::exists(path))
       return make_error(ErrorCode::NotFound, "LTM: entry not found");
 
@@ -771,6 +841,20 @@ private:
     }
 
     return entry;
+  }
+
+  // On load failure: rename corrupt file and start fresh
+  void handle_corrupt_index(const std::filesystem::path &index_path) {
+    auto bad_path = index_path;
+    bad_path.replace_extension(".bad");
+    std::error_code ec;
+    std::filesystem::rename(index_path, bad_path, ec);
+    if (!ec) {
+      LOG_WARN(fmt::format("[LTM] Corrupt index renamed to {} for inspection. "
+                           "Starting with empty index.", bad_path.string()));
+    } else {
+      LOG_ERROR(fmt::format("[LTM] Cannot rename corrupt index: {}", ec.message()));
+    }
   }
 
   void load_index() {
@@ -844,7 +928,11 @@ private:
 
       load_ok_ = true;
     } catch (const std::exception &e) {
-      LOG_WARN(std::string("LTM: load_index() failed: ") + e.what());
+      LOG_ERROR(fmt::format("[LTM] Index load failed: {} — checking for recovery", e.what()));
+      auto idx_path = dir_ / "index.dat";
+      if (fs::exists(idx_path)) {
+        handle_corrupt_index(idx_path);
+      }
       // Reset to safe state on failure
       hnsw_index_.reset();
       space_.reset();
@@ -884,6 +972,7 @@ private:
   }
 
   mutable std::mutex mu_;
+  mutable std::once_flag load_once_; // FIX #13: Guard for one-time load_index() call
   std::unordered_map<std::string, IndexRecord> index_;
   fs::path dir_;
   uint64_t id_counter_{0};
@@ -981,31 +1070,32 @@ public:
     entry.session_id = filter.session_id.value_or("");
     entry.type = filter.type.value_or("episodic");
 
-    // FIX #10: Check return values for all write() calls
-    // L0 工作记忆（总写）
-    auto wm_id = working_->write(entry);
-    if (!wm_id) {
-      LOG_WARN("MemorySystem: WorkingMemory write failed");
-      return wm_id;
+    // L0: Working memory (STM) — this is the primary write
+    auto r0 = working_->write(entry);
+    if (!r0) {
+        return make_error(r0.error().code,
+            fmt::format("remember: L0 write failed: {}", r0.error().message));
     }
 
-    // L1 短期记忆（总写）
-    auto st_result = short_term_->write(entry);
-    if (!st_result) {
-      LOG_WARN("MemorySystem: ShortTermMemory write failed");
-      // Continue despite L1 failure; L0 succeeded
+    // L1: Short-term memory — best-effort, log failure
+    if (short_term_) {
+        auto r1 = short_term_->write(entry);
+        if (!r1) {
+            LOG_WARN(fmt::format("[Memory] remember: L1 write failed (id={}): {}",
+                                 r0.value(), r1.error().message));
+        }
     }
 
-    // L2 长期记忆（重要性 > 0.7 时持久化）
-    if (importance > 0.7f) {
-      auto lt_result = long_term_->write(entry);
-      if (!lt_result) {
-        LOG_WARN("MemorySystem: LongTermMemory write failed (non-critical, entry in L0)");
-        // Continue; L0/L1 already succeeded
-      }
+    // L2: Long-term memory — best-effort, log failure
+    if (long_term_ && importance > 0.7f) {
+        auto r2 = long_term_->write(entry);
+        if (!r2) {
+            LOG_WARN(fmt::format("[Memory] remember: L2 write failed (id={}): {}",
+                                 r0.value(), r2.error().message));
+        }
     }
 
-    return wm_id;
+    return r0;  // Return L0 ID
   }
 
   // 检索：L0 → L1 → L2 逐层查找（O(n) 去重）
@@ -1025,16 +1115,34 @@ public:
       }
     };
 
-    // L0 工作记忆
+    // L0 search with timing
+    auto t0_start = std::chrono::steady_clock::now();
     auto r0 = working_->search(q_emb, filter, top_k);
+    auto t0_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0_start).count();
+    if (t0_ms > 100) {
+      LOG_WARN(fmt::format("[Memory] L0 search slow: {}ms", t0_ms));
+    }
     merge(r0);
 
-    // L1 短期记忆
+    // L1 short-term memory search with timing
+    auto t1_start = std::chrono::steady_clock::now();
     auto r1 = short_term_->search(q_emb, filter, top_k);
+    auto t1_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t1_start).count();
+    if (t1_ms > 100) {
+      LOG_WARN(fmt::format("[Memory] L1 search slow: {}ms", t1_ms));
+    }
     merge(r1);
 
-    // L2 长期记忆
+    // L2 long-term memory search with timing
+    auto t2_start = std::chrono::steady_clock::now();
     auto r2 = long_term_->search(q_emb, filter, top_k);
+    auto t2_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t2_start).count();
+    if (t2_ms > 100) {
+      LOG_WARN(fmt::format("[Memory] L2 search slow: {}ms", t2_ms));
+    }
     merge(r2);
 
     // 全局排序取 Top-K

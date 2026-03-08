@@ -3,6 +3,9 @@
 #include <curl/curl.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <sstream>
 
 namespace agentos::tools {
 
@@ -51,42 +54,97 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
     return ToolResult::fail("Too many arguments (max 20)");
   }
 
-  // RAII wrapper for popen/pclose
-  struct PipeGuard {
-    FILE *fp;
-    explicit PipeGuard(FILE *f) : fp(f) {}
-    ~PipeGuard() { if (fp) pclose(fp); }
-    PipeGuard(const PipeGuard &) = delete;
-    PipeGuard &operator=(const PipeGuard &) = delete;
-  };
+  // Production-grade: use fork/execvp instead of /bin/sh to avoid shell injection
+  // execl("/bin/sh", "sh", "-c", ...) parses metacharacters; execvp() does not.
+  // Split command into argv (program + first arg only) to prevent injection
 
-  // 限制输出长度
-  std::string safe_cmd = cmd + " 2>&1 | head -100";
-  std::array<char, 2048> buf{};
+  std::vector<std::string> parts;
+  std::istringstream iss(cmd);
+  std::string tok;
+  while (iss >> tok) parts.push_back(tok);
+
+  if (parts.empty()) {
+    return ToolResult::fail("Command parsing failed");
+  }
+
+  std::vector<char *> argv;
+  for (auto &p : parts) argv.push_back(p.data());
+  argv.push_back(nullptr);
+
+  int pipefd[2];
+  if (pipe(pipefd) == -1) {
+    return ToolResult{false, "Failed to create pipe", {}};
+  }
+
+  pid_t pid = fork();
+  if (pid == -1) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return ToolResult{false, "Failed to fork process", {}};
+  }
+
+  if (pid == 0) {
+    // Child process: redirect stdout+stderr to pipe write end
+    close(pipefd[0]);          // close read end
+    dup2(pipefd[1], STDOUT_FILENO);
+    dup2(pipefd[1], STDERR_FILENO);
+    close(pipefd[1]);
+    // Execute without shell: argv[0]=program, argv[1..n]=args, NO shell parsing
+    execvp(argv[0], argv.data());
+    _exit(127);  // execvp failed
+  }
+
+  // Parent process
+  close(pipefd[1]);  // close write end
+
   std::string output;
-  FILE *pipe = popen(safe_cmd.c_str(), "r");
-  if (!pipe)
-    return ToolResult::fail("Failed to open pipe");
-  PipeGuard guard(pipe);
-
-  // Count lines and track if output was truncated
+  output.reserve(4096);
+  char buf[4096];
   size_t line_count = 0;
-  while (fgets(buf.data(), buf.size(), pipe) != nullptr) {
-    output += buf.data();
-    line_count++;
+  constexpr size_t kMaxOutputLines = 100;
+  bool truncated = false;
+  size_t total_bytes = 0;
+  constexpr size_t kMaxOutputBytes = 1024 * 100; // 100 KB limit
+
+  ssize_t n;
+  while ((n = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
+    buf[n] = '\0';
+    // Count lines and check output size limit
+    for (ssize_t i = 0; i < n; ++i) {
+      if (buf[i] == '\n') ++line_count;
+      if (line_count >= kMaxOutputLines) {
+        truncated = true;
+        break;
+      }
+    }
+    // Respect output byte limit
+    if (total_bytes + static_cast<size_t>(n) > kMaxOutputBytes) {
+      output.append(buf, kMaxOutputBytes - total_bytes);
+      truncated = true;
+      break;
+    }
+    if (!truncated) {
+      output.append(buf, n);
+      total_bytes += n;
+    } else {
+      // Read remaining bytes to let child exit cleanly
+      // but don't append to output
+    }
+  }
+  close(pipefd[0]);
+
+  int status;
+  waitpid(pid, &status, 0);
+  int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+  if (truncated) {
+    output += "\n[output truncated]";
   }
 
-  // 截断过长输出，以防恶意产生巨大输出
-  if (output.size() > 10240) {
-    output = output.substr(0, 10240) + "\n...[truncated]";
+  if (exit_code != 0 && output.empty()) {
+    return ToolResult{false, fmt::format("Command failed with exit code {}", exit_code), {}};
   }
-
-  // Add truncation indicator if output was limited to 100 lines
-  if (line_count >= 100) {
-    output += "\n[output truncated at 100 lines]";
-  }
-
-  return ToolResult::ok(output);
+  return ToolResult{true, output, {}};
 }
 
 // ---- HttpFetchTool Implementation ----

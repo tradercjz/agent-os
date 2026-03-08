@@ -71,6 +71,7 @@ struct LLMRequest {
   Priority priority{Priority::Normal};
   AgentId agent_id{0};
   TaskId task_id{0};
+  std::string request_id;  // Correlation ID for tracing; auto-generated if empty
   std::optional<std::vector<std::string>> tool_names; // 允许调用的工具
   std::optional<std::string>
       tools_json; // OpenAI function-calling 格式的工具列表 JSON
@@ -344,6 +345,15 @@ struct KernelMetrics {
   std::atomic<uint64_t> rate_limit_hits{0};
   std::atomic<uint64_t> errors{0};
   std::atomic<uint64_t> retries{0};
+
+  // Saturation increment: won't overflow, caps at UINT64_MAX
+  static inline void saturating_add(std::atomic<uint64_t> &counter, uint64_t delta) noexcept {
+    uint64_t cur = counter.load(std::memory_order_relaxed);
+    uint64_t next;
+    do {
+      next = (cur > UINT64_MAX - delta) ? UINT64_MAX : cur + delta;
+    } while (!counter.compare_exchange_weak(cur, next, std::memory_order_relaxed));
+  }
 };
 
 class LLMKernel : private NonCopyable {
@@ -389,7 +399,7 @@ public:
     metrics_.total_requests++;
     auto result = backend_->embed(req);
     if (result) {
-      metrics_.total_tokens += result->total_tokens;
+      KernelMetrics::saturating_add(metrics_.total_tokens, result->total_tokens);
     } else {
       metrics_.errors++;
     }
@@ -412,6 +422,7 @@ private:
 
   // Try to acquire rate limit tokens, retrying up to 3 times
   std::optional<Error> acquire_rate_limit(TokenCount estimated) {
+    int64_t total_waited_ms = 0;
     for (int attempt = 0; attempt < 3; ++attempt) {
       auto [ok, wait] = rate_limiter_.try_consume(estimated);
       if (ok)
@@ -419,8 +430,13 @@ private:
       if (attempt == 2) {
         metrics_.rate_limit_hits++;
         return Error{ErrorCode::RateLimitExceeded,
-                     fmt::format("Rate limit: need {}ms wait", wait.count())};
+                     fmt::format("Rate limit exhausted after {} retries "
+                                 "(needed={:.1f} tokens, bucket={:.1f}, rate={:.1f}/s, waited={}ms)",
+                                 attempt, static_cast<double>(estimated),
+                                 rate_limiter_.available_tokens(),
+                                 rate_limiter_.available_tokens() / 60.0, total_waited_ms)};
       }
+      total_waited_ms += wait.count();
       std::this_thread::sleep_for(wait);
     }
     return std::nullopt;
@@ -429,7 +445,7 @@ private:
   // Track metrics after LLM call
   void track_result(const Result<LLMResponse> &result) {
     if (result) {
-      metrics_.total_tokens += result->total_tokens();
+      KernelMetrics::saturating_add(metrics_.total_tokens, result->total_tokens());
     } else {
       metrics_.errors++;
     }

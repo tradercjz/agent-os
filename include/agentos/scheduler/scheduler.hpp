@@ -3,6 +3,7 @@
 // AgentOS :: Module 2 — Scheduler
 // 优先级调度器：FIFO / Round-Robin / 抢占，依赖 DAG，死锁检测
 // ============================================================
+#include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
 #include <agentos/core/task.hpp>
 #include <atomic>
@@ -22,7 +23,21 @@
 namespace agentos::scheduler {
 
 // ─────────────────────────────────────────────────────────────
-// § 2.0  模块级常量（定义在 Scheduler 类之前，供 AgentTaskDescriptor 等使用）
+// § 2.0  SchedulerMetrics — 调度器观测指标
+// ─────────────────────────────────────────────────────────────
+
+struct SchedulerMetrics {
+    std::atomic<uint64_t> tasks_submitted{0};
+    std::atomic<uint64_t> tasks_completed{0};
+    std::atomic<uint64_t> tasks_failed{0};
+    std::atomic<uint64_t> tasks_cancelled{0};
+    std::atomic<uint64_t> deadlocks_detected{0};
+    std::atomic<uint64_t> critical_path_boosts{0};
+    std::atomic<uint64_t> dispatch_cycles{0};
+};
+
+// ─────────────────────────────────────────────────────────────
+// § 2.0a 模块级常量（定义在 Scheduler 类之前，供 AgentTaskDescriptor 等使用）
 // ─────────────────────────────────────────────────────────────
 inline constexpr Duration kDefaultTaskTimeout{30'000};  // 30 seconds
 inline constexpr Duration kDefaultWaitTimeout{10'000};  // 10 seconds
@@ -69,9 +84,10 @@ public:
     Result<void> add_dependency(TaskId task_id, TaskId dep_id) {
         std::lock_guard lk(mu_);
         // Cap DAG size to prevent memory exhaustion
-        if (nodes_.size() > kMaxDependencyGraphNodes && !nodes_.contains(task_id))
+        if (nodes_.size() >= kMaxDependencyGraphNodes && !nodes_.contains(task_id))
           return make_error(ErrorCode::ResourceExhausted,
-                            "Dependency graph node limit exceeded");
+                            fmt::format("Dependency graph exceeded {} nodes limit",
+                                       kMaxDependencyGraphNodes));
         nodes_[task_id].deps.insert(dep_id);
         // 检测循环依赖
         if (has_cycle_locked()) {
@@ -173,8 +189,11 @@ private:
             while (!stk.empty()) {
                 auto& [cur, idx] = stk.top();
                 // Safety check: prevent stack overflow on very large graphs
-                if (stk.size() > kMaxDFSStackSize) {
-                    return false;  // Graph too large, assume no cycle for safety
+                if (stk.size() >= kMaxDFSStackSize) {
+                    LOG_ERROR(fmt::format("[Scheduler] Cycle detection aborted: DFS stack overflow "
+                                          "(graph has >={} nodes). Treating as cycle to prevent deadlock.",
+                                          kMaxDFSStackSize));
+                    return true;  // Conservative: assume cycle to prevent scheduler deadlock
                 }
 
                 auto it = nodes_.find(cur);
@@ -316,6 +335,7 @@ public:
                 enqueue_ready_locked(task);
             }
         }
+        metrics_.tasks_submitted++;
         cv_.notify_one();
         return task->id;
     }
@@ -353,12 +373,15 @@ public:
 
     DependencyGraph& dep_graph() noexcept { return dep_graph_; }
 
+    SchedulerMetrics& metrics() noexcept { return metrics_; }
+    const SchedulerMetrics& metrics() const noexcept { return metrics_; }
+
     bool is_running() const noexcept { return running_.load(); }
 
     /// Drain: wait for all pending/running tasks to finish (up to timeout)
     bool drain(Duration timeout = Duration{kDefaultWaitTimeout}) {
       std::unique_lock lk(mu_);
-      return done_cv_.wait_for(lk, timeout, [this] {
+      bool success = done_cv_.wait_for(lk, timeout, [this] {
         for (auto &[id, task] : all_tasks_) {
           auto st = task->state.load();
           if (st == TaskState::Pending || st == TaskState::Running)
@@ -366,6 +389,21 @@ public:
         }
         return true;
       });
+
+      // Timeout reached — log stuck tasks for diagnosis
+      if (!success) {
+        size_t pending = 0, running = 0;
+        for (auto &[id, task] : all_tasks_) {
+          auto st = task->state.load();
+          if (st == TaskState::Pending) ++pending;
+          else if (st == TaskState::Running) ++running;
+        }
+        LOG_WARN(fmt::format("[Scheduler] drain() timed out after {}ms. "
+                             "Possible stuck tasks: {} pending, {} running. "
+                             "Check for infinite loops or deadlocks.",
+                             timeout.count(), pending, running));
+      }
+      return success;
     }
 
     /// Number of pending + running tasks
@@ -389,8 +427,10 @@ private:
             std::unordered_map<TaskId, int> boosts;
             dep_graph_.boost_critical_path(boosts);
             int eff_priority = static_cast<int>(task->priority);
-            if (auto it = boosts.find(task->id); it != boosts.end())
+            if (auto it = boosts.find(task->id); it != boosts.end()) {
                 eff_priority += it->second;
+                metrics_.critical_path_boosts++;
+            }
             priority_queue_.emplace(eff_priority, task);
         } else {
             fifo_queue_.push(task);
@@ -407,8 +447,10 @@ private:
             try {
                 task->work();
                 task->state = TaskState::Completed;
+                metrics_.tasks_completed++;
             } catch (const std::exception& e) {
                 task->state = TaskState::Failed;
+                metrics_.tasks_failed++;
             }
 
             // 唤醒所有在 wait_for() 上等待的线程
@@ -439,6 +481,7 @@ private:
                              [&st] { return st.stop_requested(); });
             }
             if (st.stop_requested()) break;
+            metrics_.dispatch_cycles++;
             // 死锁检测：snapshot tasks while holding lock, then release before detection
             std::vector<TaskId> waiting;
             {
@@ -452,6 +495,7 @@ private:
             }
             // Deadlock detection is released from lock to avoid blocking other operations
             if (dep_graph_.detect_deadlock(waiting)) {
+                metrics_.deadlocks_detected++;
                 // 升级：将最老的 Pending 任务强制完成以打破死锁
                 std::lock_guard lk(mu_);
                 std::optional<TaskId> oldest;
@@ -472,6 +516,7 @@ private:
                             expected, TaskState::Cancelled,
                             std::memory_order_acq_rel,
                             std::memory_order_acquire)) {
+                        metrics_.tasks_cancelled++;
                         dep_graph_.complete_task(*oldest); // 强制解除阻塞
                         done_cv_.notify_all();
                     }
@@ -542,6 +587,7 @@ private:
     DependencyGraph                            dep_graph_;
     SchedulerPolicy                            policy_;
     uint32_t                                   thread_pool_size_;
+    SchedulerMetrics                           metrics_;
     std::atomic<TaskId>                        next_task_id_{kInitialTaskId};
 
 public:

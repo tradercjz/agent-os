@@ -16,6 +16,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -66,7 +67,19 @@ public:
   Agent(AgentId id, AgentConfig cfg, AgentOS *os)
       : id_(id), config_(std::move(cfg)), os_(os) {}
 
-  virtual ~Agent() = default;
+  virtual ~Agent() {
+    // Signal async tasks that agent is being destroyed
+    *alive_ = false;
+  }
+
+  // Explicitly deleted to prevent accidental copies.
+  // Rationale: Agents maintain unique identity (AgentId), own async state,
+  // and are lifecycle-managed via shared_ptr in AgentOS::agents_ map.
+  // Copying an Agent would duplicate the AgentId and corrupt the registry.
+  Agent(const Agent&)            = delete;
+  Agent& operator=(const Agent&) = delete;
+  Agent(Agent&&)                 = delete;
+  Agent& operator=(Agent&&)      = delete;
 
   // ── 生命周期钩子（子类可重写）───────────────────────────
   virtual void on_start() {}
@@ -95,16 +108,31 @@ public:
   /// if the Agent is destroyed before future.get() is called.
   /// Recommended usage: only call run_async() on Agents managed via shared_ptr
   /// and keep the shared_ptr alive until the future completes.
+  ///
+  /// NOTE: This implementation detects the common case where the Agent is destroyed
+  /// before the async task starts by using an alive_ flag. However, this does NOT
+  /// prevent use-after-free if the Agent is destroyed mid-execution. It is still
+  /// the caller's responsibility to ensure the Agent lifetime outlives the future.
   std::future<Result<std::string>> run_async(std::string user_input) {
+    auto alive = alive_;  // Capture shared_ptr to alive flag
     return std::async(std::launch::async,
-                      [this, input = std::move(user_input)]() mutable {
+                      [this, alive, input = std::move(user_input)]() mutable -> Result<std::string> {
+                        if (!alive->load(std::memory_order_acquire)) {
+                          return make_error(ErrorCode::InvalidArgument,
+                                           "Agent destroyed before async task started");
+                        }
                         return this->run(std::move(input));
                       });
   }
 
   // ── Middleware ──────────────────────────────────────────────
-  /// Add a middleware (pre/post hooks for think/act/remember/recall)
-  void use(Middleware mw) { middleware_.push_back(std::move(mw)); }
+  /// Thread-safe. Can be called before or after agent starts processing.
+  /// Hooks registered after agent.run() has started will be visible to
+  /// subsequent requests (not the currently running one).
+  void use(Middleware mw) {
+    std::unique_lock lk(middleware_mu_);
+    middleware_.push_back(std::move(mw));
+  }
 
   AgentId id() const { return id_; }
   const AgentConfig &config() const { return config_; }
@@ -115,17 +143,31 @@ protected:
   AgentOS *os_; // 非拥有指针，指向父系统
   std::shared_ptr<bus::Channel> channel_;
   std::vector<Middleware> middleware_;
+  mutable std::shared_mutex middleware_mu_;
+  std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 
   // Run middleware hooks; returns true if operation should proceed
   bool run_before_hooks(HookContext &ctx) {
-    for (auto &mw : middleware_) {
+    // Take a snapshot under shared lock to avoid holding lock during callbacks
+    std::vector<Middleware> mw_snapshot;
+    {
+      std::shared_lock lk(middleware_mu_);
+      mw_snapshot = middleware_;
+    }
+    for (auto &mw : mw_snapshot) {
       if (mw.before) mw.before(ctx);
       if (ctx.cancelled) return false;
     }
     return true;
   }
   void run_after_hooks(HookContext &ctx) {
-    for (auto &mw : middleware_) {
+    // Take a snapshot under shared lock to avoid holding lock during callbacks
+    std::vector<Middleware> mw_snapshot;
+    {
+      std::shared_lock lk(middleware_mu_);
+      mw_snapshot = middleware_;
+    }
+    for (auto &mw : mw_snapshot) {
       if (mw.after) mw.after(ctx);
     }
   }
@@ -167,11 +209,43 @@ public:
   explicit AgentOS(std::unique_ptr<kernel::ILLMBackend> backend,
                    Config cfg)
       : config_(cfg) { // 先拷贝，后续用 config_ 成员，避免 cfg 被移走后失效
-    // Validate critical config fields
-    if (config_.scheduler_threads == 0)
-      throw std::invalid_argument("scheduler_threads must be > 0");
-    if (config_.tpm_limit == 0)
-      throw std::invalid_argument("tpm_limit must be > 0");
+    // FIX #23: Validate config before constructing subsystems (fail-fast at startup)
+    auto validate = [&](const Config &c) -> void {
+        std::vector<std::string> errors;
+        if (c.scheduler_threads == 0)
+            errors.push_back("scheduler_threads must be > 0");
+        if (c.tpm_limit == 0)
+            errors.push_back("tpm_limit must be > 0");
+        if (c.snapshot_dir.empty())
+            errors.push_back("snapshot_dir must not be empty");
+        if (c.ltm_dir.empty())
+            errors.push_back("ltm_dir must not be empty");
+        if (c.scheduler_threads > 64)
+            errors.push_back("scheduler_threads exceeds maximum (64)");
+        if (!errors.empty()) {
+            std::string error_msg = "AgentOS config validation failed:";
+            for (const auto &err : errors) {
+                error_msg += "\n  - " + err;
+            }
+            throw std::invalid_argument(error_msg);
+        }
+    };
+    validate(config_);
+
+    // Validate that directories can be created
+    std::error_code ec;
+    std::filesystem::create_directories(config_.snapshot_dir, ec);
+    if (ec) {
+      throw std::invalid_argument(
+          fmt::format("AgentOS: cannot create snapshot_dir '{}': {}",
+                      config_.snapshot_dir, ec.message()));
+    }
+    std::filesystem::create_directories(config_.ltm_dir, ec);
+    if (ec) {
+      throw std::invalid_argument(
+          fmt::format("AgentOS: cannot create ltm_dir '{}': {}",
+                      config_.ltm_dir, ec.message()));
+    }
 
     // Initialize subsystems
     kernel_ = std::make_unique<kernel::LLMKernel>(std::move(backend),
@@ -246,10 +320,20 @@ public:
 
   // ── 子系统访问器 ────────────────────────────────────────
   kernel::LLMKernel &kernel() { return *kernel_; }
+  [[nodiscard]] const kernel::LLMKernel& kernel() const noexcept { return *kernel_; }
+
   scheduler::Scheduler &scheduler() { return *scheduler_; }
+  [[nodiscard]] const scheduler::Scheduler& scheduler() const noexcept { return *scheduler_; }
+
   context::ContextManager &ctx() { return *ctx_mgr_; }
+  [[nodiscard]] const context::ContextManager& ctx() const noexcept { return *ctx_mgr_; }
+
   memory::MemorySystem &memory() { return *memory_; }
+  [[nodiscard]] const memory::MemorySystem& memory() const noexcept { return *memory_; }
+
   tools::ToolManager &tools() { return *tool_mgr_; }
+  [[nodiscard]] const tools::ToolManager& tools() const noexcept { return *tool_mgr_; }
+
   security::SecurityManager *security() { return security_.get(); }
   bus::AgentBus &bus() { return *bus_; }
 

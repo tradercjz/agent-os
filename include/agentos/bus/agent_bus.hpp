@@ -15,6 +15,7 @@
 #include <optional>
 #include <deque>
 #include <queue>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -79,14 +80,17 @@ public:
     explicit Channel(AgentId owner, size_t max_depth = 10000)
         : owner_(owner), max_depth_(max_depth) {}
 
-    // Returns false if queue is full (backpressure)
-    bool push(BusMessage msg) {
+    /// Push a message to the queue.
+    /// Returns false if queue is full (backpressure), indicating message was dropped.
+    /// @nodiscard Use the return value to detect if message was dropped due to backpressure.
+    [[nodiscard]] bool push(BusMessage msg) {
         std::lock_guard lk(mu_);
         if (queue_.size() >= max_depth_) {
-            dropped_count_++;
-            // Log warning about dropped message
-            LOG_WARN(fmt::format("Channel {}: message queue full ({} depth), dropping message id={}",
-                                 owner_, max_depth_, msg.id));
+            dropped_count_.fetch_add(1, std::memory_order_relaxed);
+            LOG_WARN(fmt::format("[AgentBus:Channel] Queue full (depth={}, dropped_total={}): "
+                                 "msg_id={} from={} dropped",
+                                 max_depth_, dropped_count_.load(),
+                                 msg.id, msg.from));
             return false; // Backpressure: caller should handle
         }
         queue_.push(std::move(msg));
@@ -125,7 +129,26 @@ public:
         return queue_.size();
     }
 
-    size_t dropped_count() const { return dropped_count_; }
+    [[nodiscard]] size_t size() const {
+        std::lock_guard lk(mu_);
+        return queue_.size();
+    }
+
+    [[nodiscard]] size_t capacity() const noexcept { return max_depth_; }
+
+    /// Query the number of messages dropped due to backpressure.
+    [[nodiscard]] uint64_t dropped() const noexcept {
+        return dropped_count_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] uint64_t dropped_count() const noexcept {
+        return dropped_count_.load(std::memory_order_relaxed);
+    }
+
+    /// Reset the dropped count to zero.
+    void reset_dropped_count() noexcept {
+        dropped_count_.store(0, std::memory_order_relaxed);
+    }
 
 private:
     AgentId owner_;
@@ -299,9 +322,9 @@ public:
     const std::deque<BusMessage>& audit_trail() const { return audit_trail_; }
 
     /// Get total dropped messages across all channels
-    size_t total_dropped() const {
-        std::lock_guard lk(mu_);
-        size_t total = 0;
+    [[nodiscard]] uint64_t total_dropped_messages() const noexcept {
+        std::shared_lock lk(channels_mu_);
+        uint64_t total = 0;
         for (auto &[id, ch] : channels_)
             total += ch->dropped_count();
         return total;
@@ -312,6 +335,16 @@ public:
         std::lock_guard lk(mu_);
         auto it = channels_.find(id);
         return it != channels_.end() ? it->second->depth() : 0;
+    }
+
+    /// Returns map of agent_id -> {queue_size, capacity, dropped_count}
+    [[nodiscard]] std::unordered_map<AgentId, std::tuple<size_t, size_t, uint64_t>> channel_stats() const {
+        std::lock_guard lk(mu_);
+        std::unordered_map<AgentId, std::tuple<size_t, size_t, uint64_t>> stats;
+        for (auto &[id, ch] : channels_) {
+            stats[id] = {ch->size(), ch->capacity(), ch->dropped()};
+        }
+        return stats;
     }
 
 private:
@@ -330,6 +363,7 @@ private:
     }
 
     mutable std::mutex mu_;
+    mutable std::shared_mutex channels_mu_;
     std::unordered_map<AgentId, std::shared_ptr<Channel>> channels_;
     std::unordered_map<AgentId, std::unordered_set<std::string>> subscriptions_;
     std::deque<BusMessage> audit_trail_;  // deque 保证 O(1) pop_front

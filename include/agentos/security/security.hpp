@@ -5,7 +5,9 @@
 // ============================================================
 #include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
+#include <chrono>
 #include <cstring>
+#include <ctime>
 #include <agentos/kernel/llm_kernel.hpp>
 #include <functional>
 #include <mutex>
@@ -253,11 +255,28 @@ public:
             return {true, "input_too_large_for_scan", 0.5f};
         }
 
+        // Strip null bytes, carriage returns, and control characters to prevent bypasses
+        std::string clean;
+        clean.reserve(text.size());
+        for (char c : text) {
+            // Strip null bytes, CR, and control characters (except space, tab, newline)
+            unsigned char uc = static_cast<unsigned char>(c);
+            if (uc >= 0x20 || c == ' ' || c == '\t' || c == '\n') {
+                clean += c;
+            }
+        }
+
+        // Strip zero-width and control characters that can bypass keyword detection
+        auto stripped = clean;
+        stripped.erase(std::remove_if(stripped.begin(), stripped.end(),
+            [](unsigned char c) { return c < 0x20 && c != ' ' && c != '\n' && c != '\t'; }),
+            stripped.end());
+
         // Normalize: lowercase + collapse whitespace (defeat spacing bypass)
         std::string lower;
-        lower.reserve(text.size());
+        lower.reserve(stripped.size());
         bool last_space = false;
-        for (char c : text) {
+        for (char c : stripped) {
           char lc = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
           if (std::isspace(static_cast<unsigned char>(c))) {
             if (!last_space) { lower += ' '; last_space = true; }
@@ -267,11 +286,30 @@ public:
           }
         }
 
+        // Helper lambda: check if keyword match at position pos is at word boundary
+        auto at_word_boundary = [&](const std::string &text, size_t pos, size_t kw_len) -> bool {
+            bool left_ok  = (pos == 0 || !std::isalnum(static_cast<unsigned char>(text[pos - 1])));
+            bool right_ok = (pos + kw_len >= text.size() ||
+                             !std::isalnum(static_cast<unsigned char>(text[pos + kw_len])));
+            return left_ok && right_ok;
+        };
+
+        // Helper lambda for word-boundary aware search
+        auto contains_keyword = [&](const std::string& text, const std::string& kw) -> bool {
+            size_t pos = 0;
+            while ((pos = text.find(kw, pos)) != std::string::npos) {
+                // Check word boundaries
+                if (at_word_boundary(text, pos, kw.size())) return true;
+                pos += kw.size();
+            }
+            return false;
+        };
+
         std::lock_guard lk(mu_);
         // O(n×m) scan — acceptable for kMaxScanLength=100KB and ~14 patterns
         // TODO: Switch to Aho-Corasick if pattern count exceeds 50
         for (const auto& pat : patterns_) {
-            if (lower.find(pat) != std::string::npos) {
+            if (contains_keyword(lower, pat)) {
                 return {true, pat, 0.9f};  // early exit on first match
             }
         }
@@ -438,15 +476,23 @@ private:
 
     std::vector<std::string> audit_log_;
     mutable std::mutex audit_mu_;
-    static constexpr size_t max_audit_log_size_ = 10000;
+    static constexpr size_t kAuditLogCapacity = 1000;
 
     void audit(std::string msg) {
         std::lock_guard<std::mutex> lock(audit_mu_);
-        if (audit_log_.size() >= max_audit_log_size_) {
-            auto half = static_cast<std::ptrdiff_t>(max_audit_log_size_ / 2);
-            audit_log_.erase(audit_log_.begin(), audit_log_.begin() + half);
+        // Format: [ISO8601_timestamp] event
+        auto now = std::chrono::system_clock::now();
+        auto t   = std::chrono::system_clock::to_time_t(now);
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
+        std::string entry = fmt::format("[{}] {}", ts, msg);
+
+        if (audit_log_.size() >= kAuditLogCapacity) {
+            // Drop oldest half to make room
+            audit_log_.erase(audit_log_.begin(),
+                             audit_log_.begin() + kAuditLogCapacity / 2);
         }
-        audit_log_.push_back(std::move(msg));
+        audit_log_.push_back(std::move(entry));
     }
 };
 

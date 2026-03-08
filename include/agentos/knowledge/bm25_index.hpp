@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -49,13 +50,17 @@ public:
     auto query_tokens = Tokenizer::instance().cut(query);
 
     std::lock_guard lk(mu_);
-    std::unordered_map<std::string, double> scores;
 
     if (doc_lengths_.empty())
       return {};
 
     double avgdl = static_cast<double>(total_length_) / doc_lengths_.size();
     double N = static_cast<double>(doc_lengths_.size());
+
+    // Use a min-heap of size top_k to limit memory to O(top_k) not O(N)
+    // Min-heap: smallest score at top; replace when we find better
+    using HeapEntry = std::pair<double, std::string>;  // score, doc_id
+    std::priority_queue<HeapEntry, std::vector<HeapEntry>, std::greater<HeapEntry>> heap;
 
     for (const auto &token : query_tokens) {
       auto it = inverted_index_.find(token);
@@ -70,22 +75,28 @@ public:
         double doc_len = doc_lengths_.at(doc_id);
         double numerator = tf * (k1_ + 1.0);
         double denominator = tf + k1_ * (1.0 - b_ + b_ * (doc_len / avgdl));
-        scores[doc_id] += idf * (numerator / denominator);
+        double score = idf * (numerator / denominator);
+
+        // Add to heap, maintaining size <= top_k
+        if (heap.size() < top_k) {
+          heap.push({score, doc_id});
+        } else if (score > heap.top().first) {
+          heap.pop();
+          heap.push({score, doc_id});
+        }
       }
     }
 
+    // Extract results in descending order
     std::vector<Match> results;
-    results.reserve(scores.size());
-    for (const auto &[doc_id, score] : scores) {
+    results.reserve(heap.size());
+    while (!heap.empty()) {
+      auto [score, doc_id] = heap.top();
+      heap.pop();
       results.push_back({doc_id, score});
     }
-
     std::sort(results.begin(), results.end(),
               [](const Match &a, const Match &b) { return a.score > b.score; });
-
-    if (results.size() > top_k) {
-      results.resize(top_k);
-    }
 
     return results;
   }
