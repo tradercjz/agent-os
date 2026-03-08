@@ -23,7 +23,9 @@ namespace fs = std::filesystem;
 // § 3.1  ContextWindow — Token 预算管理器
 // ─────────────────────────────────────────────────────────────
 
-/// @note Not thread-safe. Callers must synchronize externally (e.g. via ContextManager).
+/// Thread-safe: all public methods are guarded by mu_.
+/// Note: add_evict_if_needed() should only be called from ContextManager::append()
+/// under the ContextManager's own lock, or it must be called with mu_ held.
 class ContextWindow {
 public:
   explicit ContextWindow(TokenCount max_tokens = 8192)
@@ -41,40 +43,19 @@ public:
   }
 
   // 强制添加（可能触发驱逐）
-  // 驱逐策略：优先驱逐 importance 最低的非 system 消息
-  // importance: System > Tool/Assistant > User（越老越低优先）
+  // 驱逐策略：优先驱逐最老的非 system 消息（保留系统提示语）
+  // FIFO: 如果消息[0]是系统消息，从消息[1]开始驱逐；否则从[0]开始
   void add_evict_if_needed(const kernel::Message &msg) {
     TokenCount cost = kernel::ILLMBackend::estimate_tokens(msg.content) + 4;
     while (!messages_.empty() && used_tokens_ + cost > max_tokens_) {
-      // 找到最佳驱逐候选：非 system、importance 最低
-      // 优化：先快速扫描前半部分（老消息），因为 score = role_w + age*0.01
-      // 越老的非 system 消息得分越低，大多数情况下 victim 在前半段
-      auto best = messages_.end();
-      float best_score = std::numeric_limits<float>::max();
-      float age_factor = 0.0f;
-      size_t pos = 0;
-      for (auto it = messages_.begin(); it != messages_.end(); ++it, ++pos) {
-        if (it->role == kernel::Role::System) {
-          age_factor += 0.01f;
-          continue;
-        }
-        float role_w = (it->role == kernel::Role::Tool) ? 0.3f :
-                       (it->role == kernel::Role::Assistant) ? 0.5f : 0.1f;
-        float score = role_w + age_factor;
-        if (score < best_score) {
-          best_score = score;
-          best = it;
-          // Early exit: User role at early position can't be beaten by later messages
-          if (it->role == kernel::Role::User && pos < messages_.size() / 2)
-            break;
-        }
-        age_factor += 0.01f;
-      }
-      if (best == messages_.end())
-        break; // 全是 system 消息
-      evicted_.push_back(*best);
-      used_tokens_ -= kernel::ILLMBackend::estimate_tokens(best->content) + 4;
-      messages_.erase(best);
+      // Determine first evictable index: preserve system message at position 0
+      size_t evict_idx = (messages_[0].role == kernel::Role::System) ? 1 : 0;
+      if (evict_idx >= messages_.size())
+        break; // Only system messages remain
+
+      evicted_.push_back(messages_[evict_idx]);
+      used_tokens_ -= kernel::ILLMBackend::estimate_tokens(messages_[evict_idx].content) + 4;
+      messages_.erase(messages_.begin() + evict_idx);
     }
     messages_.push_back(msg);
     used_tokens_ += cost;
@@ -158,7 +139,7 @@ struct ContextSnapshot {
     if (data.size() > MAX_SNAPSHOT_SIZE)
       return std::nullopt;
 
-    ContextSnapshot snap;
+    ContextSnapshot snap{};  // Value-initialize to zero out all members
     snap.captured_at = now();
     std::istringstream ss(data);
     std::string line;
@@ -225,7 +206,8 @@ using SummarizeFn =
 
 class ContextManager : private NonCopyable {
 public:
-  explicit ContextManager(fs::path snapshot_dir = "/tmp/agentos_snapshots")
+  explicit ContextManager(
+      fs::path snapshot_dir = std::filesystem::temp_directory_path() / "agentos_snapshots")
       : snapshot_dir_(std::move(snapshot_dir)) {
     fs::create_directories(snapshot_dir_);
   }

@@ -46,12 +46,12 @@ struct Middleware {
 // ─────────────────────────────────────────────────────────────
 
 struct AgentConfig {
-  std::string name;
-  std::string role_prompt;               // System prompt / 角色设定
-  std::string security_role{"standard"}; // RBAC 角色
+  std::string name{};                     // Default: empty
+  std::string role_prompt{};              // Default: empty (System prompt / 角色设定)
+  std::string security_role{"standard"};  // RBAC 角色
   Priority priority{Priority::Normal};
   TokenCount context_limit{8192};
-  std::vector<std::string> allowed_tools; // 空 = 全部允许
+  std::vector<std::string> allowed_tools{}; // Default: empty (空 = 全部允许)
   bool persist_memory{false};             // 是否使用长期记忆
 };
 
@@ -77,9 +77,9 @@ public:
   virtual Result<std::string> run(std::string user_input) = 0;
 
   // ── 便捷接口（通过 AgentOS 调用各子系统）────────────────
-  Result<kernel::LLMResponse>
+  [[nodiscard]] Result<kernel::LLMResponse>
   think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb = nullptr);
-  Result<tools::ToolResult> act(const kernel::ToolCallRequest &call);
+  [[nodiscard]] Result<tools::ToolResult> act(const kernel::ToolCallRequest &call);
   Result<std::string> remember(std::string content, float importance = 0.5f);
   Result<std::vector<memory::SearchResult>> recall(std::string_view query,
                                                    size_t k = 5);
@@ -150,26 +150,34 @@ public:
   struct Config {
     uint32_t scheduler_threads{4};
     uint32_t tpm_limit{100000};
-    std::string snapshot_dir{"/tmp/agentos_snapshots"};
-    std::string ltm_dir{"/tmp/agentos_ltm"};
+    std::string snapshot_dir{
+        (std::filesystem::temp_directory_path() / "agentos_snapshots").string()};
+    std::string ltm_dir{
+        (std::filesystem::temp_directory_path() / "agentos_ltm").string()};
     bool enable_security{true};
   };
 
   explicit AgentOS(std::unique_ptr<kernel::ILLMBackend> backend,
                    Config cfg)
-      : config_(cfg), // 先拷贝，后续用 config_ 成员，避免 cfg 被移走后失效
-        kernel_(std::make_unique<kernel::LLMKernel>(std::move(backend),
-                                                    config_.tpm_limit)),
-        scheduler_(std::make_unique<scheduler::Scheduler>(
-            scheduler::SchedulerPolicy::Priority, config_.scheduler_threads)),
-        ctx_mgr_(
-            std::make_unique<context::ContextManager>(config_.snapshot_dir)),
-        memory_(std::make_unique<memory::MemorySystem>(config_.ltm_dir)),
-        tool_mgr_(std::make_unique<tools::ToolManager>(memory_.get())),
-        security_(config_.enable_security
-                      ? std::make_unique<security::SecurityManager>()
-                      : nullptr),
-        bus_(std::make_unique<bus::AgentBus>(security_.get())) {
+      : config_(cfg) { // 先拷贝，后续用 config_ 成员，避免 cfg 被移走后失效
+    // Validate critical config fields
+    if (config_.scheduler_threads == 0)
+      throw std::invalid_argument("scheduler_threads must be > 0");
+    if (config_.tpm_limit == 0)
+      throw std::invalid_argument("tpm_limit must be > 0");
+
+    // Initialize subsystems
+    kernel_ = std::make_unique<kernel::LLMKernel>(std::move(backend),
+                                                  config_.tpm_limit);
+    scheduler_ = std::make_unique<scheduler::Scheduler>(
+        scheduler::SchedulerPolicy::Priority, config_.scheduler_threads);
+    ctx_mgr_ = std::make_unique<context::ContextManager>(config_.snapshot_dir);
+    memory_ = std::make_unique<memory::MemorySystem>(config_.ltm_dir);
+    tool_mgr_ = std::make_unique<tools::ToolManager>(memory_.get());
+    security_ = config_.enable_security
+                    ? std::make_unique<security::SecurityManager>()
+                    : nullptr;
+    bus_ = std::make_unique<bus::AgentBus>(security_.get());
     scheduler_->start();
   }
 
@@ -215,7 +223,7 @@ public:
   }
 
   // ── 提交异步任务 ────────────────────────────────────────
-  Result<TaskId> submit_task(std::string name, std::function<void()> work,
+  [[nodiscard]] Result<TaskId> submit_task(std::string name, std::function<void()> work,
                      AgentId agent_id = 0, Priority priority = Priority::Normal,
                      std::vector<TaskId> deps = {}) {
     auto task = std::make_shared<scheduler::AgentTaskDescriptor>();
@@ -335,7 +343,10 @@ private:
 
 inline Result<kernel::LLMResponse>
 Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
-  if (!os_)
+  // Capture os_ in a local variable at the start to ensure it doesn't become
+  // null between the check and subsequent uses (protects against concurrent nullification)
+  AgentOS *os = os_;
+  if (!os)
     return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
 
   // Middleware: before think
@@ -344,38 +355,38 @@ Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
     return make_error(ErrorCode::Cancelled, hook_ctx.cancel_reason);
 
   // 追加到上下文
-  os_->ctx().append(id_, kernel::Message::user(user_msg));
+  os->ctx().append(id_, kernel::Message::user(user_msg));
 
   // 构建请求
   kernel::LLMRequest req;
   req.agent_id = id_;
   req.priority = config_.priority;
-  auto &win = os_->ctx().get_window(id_, config_.context_limit);
+  auto &win = os->ctx().get_window(id_, config_.context_limit);
   req.messages = {win.messages().begin(), win.messages().end()};
 
   // 将工具 Schema 注入请求（供真实 LLM function calling 使用）
   if (!config_.allowed_tools.empty()) {
     req.tool_names = config_.allowed_tools;
     // 生成 OpenAI function-calling 格式的 tools 数组
-    std::string tj = os_->tools().tools_json(config_.allowed_tools);
+    std::string tj = os->tools().tools_json(config_.allowed_tools);
     if (!tj.empty() && tj != "[]")
       req.tools_json = tj;
   } else {
     // allowed_tools 为空表示允许全部工具
-    std::string tj = os_->tools().tools_json({});
+    std::string tj = os->tools().tools_json({});
     if (!tj.empty() && tj != "[]")
       req.tools_json = tj;
   }
 
-  auto result = cb ? os_->kernel().stream_infer(req, std::move(cb))
-                   : os_->kernel().infer(req);
+  auto result = cb ? os->kernel().stream_infer(req, std::move(cb))
+                   : os->kernel().infer(req);
   if (result) {
     // 追加 assistant 回复到上下文，并携带 tool_calls（如果有）
     auto m = kernel::Message::assistant(result->content);
     if (result->wants_tool_call()) {
       m.tool_calls = result->tool_calls;
     }
-    os_->ctx().append(id_, std::move(m));
+    os->ctx().append(id_, std::move(m));
   }
   run_after_hooks(hook_ctx);
   return result;

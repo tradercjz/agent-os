@@ -73,7 +73,11 @@ struct MemoryEntry {
   float importance{0.5f}; // 0~1
   Embedding embedding;
   std::unordered_map<std::string, std::string> tags;
+  // FIX #17: Precondition: both vectors must be non-empty and same size.
+  // Returns normalized cosine similarity (assumes inputs are L2-normalized).
   static float cosine_similarity(const Embedding &a, const Embedding &b) {
+    // Precondition check: both vectors must be non-empty to distinguish from invalid input
+    assert(!a.empty() && !b.empty() && "cosine_similarity requires non-empty vectors");
     if (a.size() != b.size())
       return 0.0f;
     float dot = std::inner_product(a.begin(), a.end(), b.begin(), 0.0f);
@@ -94,20 +98,20 @@ class IMemoryStore {
 public:
   virtual ~IMemoryStore() = default;
 
-  virtual Result<std::string> write(MemoryEntry entry) = 0;
-  virtual Result<MemoryEntry> read(const std::string &id) = 0;
-  virtual Result<bool> forget(const std::string &id) = 0;
+  [[nodiscard]] virtual Result<std::string> write(MemoryEntry entry) = 0;
+  [[nodiscard]] virtual Result<MemoryEntry> read(const std::string &id) = 0;
+  [[nodiscard]] virtual Result<bool> forget(const std::string &id) = 0;
 
   // 语义检索 Top-K
-  virtual Result<std::vector<SearchResult>> search(const Embedding &q_emb,
+  [[nodiscard]] virtual Result<std::vector<SearchResult>> search(const Embedding &q_emb,
                                                    const MemoryFilter &filter,
                                                    size_t top_k = 5) = 0;
 
   // 获取所有记忆
   virtual std::vector<MemoryEntry> get_all() = 0;
 
-  virtual size_t size() const = 0;
-  virtual std::string name() const = 0;
+  virtual size_t size() const noexcept = 0;
+  virtual std::string name() const noexcept = 0;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -118,7 +122,7 @@ class WorkingMemory : public IMemoryStore {
 public:
   explicit WorkingMemory(size_t capacity = 32) : capacity_(capacity) {}
 
-  Result<std::string> write(MemoryEntry entry) override {
+  [[nodiscard]] Result<std::string> write(MemoryEntry entry) override {
     std::lock_guard lk(mu_);
     if (entry.id.empty())
       entry.id = "wm_" + std::to_string(id_counter_++);
@@ -137,7 +141,7 @@ public:
     return id;
   }
 
-  Result<MemoryEntry> read(const std::string &id) override {
+  [[nodiscard]] Result<MemoryEntry> read(const std::string &id) override {
     std::lock_guard lk(mu_);
     auto it = store_.find(id);
     if (it == store_.end())
@@ -147,12 +151,12 @@ public:
     return it->second;
   }
 
-  Result<bool> forget(const std::string &id) override {
+  [[nodiscard]] Result<bool> forget(const std::string &id) override {
     std::lock_guard lk(mu_);
     return store_.erase(id) > 0;
   }
 
-  Result<std::vector<SearchResult>> search(const Embedding &q_emb,
+  [[nodiscard]] Result<std::vector<SearchResult>> search(const Embedding &q_emb,
                                            const MemoryFilter &filter,
                                            size_t top_k = 5) override {
     std::lock_guard lk(mu_);
@@ -180,11 +184,11 @@ public:
     return results;
   }
 
-  size_t size() const override {
+  size_t size() const noexcept override {
     std::lock_guard lk(mu_);
     return store_.size();
   }
-  std::string name() const override { return "WorkingMemory"; }
+  std::string name() const noexcept override { return "WorkingMemory"; }
   void clear() {
     std::lock_guard lk(mu_);
     store_.clear();
@@ -205,7 +209,7 @@ class ShortTermMemory : public IMemoryStore {
 public:
   explicit ShortTermMemory(size_t capacity = 512) : capacity_(capacity) {}
 
-  Result<std::string> write(MemoryEntry entry) override {
+  [[nodiscard]] Result<std::string> write(MemoryEntry entry) override {
     std::lock_guard lk(mu_);
     if (entry.id.empty())
       entry.id = "st_" + std::to_string(id_counter_++);
@@ -244,6 +248,14 @@ public:
             space_.get(), capacity_ * 2, 16, 200);
       }
 
+      // FIX #21: Reject dimension mismatch instead of warning
+      if (hnsw_index_ && entry.embedding.size() != dim_) {
+        return make_error(ErrorCode::InvalidArgument,
+                         fmt::format("ShortTermMemory: embedding dimension mismatch: "
+                                    "expected {}, got {}",
+                                    dim_, entry.embedding.size()));
+      }
+
       if (hnsw_index_ && entry.embedding.size() == dim_) {
         try {
           // 容量不足时动态扩容（与 LTM 一致）
@@ -259,9 +271,6 @@ public:
         } catch (const std::exception &e) {
           LOG_WARN(std::string("ShortTermMemory: HNSW indexing failed: ") + e.what());
         }
-      } else if (hnsw_index_ && !entry.embedding.empty() && entry.embedding.size() != dim_) {
-        LOG_WARN(fmt::format("ShortTermMemory: embedding dim {} != index dim {}, skipping HNSW",
-                             entry.embedding.size(), dim_));
       }
     }
 
@@ -269,7 +278,7 @@ public:
     return id;
   }
 
-  Result<MemoryEntry> read(const std::string &id) override {
+  [[nodiscard]] Result<MemoryEntry> read(const std::string &id) override {
     std::lock_guard lk(mu_);
     auto it = store_.find(id);
     if (it == store_.end())
@@ -279,7 +288,7 @@ public:
     return it->second;
   }
 
-  Result<bool> forget(const std::string &id) override {
+  [[nodiscard]] Result<bool> forget(const std::string &id) override {
     std::lock_guard lk(mu_);
     auto it = store_.find(id);
     if (it == store_.end())
@@ -303,6 +312,7 @@ public:
   }
 
   // 自定义 HNSW 过滤器：scope 匹配 + 已删除检查
+  // FIX #3: Capture data by value to prevent use-after-free
   class CustomFilter : public hnswlib::BaseFilterFunctor {
   public:
     CustomFilter(
@@ -325,8 +335,9 @@ public:
 
   private:
     const MemoryFilter &flt;
-    const std::unordered_map<hnswlib::labeltype, std::string> &l2i;
-    const std::unordered_map<std::string, MemoryEntry> &st;
+    // Store by value to allow safe copying of data from search()
+    std::unordered_map<hnswlib::labeltype, std::string> l2i;
+    std::unordered_map<std::string, MemoryEntry> st;
   };
 
   Result<std::vector<SearchResult>> search(const Embedding &q_emb,
@@ -352,7 +363,13 @@ public:
       return make_error(ErrorCode::InvalidArgument, "Query dimension mismatch");
     }
 
-    CustomFilter custom_filter(filter, label_to_id_, store_);
+    // FIX #3: Take snapshots of label_to_id_ and store_ under lock to prevent
+    // use-after-free if another thread calls write() or forget() during search.
+    // Keep the lock held throughout searchKnn for thread safety with HNSW.
+    auto l2i_copy = label_to_id_;
+    auto store_copy = store_;
+
+    CustomFilter custom_filter(filter, l2i_copy, store_copy);
 
     // InnerProductSpace: distance = 1.0 - dot_product
     size_t cur_count =
@@ -402,11 +419,11 @@ public:
     return results;
   }
 
-  size_t size() const override {
+  size_t size() const noexcept override {
     std::lock_guard lk(mu_);
     return store_.size();
   }
-  std::string name() const override { return "ShortTermMemory"; }
+  std::string name() const noexcept override { return "ShortTermMemory"; }
 
 private:
   mutable std::mutex mu_;
@@ -476,12 +493,16 @@ private:
   };
 
 public:
-  explicit LongTermMemory(fs::path dir = "/tmp/agentos_ltm",
+  explicit LongTermMemory(fs::path dir = "",
                           size_t max_elements = 100000)
-      : dir_(std::move(dir)), max_elements_(max_elements) {
+      : dir_(dir.empty() ? fs::temp_directory_path() / "agentos_ltm" : std::move(dir)),
+        max_elements_(max_elements) {
     fs::create_directories(dir_);
     load_index();
   }
+
+  /// FIX #22: Check if loading succeeded
+  [[nodiscard]] bool is_loaded() const noexcept { return load_ok_; }
 
   ~LongTermMemory() {
     // 析构时自动落盘脏索引
@@ -495,7 +516,7 @@ public:
     if (index_dirty_) save_index_locked();
   }
 
-  Result<std::string> write(MemoryEntry entry) override {
+  [[nodiscard]] Result<std::string> write(MemoryEntry entry) override {
     entry.created_at = entry.accessed_at = now();
 
     std::lock_guard lk(mu_);
@@ -560,12 +581,12 @@ public:
     return entry.id;
   }
 
-  Result<MemoryEntry> read(const std::string &id) override {
+  [[nodiscard]] Result<MemoryEntry> read(const std::string &id) override {
     std::lock_guard lk(mu_);
     return read_locked(id);
   }
 
-  Result<bool> forget(const std::string &id) override {
+  [[nodiscard]] Result<bool> forget(const std::string &id) override {
     std::lock_guard lk(mu_);
     auto path = entry_path(id);
     if (!fs::exists(path))
@@ -610,7 +631,7 @@ public:
     const std::unordered_map<std::string, IndexRecord> &idx_;
   };
 
-  Result<std::vector<SearchResult>> search(const Embedding &q_emb,
+  [[nodiscard]] Result<std::vector<SearchResult>> search(const Embedding &q_emb,
                                            const MemoryFilter &filter,
                                            size_t top_k = 5) override {
     std::lock_guard lk(mu_);
@@ -687,11 +708,11 @@ public:
     return results;
   }
 
-  size_t size() const override {
+  size_t size() const noexcept override {
     std::lock_guard lk(mu_);
     return index_.size();
   }
-  std::string name() const override { return "LongTermMemory"; }
+  std::string name() const noexcept override { return "LongTermMemory"; }
 
 private:
   fs::path entry_path(const std::string &id) const {
@@ -744,64 +765,83 @@ private:
   }
 
   void load_index() {
-    auto idx_path = dir_ / "index.dat";
-    if (!fs::exists(idx_path))
-      return;
+    // FIX #5: Wrap entire loading block in try-catch for exception safety
+    try {
+      auto idx_path = dir_ / "index.dat";
+      if (!fs::exists(idx_path)) {
+        load_ok_ = true; // No index file is acceptable (fresh start)
+        return;
+      }
 
-    std::ifstream ifs(idx_path);
-    std::string line;
+      std::ifstream ifs(idx_path);
+      std::string line;
 
-    if (std::getline(ifs, line) && line.starts_with("DIM ")) {
-      try { dim_ = std::stoull(line.substr(4)); } catch (const std::exception &) { return; }
-      if (dim_ > 0) {
-        space_ = std::make_unique<hnswlib::InnerProductSpace>(dim_);
-        try {
-          auto bin_path = dir_ / "hnsw_index.bin";
-          if (fs::exists(bin_path)) {
-            hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-                space_.get(), bin_path.string());
-          } else {
-            hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-                space_.get(), max_elements_, 16, 200);
+      if (std::getline(ifs, line) && line.starts_with("DIM ")) {
+        try { dim_ = std::stoull(line.substr(4)); } catch (const std::exception &) {
+          load_ok_ = false;
+          return;
+        }
+        if (dim_ > 0) {
+          space_ = std::make_unique<hnswlib::InnerProductSpace>(dim_);
+          try {
+            auto bin_path = dir_ / "hnsw_index.bin";
+            if (fs::exists(bin_path)) {
+              hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+                  space_.get(), bin_path.string());
+            } else {
+              hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+                  space_.get(), max_elements_, 16, 200);
+            }
+          } catch (const std::exception &e) {
+            LOG_WARN(std::string("LTM: HNSW load failed: ") + e.what());
+            hnsw_index_.reset();
           }
-        } catch (const std::exception &) {
-          hnsw_index_.reset();
-        }
-      }
-    }
-
-    while (std::getline(ifs, line)) {
-      if (line.empty())
-        continue;
-      IndexRecord rec;
-      std::istringstream ls(line);
-      ls >> rec.id >> rec.label >> rec.importance >> rec.user_id >>
-          rec.agent_id >> rec.session_id >> rec.type;
-
-      if (rec.user_id == "-")
-        rec.user_id = "";
-      if (rec.agent_id == "-")
-        rec.agent_id = "";
-      if (rec.session_id == "-")
-        rec.session_id = "";
-      if (rec.type == "-")
-        rec.type = "";
-
-      if (rec.label != hnswlib::labeltype(-1)) {
-        label_counter_ = std::max(label_counter_, rec.label + 1);
-        label_to_id_[rec.label] = rec.id; // 恢复反向映射
-      }
-
-      // 恢复 id_counter_
-      if (rec.id.starts_with("lt_")) {
-        try {
-          uint64_t seq = std::stoull(rec.id.substr(3));
-          id_counter_ = std::max(id_counter_, seq + 1);
-        } catch (const std::exception &) {
         }
       }
 
-      index_[rec.id] = std::move(rec);
+      while (std::getline(ifs, line)) {
+        if (line.empty())
+          continue;
+        IndexRecord rec;
+        std::istringstream ls(line);
+        ls >> rec.id >> rec.label >> rec.importance >> rec.user_id >>
+            rec.agent_id >> rec.session_id >> rec.type;
+
+        if (rec.user_id == "-")
+          rec.user_id = "";
+        if (rec.agent_id == "-")
+          rec.agent_id = "";
+        if (rec.session_id == "-")
+          rec.session_id = "";
+        if (rec.type == "-")
+          rec.type = "";
+
+        if (rec.label != hnswlib::labeltype(-1)) {
+          label_counter_ = std::max(label_counter_, rec.label + 1);
+          label_to_id_[rec.label] = rec.id; // 恢复反向映射
+        }
+
+        // 恢复 id_counter_
+        if (rec.id.starts_with("lt_")) {
+          try {
+            uint64_t seq = std::stoull(rec.id.substr(3));
+            id_counter_ = std::max(id_counter_, seq + 1);
+          } catch (const std::exception &) {
+          }
+        }
+
+        index_[rec.id] = std::move(rec);
+      }
+
+      load_ok_ = true;
+    } catch (const std::exception &e) {
+      LOG_WARN(std::string("LTM: load_index() failed: ") + e.what());
+      // Reset to safe state on failure
+      hnsw_index_.reset();
+      space_.reset();
+      index_.clear();
+      label_to_id_.clear();
+      load_ok_ = false;
     }
   }
 
@@ -840,6 +880,7 @@ private:
   uint64_t id_counter_{0};
   size_t max_elements_;
   bool index_dirty_{false}; // 延迟索引落盘标记
+  bool load_ok_{false}; // FIX #22: Track whether load_index() succeeded
 
   // HNSW 索引（unique_ptr 自动管理生命周期）
   std::unique_ptr<hnswlib::InnerProductSpace> space_;
@@ -859,7 +900,8 @@ public:
   enum class LTMBackend { FileBased, SQLite, DuckDB };
 
   // 定义在 memory.cpp 以避免循环 include（SQLiteLongTermMemory 在 sqlite_store.hpp）
-  explicit MemorySystem(fs::path ltm_dir = "/tmp/agentos_ltm",
+  // LOW PRIORITY: Use fs::temp_directory_path() if ltm_dir is empty
+  explicit MemorySystem(fs::path ltm_dir = "",
                         LTMBackend backend = LTMBackend::FileBased);
 
   // 高级构造：注入自定义 LTM 后端（如 SQLiteLongTermMemory）
@@ -916,7 +958,7 @@ public:
   // ======================================
 
   // 写入：优先写入工作记忆；重要性高的自动同步到长期
-  Result<std::string> remember(std::string content, const Embedding &emb,
+  [[nodiscard]] Result<std::string> remember(std::string content, const Embedding &emb,
                                std::string source = "agent",
                                float importance = 0.5f,
                                MemoryFilter filter = {}) {
@@ -930,22 +972,35 @@ public:
     entry.session_id = filter.session_id.value_or("");
     entry.type = filter.type.value_or("episodic");
 
+    // FIX #10: Check return values for all write() calls
     // L0 工作记忆（总写）
     auto wm_id = working_->write(entry);
+    if (!wm_id) {
+      LOG_WARN("MemorySystem: WorkingMemory write failed");
+      return wm_id;
+    }
 
     // L1 短期记忆（总写）
-    (void)short_term_->write(entry);
+    auto st_result = short_term_->write(entry);
+    if (!st_result) {
+      LOG_WARN("MemorySystem: ShortTermMemory write failed");
+      // Continue despite L1 failure; L0 succeeded
+    }
 
     // L2 长期记忆（重要性 > 0.7 时持久化）
     if (importance > 0.7f) {
-      (void)long_term_->write(entry);
+      auto lt_result = long_term_->write(entry);
+      if (!lt_result) {
+        LOG_WARN("MemorySystem: LongTermMemory write failed (non-critical, entry in L0)");
+        // Continue; L0/L1 already succeeded
+      }
     }
 
     return wm_id;
   }
 
   // 检索：L0 → L1 → L2 逐层查找（O(n) 去重）
-  Result<std::vector<SearchResult>> recall(const Embedding &q_emb,
+  [[nodiscard]] Result<std::vector<SearchResult>> recall(const Embedding &q_emb,
                                            const MemoryFilter &filter = {},
                                            size_t top_k = 5) {
     std::vector<SearchResult> results;
@@ -1004,6 +1059,33 @@ public:
         ltm->flush();
     }
     return promoted;
+  }
+
+  // FIX #30: consolidate() with timeout to prevent blocking indefinitely
+  bool consolidate(std::chrono::milliseconds timeout, float importance_threshold = 0.6f) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto r = working_->get_all();
+    size_t promoted = 0;
+    for (auto &entry : r) {
+      if (std::chrono::steady_clock::now() > deadline) {
+        // Timeout exceeded; partial promotion is acceptable
+        if (promoted > 0) {
+          if (auto *ltm = dynamic_cast<LongTermMemory *>(long_term_.get()))
+            ltm->flush();
+        }
+        return false; // Indicate timeout
+      }
+      if (entry.importance >= importance_threshold) {
+        (void)long_term_->write(entry);
+        ++promoted;
+      }
+    }
+    // Flush LTM index once after batch write
+    if (promoted > 0) {
+      if (auto *ltm = dynamic_cast<LongTermMemory *>(long_term_.get()))
+        ltm->flush();
+    }
+    return true; // Completed successfully
   }
 
   WorkingMemory &working() { return *working_; }

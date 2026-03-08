@@ -8,9 +8,18 @@ namespace agentos::tools {
 
 // ---- ShellTool Implementation ----
 ToolResult ShellTool::execute(const ParsedArgs &args) {
+  static constexpr size_t kMaxCommandLength = 4096;
+
   auto cmd = args.get("cmd");
   if (cmd.empty())
     return ToolResult::fail("Command must not be empty");
+
+  // Check command length before proceeding
+  if (cmd.size() > kMaxCommandLength) {
+    LOG_WARN(fmt::format("ShellTool: command too long ({} > {} bytes)", cmd.size(), kMaxCommandLength));
+    return ToolResult{.output = "error: command too long", .success = false};
+  }
+
   // 提取第一个词（命令名）
   std::string cmd_name = cmd.substr(0, cmd.find(' '));
   if (cmd_name.empty() || !allowed_cmds_.contains(cmd_name)) {
@@ -59,13 +68,24 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
   if (!pipe)
     return ToolResult::fail("Failed to open pipe");
   PipeGuard guard(pipe);
-  while (fgets(buf.data(), buf.size(), pipe) != nullptr)
+
+  // Count lines and track if output was truncated
+  size_t line_count = 0;
+  while (fgets(buf.data(), buf.size(), pipe) != nullptr) {
     output += buf.data();
+    line_count++;
+  }
 
   // 截断过长输出，以防恶意产生巨大输出
   if (output.size() > 10240) {
     output = output.substr(0, 10240) + "\n...[truncated]";
   }
+
+  // Add truncation indicator if output was limited to 100 lines
+  if (line_count >= 100) {
+    output += "\n[output truncated at 100 lines]";
+  }
+
   return ToolResult::ok(output);
 }
 

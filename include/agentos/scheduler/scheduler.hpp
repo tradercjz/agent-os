@@ -13,12 +13,24 @@
 #include <optional>
 #include <queue>
 #include <set>
+#include <stack>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace agentos::scheduler {
+
+// ─────────────────────────────────────────────────────────────
+// § 2.0  模块级常量（定义在 Scheduler 类之前，供 AgentTaskDescriptor 等使用）
+// ─────────────────────────────────────────────────────────────
+inline constexpr Duration kDefaultTaskTimeout{30'000};  // 30 seconds
+inline constexpr Duration kDefaultWaitTimeout{10'000};  // 10 seconds
+inline constexpr Duration kDispatchLoopInterval{500};   // 500 ms
+inline constexpr size_t kMaxDependencyGraphNodes = 100'000;
+inline constexpr size_t kMaxDFSStackSize = 100'000;
+inline constexpr uint32_t kDefaultThreadPoolSize = 4;
+inline constexpr TaskId kInitialTaskId = 1000;
 
 // ─────────────────────────────────────────────────────────────
 // § 2.1  AgentTask（可调度的协程工作单元）
@@ -36,7 +48,7 @@ struct AgentTaskDescriptor {
     std::optional<TimePoint>       deadline;
     std::atomic<TaskState>         state{TaskState::Pending};
     TimePoint                      enqueue_time{now()};
-    Duration                       max_runtime{Duration{30000}}; // 30s
+    Duration                       max_runtime{kDefaultTaskTimeout};
 };
 
 using TaskPtr = std::shared_ptr<AgentTaskDescriptor>;
@@ -57,9 +69,9 @@ public:
     Result<void> add_dependency(TaskId task_id, TaskId dep_id) {
         std::lock_guard lk(mu_);
         // Cap DAG size to prevent memory exhaustion
-        if (nodes_.size() > 100000 && !nodes_.contains(task_id))
+        if (nodes_.size() > kMaxDependencyGraphNodes && !nodes_.contains(task_id))
           return make_error(ErrorCode::ResourceExhausted,
-                            "Dependency graph node limit exceeded (100000)");
+                            "Dependency graph node limit exceeded");
         nodes_[task_id].deps.insert(dep_id);
         // 检测循环依赖
         if (has_cycle_locked()) {
@@ -149,30 +161,44 @@ private:
     }
 
     bool has_cycle_locked() const {
-        std::unordered_set<TaskId> visited, in_stack;
+        std::unordered_set<TaskId> visited;
         for (auto& [id, _] : nodes_) {
-            if (!visited.contains(id) && dfs_cycle(id, visited, in_stack))
-                return true;
-        }
-        return false;
-    }
+            if (visited.contains(id)) continue;
+            // Iterative DFS with explicit stack
+            std::stack<std::pair<TaskId, size_t>> stk; // (node, dep_index)
+            std::unordered_set<TaskId> in_stack;
+            stk.push({id, 0});
+            in_stack.insert(id);
 
-    bool dfs_cycle(TaskId id,
-                   std::unordered_set<TaskId>& visited,
-                   std::unordered_set<TaskId>& in_stack) const {
-        visited.insert(id);
-        in_stack.insert(id);
-        auto it = nodes_.find(id);
-        if (it != nodes_.end()) {
-            for (TaskId dep : it->second.deps) {
-                if (!visited.contains(dep)) {
-                    if (dfs_cycle(dep, visited, in_stack)) return true;
-                } else if (in_stack.contains(dep)) {
-                    return true;
+            while (!stk.empty()) {
+                auto& [cur, idx] = stk.top();
+                // Safety check: prevent stack overflow on very large graphs
+                if (stk.size() > kMaxDFSStackSize) {
+                    return false;  // Graph too large, assume no cycle for safety
+                }
+
+                auto it = nodes_.find(cur);
+                if (it == nodes_.end() || idx >= it->second.deps.size()) {
+                    in_stack.erase(cur);
+                    visited.insert(cur);
+                    stk.pop();
+                } else {
+                    // Get next dependency and advance index
+                    auto deps_vec = std::vector<TaskId>(it->second.deps.begin(),
+                                                         it->second.deps.end());
+                    TaskId dep = deps_vec[idx];
+                    stk.top().second++;  // Advance index for next iteration
+
+                    if (in_stack.contains(dep)) {
+                        return true;  // Back edge = cycle found
+                    }
+                    if (!visited.contains(dep)) {
+                        stk.push({dep, 0});
+                        in_stack.insert(dep);
+                    }
                 }
             }
         }
-        in_stack.erase(id);
         return false;
     }
 
@@ -228,8 +254,17 @@ enum class SchedulerPolicy { FIFO, RoundRobin, Priority };
 
 class Scheduler : private NonCopyable {
 public:
+    // Named constants for limits and defaults
+    static constexpr uint32_t kDefaultThreadPoolSize = 4;
+    static constexpr size_t kMaxDependencyGraphNodes = 100000;
+    static constexpr size_t kMaxDFSStackSize = 100000;
+    static constexpr Duration kDefaultTaskTimeout{30000};       // 30 seconds
+    static constexpr Duration kDefaultWaitTimeout{10000};       // 10 seconds
+    static constexpr Duration kDispatchLoopInterval{500};       // 500 milliseconds
+    static constexpr TaskId kInitialTaskId = 1000;
+
     explicit Scheduler(SchedulerPolicy policy = SchedulerPolicy::Priority,
-                       uint32_t thread_pool_size = 4)
+                       uint32_t thread_pool_size = kDefaultThreadPoolSize)
         : policy_(policy), thread_pool_size_(thread_pool_size) {}
 
     ~Scheduler() { shutdown(); }
@@ -264,7 +299,7 @@ public:
     }
 
     // 提交任务
-    Result<TaskId> submit(TaskPtr task) {
+    [[nodiscard]] Result<TaskId> submit(TaskPtr task) {
         // 先注册节点，再添加依赖边（否则 add_task 会覆盖 deps）
         dep_graph_.add_task(task->id, task->priority);
         for (TaskId dep : task->depends_on) {
@@ -298,7 +333,7 @@ public:
     }
 
     // 等待任务完成（同步），使用条件变量替代轮询
-    bool wait_for(TaskId id, Duration timeout = Duration{10000}) {
+    bool wait_for(TaskId id, Duration timeout = Duration{kDefaultWaitTimeout}) {
         std::unique_lock lk(mu_);
         auto it = all_tasks_.find(id);
         if (it == all_tasks_.end()) return false;
@@ -309,19 +344,19 @@ public:
         });
     }
 
-    TaskState task_state(TaskId id) const {
+    TaskState task_state(TaskId id) const noexcept {
         std::lock_guard lk(mu_);
         auto it = all_tasks_.find(id);
         if (it == all_tasks_.end()) return TaskState::Failed;
         return it->second->state.load();
     }
 
-    DependencyGraph& dep_graph() { return dep_graph_; }
+    DependencyGraph& dep_graph() noexcept { return dep_graph_; }
 
-    bool is_running() const { return running_.load(); }
+    bool is_running() const noexcept { return running_.load(); }
 
     /// Drain: wait for all pending/running tasks to finish (up to timeout)
-    bool drain(Duration timeout = Duration{10000}) {
+    bool drain(Duration timeout = Duration{kDefaultWaitTimeout}) {
       std::unique_lock lk(mu_);
       return done_cv_.wait_for(lk, timeout, [this] {
         for (auto &[id, task] : all_tasks_) {
@@ -368,12 +403,7 @@ private:
             TaskPtr task = dequeue_task();
             if (!task) continue;
 
-            // Atomic state transition: only run if still Pending
-            auto expected = TaskState::Pending;
-            if (!task->state.compare_exchange_strong(expected, TaskState::Running)) {
-                continue; // Cancelled or already running
-            }
-
+            // Task state is already transitioned to Running by dequeue_task under lock
             try {
                 task->work();
                 task->state = TaskState::Completed;
@@ -403,8 +433,8 @@ private:
     // 调度分发循环（死锁监控）
     void dispatch_loop(std::stop_token st) {
         while (!st.stop_requested()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            // 死锁检测
+            std::this_thread::sleep_for(std::chrono::milliseconds(kDispatchLoopInterval.count()));
+            // 死锁检测：snapshot tasks while holding lock, then release before detection
             std::vector<TaskId> waiting;
             {
                 std::lock_guard lk(mu_);
@@ -415,6 +445,7 @@ private:
                     }
                 }
             }
+            // Deadlock detection is released from lock to avoid blocking other operations
             if (dep_graph_.detect_deadlock(waiting)) {
                 // 升级：将最老的 Pending 任务强制完成以打破死锁
                 std::lock_guard lk(mu_);
@@ -451,17 +482,28 @@ private:
         });
         if (!running_) return nullptr;
 
+        TaskPtr task = nullptr;
+        // Atomically check state and transition while holding lock to prevent TOCTOU
         if (policy_ == SchedulerPolicy::Priority && !priority_queue_.empty()) {
-            auto task = priority_queue_.top().second;
-            priority_queue_.pop();
-            return task;
+            task = priority_queue_.top().second;
+            auto expected = TaskState::Pending;
+            if (task->state.compare_exchange_strong(expected, TaskState::Running)) {
+                priority_queue_.pop();
+            } else {
+                // Task state changed (cancelled/running), skip it
+                task = nullptr;
+            }
+        } else if (!fifo_queue_.empty()) {
+            task = fifo_queue_.front();
+            auto expected = TaskState::Pending;
+            if (task->state.compare_exchange_strong(expected, TaskState::Running)) {
+                fifo_queue_.pop();
+            } else {
+                // Task state changed (cancelled/running), skip it
+                task = nullptr;
+            }
         }
-        if (!fifo_queue_.empty()) {
-            auto task = fifo_queue_.front();
-            fifo_queue_.pop();
-            return task;
-        }
-        return nullptr;
+        return task;
     }
 
     // ── 优先级队列（最大堆）────────────────────────────────────
@@ -484,10 +526,20 @@ private:
     DependencyGraph                            dep_graph_;
     SchedulerPolicy                            policy_;
     uint32_t                                   thread_pool_size_;
+    std::atomic<TaskId>                        next_task_id_{kInitialTaskId};
 
-    static std::atomic<TaskId> next_task_id_;
 public:
-    static TaskId new_task_id() { return ++next_task_id_; }
+    // Static version for external callers (tests, agent.hpp, etc.)
+    // Uses a module-level counter so IDs are globally unique across instances.
+    static TaskId new_task_id() noexcept {
+        static std::atomic<TaskId> s_counter{kInitialTaskId};
+        return s_counter.fetch_add(1, std::memory_order_relaxed);
+    }
+    // Instance counter: used internally by submit() so each Scheduler
+    // instance tracks its own tasks independently. Fixes issue #16.
+    TaskId next_instance_id() noexcept {
+        return next_task_id_.fetch_add(1, std::memory_order_relaxed);
+    }
 };
 
 } // namespace agentos::scheduler

@@ -113,7 +113,10 @@ public:
         return {};
     }
 
-    bool may(AgentId agent_id, Permission perm) const {
+    // Check if agent has the required permission without raising an error.
+    // Returns true only if permission is granted. Returns false silently on failure
+    // (no log entry; check() should be used if error details are needed).
+    [[nodiscard]] bool may(AgentId agent_id, Permission perm) const {
         return check(agent_id, perm).has_value();
     }
 
@@ -140,6 +143,10 @@ enum class TrustLevel {
     Untrusted = 3, // 已知恶意或注入尝试
 };
 
+// Maximum number of tainted data entries to track. Prevents unbounded memory growth
+// in the taint map. When this limit is reached, new entries are rejected with a warning.
+constexpr size_t kMaxTaintEntries = 100000;
+
 struct TaintedData {
     std::string data;
     TrustLevel  trust;
@@ -154,12 +161,14 @@ public:
         std::lock_guard lk(mu_);
         // Cap map size to prevent unbounded memory growth
         if (taint_map_.size() >= kMaxTaintEntries && !taint_map_.contains(data_id)) {
-            return; // silently reject when full
+            LOG_WARN(fmt::format("Taint map full (size={}, limit={}): dropped data_id='{}'",
+                                  taint_map_.size(), kMaxTaintEntries, data_id));
+            return; // reject when full
         }
         taint_map_[data_id] = {data_id, level, std::move(source)};
     }
 
-    TrustLevel get_trust(const std::string& data_id) const {
+    TrustLevel get_trust(const std::string& data_id) const noexcept {
         std::lock_guard lk(mu_);
         auto it = taint_map_.find(data_id);
         if (it == taint_map_.end()) return TrustLevel::Trusted;
@@ -197,7 +206,6 @@ public:
     }
 
 private:
-    static constexpr size_t kMaxTaintEntries = 100000;
     mutable std::mutex mu_;
     std::unordered_map<std::string, TaintedData> taint_map_;
 };
@@ -235,10 +243,14 @@ public:
         float       confidence; // 0~1
     };
 
-    DetectionResult scan(std::string_view text) const {
-        // Cap input length to prevent O(n*m) DoS on large payloads
-        if (text.size() > kMaxScanLength)
-            text = text.substr(0, kMaxScanLength);
+    [[nodiscard]] DetectionResult scan(std::string_view text) const {
+        // Input must not exceed kMaxScanLength to prevent truncation bypass attacks
+        // Attackers could embed payloads past the truncation point
+        if (text.size() > kMaxScanLength) {
+            LOG_ERROR(fmt::format("Input exceeds maximum scan length: {} > {} bytes",
+                                   text.size(), kMaxScanLength));
+            return {true, "input exceeds kMaxScanLength", 0.95f};
+        }
 
         // Normalize: lowercase + collapse whitespace (defeat spacing bypass)
         std::string lower;
@@ -255,9 +267,11 @@ public:
         }
 
         std::lock_guard lk(mu_);
+        // O(n×m) scan — acceptable for kMaxScanLength=100KB and ~14 patterns
+        // TODO: Switch to Aho-Corasick if pattern count exceeds 50
         for (const auto& pat : patterns_) {
             if (lower.find(pat) != std::string::npos) {
-                return {true, pat, 0.9f};
+                return {true, pat, 0.9f};  // early exit on first match
             }
         }
 
@@ -300,7 +314,7 @@ public:
         patterns_ = std::move(pats);
     }
 
-    size_t pattern_count() const {
+    size_t pattern_count() const noexcept {
         std::lock_guard lk(mu_);
         return patterns_.size();
     }
@@ -328,7 +342,7 @@ public:
     void set_taint_tracker(std::shared_ptr<TaintTracker> tt) { taint_ = tt; }
 
     // ── 工具调用前置检查 ────────────────────────────────────
-    Result<void> before_tool_call(AgentId agent_id,
+    [[nodiscard]] Result<void> before_tool_call(AgentId agent_id,
                                   const std::string& tool_id,
                                   const std::string& args_json,
                                   const std::string& input_data_id = "") {
@@ -379,7 +393,7 @@ public:
     }
 
     // ── LLM 输出扫描 ────────────────────────────────────────
-    Result<void> scan_llm_output(AgentId agent_id,
+    [[nodiscard]] Result<void> scan_llm_output(AgentId agent_id,
                                  const kernel::LLMResponse& response) {
         // 扫描文本输出中的注入尝试
         auto det = injection_detector_.scan(response.content);
@@ -403,13 +417,13 @@ public:
         critical_tools_.insert(std::move(tool_id));
     }
 
-    const std::vector<std::string>& audit_log() const { return audit_log_; }
+    const std::vector<std::string>& audit_log() const noexcept { return audit_log_; }
 
     void clear_audit_log() { audit_log_.clear(); }
 
     // 暴露内部检测器，供 SecurityManager 统一使用（避免实例重复）
-    InjectionDetector& detector() { return injection_detector_; }
-    const InjectionDetector& detector() const { return injection_detector_; }
+    InjectionDetector& detector() noexcept { return injection_detector_; }
+    const InjectionDetector& detector() const noexcept { return injection_detector_; }
 
 private:
     std::shared_ptr<RBAC>         rbac_;
@@ -422,9 +436,11 @@ private:
     std::unordered_set<std::string> critical_tools_{"send_email", "db_delete"};
 
     std::vector<std::string> audit_log_;
+    mutable std::mutex audit_mu_;
     static constexpr size_t max_audit_log_size_ = 10000;
 
     void audit(std::string msg) {
+        std::lock_guard<std::mutex> lock(audit_mu_);
         if (audit_log_.size() >= max_audit_log_size_) {
             auto half = static_cast<std::ptrdiff_t>(max_audit_log_size_ / 2);
             audit_log_.erase(audit_log_.begin(), audit_log_.begin() + half);

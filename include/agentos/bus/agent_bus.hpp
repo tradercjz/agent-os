@@ -83,6 +83,9 @@ public:
         std::lock_guard lk(mu_);
         if (queue_.size() >= max_depth_) {
             dropped_count_++;
+            // Log warning about dropped message
+            LOG_WARN(fmt::format("Channel {}: message queue full ({} depth), dropping message id={}",
+                                 owner_, max_depth_, msg.id));
             return false; // Backpressure: caller should handle
         }
         queue_.push(std::move(msg));
@@ -197,6 +200,7 @@ public:
 
     // ── Request/Response ────────────────────────────────────
     // Returns false if any target channel rejected the message (backpressure)
+    // Tracks failed recipients and logs warnings
     bool send(BusMessage msg) {
         // Hub 做安全过滤：Spoke 间不允许直接通信，必须经 Hub
         if (security_) {
@@ -213,19 +217,39 @@ public:
         audit_push(msg);
 
         bool all_accepted = true;
+        std::vector<AgentId> failed_recipients;
+
         if (msg.to == 0) {
             // 广播
             for (auto& [id, ch] : channels_) {
                 if (id != msg.from) {
-                    if (!ch->push(msg)) all_accepted = false;
+                    if (!ch->push(msg)) {
+                        all_accepted = false;
+                        failed_recipients.push_back(id);
+                    }
                 }
             }
         } else {
             auto it = channels_.find(msg.to);
             if (it != channels_.end()) {
-                if (!it->second->push(msg)) all_accepted = false;
+                if (!it->second->push(msg)) {
+                    all_accepted = false;
+                    failed_recipients.push_back(msg.to);
+                }
             }
         }
+
+        // Log warning if there are failed recipients
+        if (!failed_recipients.empty()) {
+            std::string failed_ids;
+            for (size_t i = 0; i < failed_recipients.size(); ++i) {
+                if (i > 0) failed_ids += ", ";
+                failed_ids += std::to_string(failed_recipients[i]);
+            }
+            LOG_WARN(fmt::format("AgentBus::send() message id={} could not be delivered to agents: [{}]",
+                                 msg.id, failed_ids));
+        }
+
         return all_accepted;
     }
 

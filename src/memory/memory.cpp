@@ -7,7 +7,11 @@ namespace agentos::memory {
 MemorySystem::MemorySystem(fs::path ltm_dir, LTMBackend backend)
     : working_(std::make_unique<WorkingMemory>(32)),
       short_term_(std::make_unique<ShortTermMemory>(512)),
-      graph_(std::make_unique<LocalGraphMemory>(ltm_dir)) {
+      graph_(std::make_unique<LocalGraphMemory>(ltm_dir.empty() ? fs::temp_directory_path() / "agentos_ltm" : ltm_dir)) {
+  // LOW PRIORITY: Use temp directory if ltm_dir is empty
+  if (ltm_dir.empty()) {
+    ltm_dir = fs::temp_directory_path() / "agentos_ltm";
+  }
   // 根据后端类型创建 LTM（都实现 IMemoryStore 接口，可热切换）
   if (backend == LTMBackend::DuckDB) {
     long_term_ = std::make_unique<DuckDBLongTermMemory>(std::move(ltm_dir));

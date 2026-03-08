@@ -103,6 +103,8 @@ struct EmbeddingResponse {
 
 class TokenBucketRateLimiter {
 public:
+  static constexpr int64_t kMaxWaitMs = 300'000; // 5 minutes
+
   explicit TokenBucketRateLimiter(uint32_t tpm_limit)
       : tpm_limit_(std::max(tpm_limit, 1u)), bucket_(tpm_limit_),
         refill_rate_(static_cast<double>(tpm_limit_) / 60.0),
@@ -124,19 +126,26 @@ public:
     // 计算需要等待多少毫秒（clamp to sane range）
     double deficit = n - bucket_;
     auto wait_ms = static_cast<int64_t>(
-        std::clamp(deficit / refill_rate_ * 1000.0, 0.0, 300000.0)); // max 5 min
+        std::clamp(deficit / refill_rate_ * 1000.0, 0.0, static_cast<double>(kMaxWaitMs)));
     return {false, Duration{wait_ms}};
   }
 
-  uint32_t available_tokens() const {
+  uint32_t available_tokens() const noexcept {
     std::lock_guard lk(mu_);
     return static_cast<uint32_t>(bucket_);
   }
+
+  // TODO: Consider improving the wait mechanism in acquire_rate_limit() with a
+  // condition variable instead of busy-waiting (sleep_for), but this requires
+  // careful design to avoid blocking the executor and may not be worth the
+  // complexity for the current use case.
 
 private:
   void refill_locked() {
     auto now = Clock::now();
     auto elapsed = std::chrono::duration<double>(now - last_refill_).count();
+    // Clamp elapsed to prevent integer overflow in large system clock jumps
+    elapsed = std::min(elapsed, 3600.0); // Max 1 hour
     bucket_ = std::min(static_cast<double>(tpm_limit_),
                        bucket_ + elapsed * refill_rate_);
     last_refill_ = now;
@@ -158,23 +167,23 @@ public:
   virtual ~ILLMBackend() = default;
 
   // 同步推理（由调度器在工作线程上调用）
-  virtual Result<LLMResponse> complete(const LLMRequest &req) = 0;
+  [[nodiscard]] virtual Result<LLMResponse> complete(const LLMRequest &req) = 0;
 
   // 向量化嵌入
-  virtual Result<EmbeddingResponse> embed(const EmbeddingRequest & /*req*/) {
+  [[nodiscard]] virtual Result<EmbeddingResponse> embed(const EmbeddingRequest & /*req*/) {
     return make_error(ErrorCode::LLMBackendError,
                       "Embedding not implicitly supported by backend");
   }
 
   // 流式推理（逐 token 回调）
   using TokenCallback = std::function<void(std::string_view token)>;
-  virtual Result<LLMResponse> stream(const LLMRequest &req,
+  [[nodiscard]] virtual Result<LLMResponse> stream(const LLMRequest &req,
                                      TokenCallback /*cb*/) {
     // 默认降级为非流式
     return complete(req);
   }
 
-  virtual std::string name() const = 0;
+  virtual std::string name() const noexcept = 0;
 
   // 估算 prompt token 数（简单启发：英文约 4 字符/token）
   static TokenCount estimate_tokens(std::string_view text) {
@@ -203,7 +212,7 @@ public:
                              std::move(args_json));
   }
 
-  Result<LLMResponse> complete(const LLMRequest &req) override {
+  [[nodiscard]] Result<LLMResponse> complete(const LLMRequest &req) override {
     // 收集所有消息内容
     std::string combined;
     for (auto &m : req.messages)
@@ -252,7 +261,7 @@ public:
   }
 
   // 向量嵌入：生成确定性伪向量（基于文本内容哈希）
-  Result<EmbeddingResponse> embed(const EmbeddingRequest &req) override {
+  [[nodiscard]] Result<EmbeddingResponse> embed(const EmbeddingRequest &req) override {
     EmbeddingResponse resp;
     for (const auto &input : req.inputs) {
       std::vector<float> emb(embed_dim_, 0.0f);
@@ -279,7 +288,7 @@ public:
     return resp;
   }
 
-  std::string name() const override { return model_name_; }
+  std::string name() const noexcept override { return model_name_; }
 
   // 设置 embed() 输出维度（默认 1536，可调小以加速测试）
   void set_embed_dim(size_t dim) { embed_dim_ = dim; }
@@ -307,10 +316,10 @@ public:
       : api_key_(std::move(api_key)), base_url_(std::move(base_url)),
         default_model_(std::move(default_model)) {}
 
-  Result<LLMResponse> complete(const LLMRequest &req) override;
-  Result<LLMResponse> stream(const LLMRequest &req, TokenCallback cb) override;
-  Result<EmbeddingResponse> embed(const EmbeddingRequest &req) override;
-  std::string name() const override { return "openai/" + default_model_; }
+  [[nodiscard]] Result<LLMResponse> complete(const LLMRequest &req) override;
+  [[nodiscard]] Result<LLMResponse> stream(const LLMRequest &req, TokenCallback cb) override;
+  [[nodiscard]] Result<EmbeddingResponse> embed(const EmbeddingRequest &req) override;
+  std::string name() const noexcept override { return "openai/" + default_model_; }
 
 private:
   std::string build_request_json(const LLMRequest &req) const;
@@ -344,7 +353,7 @@ public:
         max_retries_(max_retries) {}
 
   // 主要入口：带限流 + 重试的同步推理
-  Result<LLMResponse> infer(const LLMRequest &req) {
+  [[nodiscard]] Result<LLMResponse> infer(const LLMRequest &req) {
     TokenCount estimated = estimate_request_tokens(req);
     if (auto err = acquire_rate_limit(estimated))
       return make_unexpected(*err);
@@ -354,7 +363,7 @@ public:
   }
 
   // 流式推理（不重试，因为 callback 有副作用）
-  Result<LLMResponse> stream_infer(const LLMRequest &req,
+  [[nodiscard]] Result<LLMResponse> stream_infer(const LLMRequest &req,
                                    ILLMBackend::TokenCallback cb) {
     TokenCount estimated = estimate_request_tokens(req);
     if (auto err = acquire_rate_limit(estimated))
@@ -367,7 +376,7 @@ public:
   }
 
   // 获取文本向量嵌入
-  Result<EmbeddingResponse> embed(const EmbeddingRequest &req) {
+  [[nodiscard]] Result<EmbeddingResponse> embed(const EmbeddingRequest &req) {
     TokenCount estimated = 0;
     for (const auto &text : req.inputs)
       estimated += ILLMBackend::estimate_tokens(text);
@@ -385,9 +394,9 @@ public:
     return result;
   }
 
-  ILLMBackend &backend() { return *backend_; }
-  KernelMetrics &metrics() { return metrics_; }
-  std::string model_name() const { return backend_->name(); }
+  ILLMBackend &backend() noexcept { return *backend_; }
+  KernelMetrics &metrics() noexcept { return metrics_; }
+  std::string model_name() const noexcept { return backend_->name(); }
 
 private:
   // Estimate total tokens for a chat request

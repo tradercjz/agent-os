@@ -76,6 +76,11 @@ struct StreamContext {
   std::string current_tool_args;
   bool done = false;
 
+  // Synchronization for response modification
+  // Note: libcurl's easy interface is sequential, not truly async, but we add
+  // proper synchronization for correctness and thread-safety.
+  std::mutex response_mu;
+
   /// 处理一行完整的 SSE 数据
   void process_sse_line(std::string_view line) {
     using namespace agentos;
@@ -106,7 +111,10 @@ struct StreamContext {
           std::string text = delta["content"].get<std::string>();
           if (token_cb)
             token_cb(text);
-          response->content += text;
+          {
+            std::lock_guard lk(response_mu);
+            response->content += text;
+          }
         }
 
         // 工具调用（增量式）
@@ -129,14 +137,20 @@ struct StreamContext {
       if (choice.contains("finish_reason") &&
           choice["finish_reason"].is_string()) {
         std::string fr = choice["finish_reason"].get<std::string>();
-        response->finish_reason = fr;
+        {
+          std::lock_guard lk(response_mu);
+          response->finish_reason = fr;
+        }
         if (fr == "tool_calls" && !current_tool_name.empty()) {
           ToolCallRequest tcr;
           tcr.id = current_tool_id.empty() ? "call_0" : current_tool_id;
           tcr.name = current_tool_name;
           tcr.args_json = current_tool_args;
-          response->tool_calls.push_back(std::move(tcr));
-          // 重置累积状态（支持多个 tool call）
+          {
+            std::lock_guard lk(response_mu);
+            response->tool_calls.push_back(std::move(tcr));
+          }
+          // 重置累積状態（支持多個 tool call）
           current_tool_id.clear();
           current_tool_name.clear();
           current_tool_args.clear();
@@ -147,11 +161,15 @@ struct StreamContext {
       if (j.contains("usage")) {
         auto &usage = j["usage"];
         if (usage.contains("prompt_tokens") &&
-            usage["prompt_tokens"].is_number_integer())
+            usage["prompt_tokens"].is_number_integer()) {
+          std::lock_guard lk(response_mu);
           response->prompt_tokens = static_cast<uint32_t>(std::max(0, usage["prompt_tokens"].get<int>()));
+        }
         if (usage.contains("completion_tokens") &&
-            usage["completion_tokens"].is_number_integer())
+            usage["completion_tokens"].is_number_integer()) {
+          std::lock_guard lk(response_mu);
           response->completion_tokens = static_cast<uint32_t>(std::max(0, usage["completion_tokens"].get<int>()));
+        }
       }
     } catch (const std::exception &) {
       // 忽略单个 SSE chunk 的解析错误，继续处理后续数据
@@ -167,10 +185,13 @@ size_t stream_write_callback(void *contents, size_t size, size_t nmemb,
 
   // Safety: cap line buffer at 1 MiB to prevent DoS via no-newline streams
   constexpr size_t MAX_LINE_BUFFER = 1024 * 1024;
-  if (ctx->line_buffer.size() + total > MAX_LINE_BUFFER) {
-    ctx->response->content += "[stream error: line buffer overflow]";
-    ctx->done = true;
-    return 0; // Signal curl to abort
+  {
+    std::lock_guard lk(ctx->response_mu);
+    if (ctx->line_buffer.size() + total > MAX_LINE_BUFFER) {
+      ctx->response->content += "[stream error: line buffer overflow]";
+      ctx->done = true;
+      return 0; // Signal curl to abort
+    }
   }
 
   ctx->line_buffer.append(static_cast<char *>(contents), total);
