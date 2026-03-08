@@ -649,7 +649,11 @@ private:
     std::getline(ifs, entry.source);
     std::string imp_str;
     std::getline(ifs, imp_str);
-    entry.importance = std::stof(imp_str);
+    try {
+      entry.importance = std::clamp(std::stof(imp_str), 0.0f, 1.0f);
+    } catch (const std::exception &) {
+      entry.importance = 0.5f; // Default on parse failure
+    }
     std::getline(ifs, entry.user_id);
     std::getline(ifs, entry.agent_id);
     std::getline(ifs, entry.session_id);
@@ -669,7 +673,8 @@ private:
         hnsw_index_) {
       try {
         entry.embedding = hnsw_index_->getDataByLabel<float>(it->second.label);
-      } catch (...) {
+      } catch (const std::exception &) {
+        // Label not found in HNSW — skip embedding recovery
       }
     }
 
@@ -685,7 +690,7 @@ private:
     std::string line;
 
     if (std::getline(ifs, line) && line.starts_with("DIM ")) {
-      dim_ = std::stoull(line.substr(4));
+      try { dim_ = std::stoull(line.substr(4)); } catch (const std::exception &) { return; }
       if (dim_ > 0) {
         space_ = std::make_unique<hnswlib::InnerProductSpace>(dim_);
         try {
@@ -697,7 +702,7 @@ private:
             hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
                 space_.get(), max_elements_, 16, 200);
           }
-        } catch (...) {
+        } catch (const std::exception &) {
           hnsw_index_.reset();
         }
       }
@@ -730,7 +735,7 @@ private:
         try {
           uint64_t seq = std::stoull(rec.id.substr(3));
           id_counter_ = std::max(id_counter_, seq + 1);
-        } catch (...) {
+        } catch (const std::exception &) {
         }
       }
 

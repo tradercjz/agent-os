@@ -457,7 +457,7 @@ private:
       if (stored_crc != computed_crc) {
         return ""; // Corrupted line
       }
-    } catch (...) {
+    } catch (const std::exception &) {
       return ""; // Malformed CRC
     }
     return payload;
@@ -555,8 +555,9 @@ private:
             }
           }
         }
-      } catch (...) {
+      } catch (const std::exception &) {
         // 跳过 WAL 中损坏的行
+        LOG_WARN("GraphMemory: skipping malformed WAL record");
         continue;
       }
     }

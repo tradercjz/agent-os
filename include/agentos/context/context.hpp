@@ -156,7 +156,7 @@ struct ContextSnapshot {
           auto agent_end = body.find(',', agent_pos);
           auto agent_val = body.substr(agent_pos + 6,
               agent_end != std::string::npos ? agent_end - agent_pos - 6 : std::string::npos);
-          snap.agent_id = std::stoull(agent_val);
+          try { snap.agent_id = std::stoull(agent_val); } catch (const std::exception &) { continue; }
         }
         if (sess_pos != std::string::npos)
           snap.session_id = body.substr(sess_pos + 9);
@@ -165,7 +165,8 @@ struct ContextSnapshot {
         auto colon = rest.find(':');
         if (colon == std::string::npos)
           continue;
-        int role_id = std::stoi(rest.substr(0, colon));
+        int role_id;
+        try { role_id = std::stoi(rest.substr(0, colon)); } catch (const std::exception &) { continue; }
         if (role_id < 0 || role_id > 3) // Role enum: System=0, User=1, Assistant=2, Tool=3
           continue;
         std::string content;
