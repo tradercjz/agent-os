@@ -185,41 +185,51 @@ public:
     ifs.read(reinterpret_cast<char *>(&b_), sizeof(b_));
     ifs.read(reinterpret_cast<char *>(&total_length_), sizeof(total_length_));
 
+    // Sanity limit for string lengths (100MB) and counts (10M)
+    constexpr uint32_t max_str_len = 100 * 1024 * 1024;
+    constexpr uint32_t max_count = 10'000'000;
+
+    auto read_checked_str = [&]() -> std::string {
+      uint32_t slen;
+      ifs.read(reinterpret_cast<char *>(&slen), 4);
+      if (!ifs.good() || slen > max_str_len) return {};
+      std::string s(slen, '\0');
+      ifs.read(s.data(), slen);
+      return s;
+    };
+
     // doc_lengths_
     uint32_t n_docs;
     ifs.read(reinterpret_cast<char *>(&n_docs), 4);
+    if (!ifs.good() || n_docs > max_count) return false;
     doc_lengths_.clear();
     doc_lengths_.reserve(n_docs);
     for (uint32_t i = 0; i < n_docs; ++i) {
-      uint32_t slen;
-      ifs.read(reinterpret_cast<char *>(&slen), 4);
-      std::string doc_id(slen, '\0');
-      ifs.read(doc_id.data(), slen);
+      auto doc_id = read_checked_str();
+      if (!ifs.good()) return false;
       size_t len;
       ifs.read(reinterpret_cast<char *>(&len), sizeof(len));
-      doc_lengths_[doc_id] = len;
+      doc_lengths_[std::move(doc_id)] = len;
     }
 
     // inverted_index_
     uint32_t n_terms;
     ifs.read(reinterpret_cast<char *>(&n_terms), 4);
+    if (!ifs.good() || n_terms > max_count) return false;
     inverted_index_.clear();
     inverted_index_.reserve(n_terms);
     for (uint32_t i = 0; i < n_terms; ++i) {
-      uint32_t tlen;
-      ifs.read(reinterpret_cast<char *>(&tlen), 4);
-      std::string term(tlen, '\0');
-      ifs.read(term.data(), tlen);
+      auto term = read_checked_str();
+      if (!ifs.good()) return false;
 
       uint32_t n_postings;
       ifs.read(reinterpret_cast<char *>(&n_postings), 4);
+      if (!ifs.good() || n_postings > max_count) return false;
       std::vector<std::pair<std::string, int>> postings;
       postings.reserve(n_postings);
       for (uint32_t j = 0; j < n_postings; ++j) {
-        uint32_t dlen;
-        ifs.read(reinterpret_cast<char *>(&dlen), 4);
-        std::string doc_id(dlen, '\0');
-        ifs.read(doc_id.data(), dlen);
+        auto doc_id = read_checked_str();
+        if (!ifs.good()) return false;
         int tf;
         ifs.read(reinterpret_cast<char *>(&tf), sizeof(tf));
         postings.push_back({std::move(doc_id), tf});
