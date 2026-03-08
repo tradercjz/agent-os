@@ -31,7 +31,7 @@ TEST(GraphMemoryTest, BasicGraphOperations) {
   // Test edge retrieval
   auto edges = graph.get_edges_by_relation("EntityA", "visited");
   ASSERT_TRUE(edges.has_value());
-  ASSERT_EQ(edges->size(), 1);
+  ASSERT_EQ(edges->size(), 1u);
   EXPECT_EQ(edges.value()[0].target_id, "EntityB");
 
   // Implicit node creation
@@ -42,7 +42,7 @@ TEST(GraphMemoryTest, BasicGraphOperations) {
 
   auto edges_c = graph.get_edges("EntityC");
   ASSERT_TRUE(edges_c.has_value());
-  EXPECT_EQ(edges_c->size(), 1);
+  EXPECT_EQ(edges_c->size(), 1u);
 }
 
 TEST(GraphMemoryTest, KHopSearch) {
@@ -63,20 +63,20 @@ TEST(GraphMemoryTest, KHopSearch) {
   // 1-hop search
   auto res1 = graph.k_hop_search("Alice", 1);
   ASSERT_TRUE(res1.has_value());
-  EXPECT_EQ(res1->nodes.size(), 3); // Alice, Bob, IceCream
-  EXPECT_EQ(res1->edges.size(), 2);
+  EXPECT_EQ(res1->nodes.size(), 3u); // Alice, Bob, IceCream
+  EXPECT_EQ(res1->edges.size(), 2u);
 
   // 2-hop search
   auto res2 = graph.k_hop_search("Alice", 2);
   ASSERT_TRUE(res2.has_value());
-  EXPECT_EQ(res2->nodes.size(), 4); // Alice, Bob, IceCream, Charlie
-  EXPECT_EQ(res2->edges.size(), 3);
+  EXPECT_EQ(res2->nodes.size(), 4u); // Alice, Bob, IceCream, Charlie
+  EXPECT_EQ(res2->edges.size(), 3u);
 
   // 3-hop search
   auto res3 = graph.k_hop_search("Alice", 3);
   ASSERT_TRUE(res3.has_value());
-  EXPECT_EQ(res3->nodes.size(), 5); // Alice, Bob, IceCream, Charlie, NewYork
-  EXPECT_EQ(res3->edges.size(), 4);
+  EXPECT_EQ(res3->nodes.size(), 5u); // Alice, Bob, IceCream, Charlie, NewYork
+  EXPECT_EQ(res3->edges.size(), 4u);
 }
 
 TEST(GraphMemoryTest, WALPersistence) {
@@ -99,20 +99,20 @@ TEST(GraphMemoryTest, WALPersistence) {
 
     auto edges_dog = graph.get_edges("Dog");
     ASSERT_TRUE(edges_dog.has_value());
-    ASSERT_EQ(edges_dog->size(), 1);
+    ASSERT_EQ(edges_dog->size(), 1u);
     EXPECT_EQ(edges_dog.value()[0].relation, "chases");
     EXPECT_EQ(edges_dog.value()[0].target_id, "Cat");
 
     auto edges_cat = graph.get_edges("Cat");
     ASSERT_TRUE(edges_cat.has_value());
-    ASSERT_EQ(edges_cat->size(), 1);
+    ASSERT_EQ(edges_cat->size(), 1u);
     EXPECT_EQ(edges_cat.value()[0].relation, "eats");
     EXPECT_EQ(edges_cat.value()[0].target_id, "Mouse");
 
     // 2-hop search should work on restored data
     auto res = graph.k_hop_search("Dog", 2);
     ASSERT_TRUE(res.has_value());
-    EXPECT_EQ(res->edges.size(), 2);
+    EXPECT_EQ(res->edges.size(), 2u);
   }
 }
 
@@ -179,7 +179,7 @@ TEST(GraphMemoryTest, UpdateNode) {
     memory::LocalGraphMemory graph2(test_dir);
     auto edges = graph2.k_hop_search("X", 0);
     ASSERT_TRUE(edges.has_value());
-    ASSERT_EQ(edges->nodes.size(), 1);
+    ASSERT_EQ(edges->nodes.size(), 1u);
     EXPECT_EQ(edges->nodes[0].content, "newer");
     EXPECT_EQ(edges->nodes[0].type, "Company");
   }
@@ -206,17 +206,17 @@ TEST(GraphMemoryTest, DeleteNode) {
   // A's edges to B should be gone
   auto edges_a = graph.get_edges("A");
   ASSERT_TRUE(edges_a.has_value());
-  EXPECT_EQ(edges_a->size(), 0);
+  EXPECT_EQ(edges_a->size(), 0u);
 
   // B's outgoing edges should be gone
   auto edges_b = graph.get_edges("B");
   ASSERT_TRUE(edges_b.has_value());
-  EXPECT_EQ(edges_b->size(), 0);
+  EXPECT_EQ(edges_b->size(), 0u);
 
   // C's edge to B should be gone
   auto edges_c = graph.get_edges("C");
   ASSERT_TRUE(edges_c.has_value());
-  EXPECT_EQ(edges_c->size(), 0);
+  EXPECT_EQ(edges_c->size(), 0u);
 
   // Non-existent returns false
   auto r2 = graph.delete_node("NonExistent");
@@ -228,7 +228,7 @@ TEST(GraphMemoryTest, DeleteNode) {
     memory::LocalGraphMemory graph2(test_dir);
     auto edges = graph2.get_edges("A");
     ASSERT_TRUE(edges.has_value());
-    EXPECT_EQ(edges->size(), 0);
+    EXPECT_EQ(edges->size(), 0u);
   }
   std::filesystem::remove_all(test_dir);
 }
@@ -250,7 +250,7 @@ TEST(GraphMemoryTest, DeleteEdge) {
 
   auto edges = graph.get_edges("A");
   ASSERT_TRUE(edges.has_value());
-  ASSERT_EQ(edges->size(), 1);
+  ASSERT_EQ(edges->size(), 1u);
   EXPECT_EQ(edges.value()[0].relation, "r2");
 
   // Non-existent edge
@@ -263,7 +263,7 @@ TEST(GraphMemoryTest, DeleteEdge) {
     memory::LocalGraphMemory graph2(test_dir);
     auto edges2 = graph2.get_edges("A");
     ASSERT_TRUE(edges2.has_value());
-    ASSERT_EQ(edges2->size(), 1);
+    ASSERT_EQ(edges2->size(), 1u);
     EXPECT_EQ(edges2.value()[0].relation, "r2");
   }
   std::filesystem::remove_all(test_dir);
@@ -284,11 +284,11 @@ TEST(GraphMemoryTest, CleanupBefore) {
 
   auto removed = graph.cleanup_before(200);
   ASSERT_TRUE(removed.has_value());
-  EXPECT_EQ(*removed, 1);
+  EXPECT_EQ(*removed, 1u);
 
   auto edges = graph.get_edges("A");
   ASSERT_TRUE(edges.has_value());
-  EXPECT_EQ(edges->size(), 1);
+  EXPECT_EQ(edges->size(), 1u);
   EXPECT_EQ(edges.value()[0].relation, "current");
 
   std::filesystem::remove_all(test_dir);
@@ -308,7 +308,7 @@ TEST(GraphMemoryTest, HighLevelMemoryAPI) {
 
   auto subgraph = memory.query_graph("CompanyX", 2);
   ASSERT_TRUE(subgraph.has_value());
-  EXPECT_EQ(subgraph->edges.size(), 2);
+  EXPECT_EQ(subgraph->edges.size(), 2u);
 
   bool found_employs = false;
   bool found_works_on = false;

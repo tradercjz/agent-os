@@ -43,7 +43,7 @@ TEST_F(ToolManagerTest, ToolSchemaJSONReflection) {
   EXPECT_EQ(props["name"]["type"], "string");
 
   auto req = parsed["function"]["parameters"]["required"];
-  EXPECT_EQ(req.size(), 2);
+  EXPECT_EQ(req.size(), 2u);
   EXPECT_EQ(req[0], "age");
   EXPECT_EQ(req[1], "name");
 }

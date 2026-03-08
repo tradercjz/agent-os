@@ -31,7 +31,7 @@ TEST_F(SDKBuilderTest, MockBuilder) {
                 .build();
 
   ASSERT_NE(os, nullptr);
-  EXPECT_EQ(os->agent_count(), 0);
+  EXPECT_EQ(os->agent_count(), 0u);
 }
 
 TEST_F(SDKBuilderTest, DataDirSetsSnapshotAndLtm) {
@@ -54,7 +54,7 @@ TEST_F(SDKBuilderTest, BuildWithoutBackendThrows) {
 TEST_F(SDKBuilderTest, QuickstartMock) {
   auto os = quickstart_mock();
   ASSERT_NE(os, nullptr);
-  EXPECT_EQ(os->agent_count(), 0);
+  EXPECT_EQ(os->agent_count(), 0u);
 }
 
 // ── AgentBuilder (fluent agent creation) ────────────────────
@@ -71,10 +71,10 @@ TEST_F(SDKBuilderTest, AgentBuilderFluent) {
 
   ASSERT_NE(agent, nullptr);
   EXPECT_EQ(agent->config().name, "TestBot");
-  EXPECT_EQ(agent->config().context_limit, 4096);
+  EXPECT_EQ(agent->config().context_limit, 4096u);
   EXPECT_EQ(agent->config().priority, Priority::High);
   EXPECT_TRUE(agent->config().persist_memory);
-  EXPECT_EQ(os->agent_count(), 1);
+  EXPECT_EQ(os->agent_count(), 1u);
 }
 
 TEST_F(SDKBuilderTest, AgentBuilderWithTools) {
@@ -86,7 +86,7 @@ TEST_F(SDKBuilderTest, AgentBuilderWithTools) {
                    .create();
 
   ASSERT_NE(agent, nullptr);
-  EXPECT_EQ(agent->config().allowed_tools.size(), 2);
+  EXPECT_EQ(agent->config().allowed_tools.size(), 2u);
   EXPECT_EQ(agent->config().allowed_tools[0], "kv_store");
 }
 
@@ -117,7 +117,7 @@ TEST_F(SDKBuilderTest, FromJsonMock) {
 
   auto os = from_json(j);
   ASSERT_NE(os, nullptr);
-  EXPECT_EQ(os->agent_count(), 0);
+  EXPECT_EQ(os->agent_count(), 0u);
 }
 
 TEST_F(SDKBuilderTest, FromJsonFile) {
@@ -202,7 +202,7 @@ TEST_F(SDKBuilderTest, EndToEndBuilderFlow) {
   ASSERT_TRUE(result);
   EXPECT_FALSE(result->empty());
 
-  EXPECT_EQ(os->agent_count(), 1);
+  EXPECT_EQ(os->agent_count(), 1u);
   auto status = os->status();
   EXPECT_TRUE(status.find("agents=1") != std::string::npos);
 }
@@ -284,9 +284,9 @@ TEST_F(SDKBuilderTest, HealthCheck) {
   EXPECT_TRUE(h.healthy);
   EXPECT_TRUE(h.scheduler_running);
   EXPECT_TRUE(h.backend_available);
-  EXPECT_EQ(h.active_agents, 0);
-  EXPECT_EQ(h.total_requests, 0);
-  EXPECT_EQ(h.total_errors, 0);
+  EXPECT_EQ(h.active_agents, 0u);
+  EXPECT_EQ(h.total_requests, 0u);
+  EXPECT_EQ(h.total_errors, 0u);
 
   // JSON output
   auto json = h.to_json();
@@ -300,8 +300,8 @@ TEST_F(SDKBuilderTest, HealthCheckAfterActivity) {
   (void)agent->run("hello");
 
   auto h = os->health();
-  EXPECT_EQ(h.active_agents, 1);
-  EXPECT_GE(h.total_requests, 1);
+  EXPECT_EQ(h.active_agents, 1u);
+  EXPECT_GE(h.total_requests, 1u);
 }
 
 // ── Graceful Shutdown ───────────────────────────────────────
@@ -332,5 +332,5 @@ TEST_F(SDKBuilderTest, SchedulerDrain) {
   bool drained = os->scheduler().drain(Duration{5000});
   EXPECT_TRUE(drained);
   EXPECT_EQ(done.load(), 5);
-  EXPECT_EQ(os->scheduler().active_task_count(), 0);
+  EXPECT_EQ(os->scheduler().active_task_count(), 0u);
 }

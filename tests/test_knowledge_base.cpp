@@ -16,7 +16,7 @@ namespace fs = std::filesystem;
 
 class MockEmbeddingBackend : public ILLMBackend {
 public:
-  std::string name() const override { return "Mock"; }
+  std::string name() const noexcept override { return "Mock"; }
 
   Result<LLMResponse> complete(const LLMRequest &req) override {
     (void)req;
@@ -227,8 +227,8 @@ TEST(KnowledgeBaseTest, RemoveDocumentRemovesChunks) {
   (void)kb.ingest_text("doc_to_remove", "Content about Apple products.");
   (void)kb.ingest_text("doc_keep", "Content about banana smoothies.");
 
-  EXPECT_EQ(kb.document_count(), 2);
-  EXPECT_GE(kb.chunk_count(), 2);
+  EXPECT_EQ(kb.document_count(), 2u);
+  EXPECT_GE(kb.chunk_count(), 2u);
 
   // 删除 doc_to_remove
   EXPECT_TRUE(kb.remove_document("doc_to_remove"));

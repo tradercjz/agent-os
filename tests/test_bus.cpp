@@ -62,8 +62,8 @@ TEST_F(AgentBusTest, PointToPointMessage) {
 
   auto recv = ch_b->recv(Duration{1000});
   ASSERT_TRUE(recv.has_value());
-  EXPECT_EQ(recv->from, 10);
-  EXPECT_EQ(recv->to, 20);
+  EXPECT_EQ(recv->from, 10u);
+  EXPECT_EQ(recv->to, 20u);
   EXPECT_EQ(recv->payload, "hello");
 
   // Agent A should NOT receive its own message

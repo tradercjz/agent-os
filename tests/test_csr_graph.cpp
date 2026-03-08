@@ -37,10 +37,10 @@ TEST_F(CSRGraphTest, BasicBuildAndSearch) {
 
     auto meta = graph.get_meta();
     ASSERT_NE(meta, nullptr);
-    EXPECT_EQ(meta->num_nodes, 5);
+    EXPECT_EQ(meta->num_nodes, 5u);
 
     auto apple_neighbors = graph.get_neighbors("Apple");
-    EXPECT_EQ(apple_neighbors.size(), 2);
+    EXPECT_EQ(apple_neighbors.size(), 2u);
 
     bool has_jobs = false, has_cook = false;
     for (auto &[dst, rel] : apple_neighbors) {
@@ -53,7 +53,7 @@ TEST_F(CSRGraphTest, BasicBuildAndSearch) {
     EXPECT_TRUE(has_cook);
 
     auto jobs_neighbors = graph.get_neighbors("Steve_Jobs");
-    EXPECT_EQ(jobs_neighbors.size(), 1);
+    EXPECT_EQ(jobs_neighbors.size(), 1u);
     EXPECT_EQ(jobs_neighbors[0].first, "Pixar");
 
     auto fake = graph.get_neighbors("Microsoft");
@@ -79,11 +79,11 @@ TEST_F(CSRGraphTest, TemporalEdgeFiltering) {
 
     // ts=0: 不过滤，返回全部
     auto all = graph.get_neighbors("Apple", 0);
-    EXPECT_EQ(all.size(), 3);
+    EXPECT_EQ(all.size(), 3u);
 
     // ts=1500: Jobs 是 CEO（1000~2000 有效）
     auto at_1500 = graph.get_neighbors("Apple", 1500);
-    ASSERT_EQ(at_1500.size(), 2); // Jobs + iPhone
+    ASSERT_EQ(at_1500.size(), 2u); // Jobs + iPhone
     bool found_jobs = false;
     for (auto &[dst, rel] : at_1500) {
       if (dst == "Steve_Jobs")
@@ -93,7 +93,7 @@ TEST_F(CSRGraphTest, TemporalEdgeFiltering) {
 
     // ts=2500: Cook 是 CEO（2001~∞ 有效），Jobs 已失效
     auto at_2500 = graph.get_neighbors("Apple", 2500);
-    ASSERT_EQ(at_2500.size(), 2); // Cook + iPhone
+    ASSERT_EQ(at_2500.size(), 2u); // Cook + iPhone
     bool found_cook = false;
     for (auto &[dst, rel] : at_2500) {
       if (dst == "Tim_Cook")
@@ -119,18 +119,18 @@ TEST_F(CSRGraphTest, KHopTraversal) {
 
     // 1-hop from A: sees B, E
     auto sub1 = graph.k_hop("A", 1);
-    EXPECT_EQ(sub1.triples.size(), 2);
-    EXPECT_EQ(sub1.node_ids.size(), 3); // A, B, E
+    EXPECT_EQ(sub1.triples.size(), 2u);
+    EXPECT_EQ(sub1.node_ids.size(), 3u); // A, B, E
 
     // 2-hop from A: sees B→C too
     auto sub2 = graph.k_hop("A", 2);
-    EXPECT_EQ(sub2.triples.size(), 3); // A→B, A→E, B→C
-    EXPECT_EQ(sub2.node_ids.size(), 4); // A, B, C, E
+    EXPECT_EQ(sub2.triples.size(), 3u); // A→B, A→E, B→C
+    EXPECT_EQ(sub2.node_ids.size(), 4u); // A, B, C, E
 
     // 3-hop from A: full graph reachable
     auto sub3 = graph.k_hop("A", 3);
-    EXPECT_EQ(sub3.triples.size(), 4); // + C→D
-    EXPECT_EQ(sub3.node_ids.size(), 5); // A, B, C, D, E
+    EXPECT_EQ(sub3.triples.size(), 4u); // + C→D
+    EXPECT_EQ(sub3.node_ids.size(), 5u); // A, B, C, D, E
 
     // Non-existent node
     auto sub_fake = graph.k_hop("Z", 2);
@@ -153,11 +153,11 @@ TEST_F(CSRGraphTest, KHopWithTemporalFilter) {
 
     // ts=150: X→Y 有效, X→Z 有效, Y→W 有效
     auto sub = graph.k_hop("X", 2, 150);
-    EXPECT_EQ(sub.triples.size(), 3);
+    EXPECT_EQ(sub.triples.size(), 3u);
 
     // ts=300: X→Y 已过期, 只有 X→Z
     auto sub2 = graph.k_hop("X", 2, 300);
-    EXPECT_EQ(sub2.triples.size(), 1);
+    EXPECT_EQ(sub2.triples.size(), 1u);
     EXPECT_EQ(sub2.triples[0].dst, "Z");
   }
 }
@@ -175,6 +175,6 @@ TEST_F(CSRGraphTest, IncomingNeighborsCSC) {
     ASSERT_TRUE(graph.load());
 
     auto incoming = graph.get_incoming_neighbors("C");
-    EXPECT_EQ(incoming.size(), 2);
+    EXPECT_EQ(incoming.size(), 2u);
   }
 }

@@ -51,20 +51,20 @@ TEST_F(DuckDBStoreTest, ForgetEntry) {
 
   auto id = store_->write(entry);
   ASSERT_TRUE(id);
-  EXPECT_EQ(store_->size(), 1);
+  EXPECT_EQ(store_->size(), 1u);
 
   auto result = store_->forget(*id);
   ASSERT_TRUE(result);
   EXPECT_TRUE(*result);
 
-  EXPECT_EQ(store_->size(), 0);
+  EXPECT_EQ(store_->size(), 0u);
 
   auto read = store_->read(*id);
   EXPECT_FALSE(read);
 }
 
 TEST_F(DuckDBStoreTest, SizeReflectsEntries) {
-  EXPECT_EQ(store_->size(), 0);
+  EXPECT_EQ(store_->size(), 0u);
 
   for (int i = 0; i < 5; ++i) {
     MemoryEntry e;
@@ -72,7 +72,7 @@ TEST_F(DuckDBStoreTest, SizeReflectsEntries) {
     (void)store_->write(e);
   }
 
-  EXPECT_EQ(store_->size(), 5);
+  EXPECT_EQ(store_->size(), 5u);
 }
 
 TEST_F(DuckDBStoreTest, GetAllReturnsAllEntries) {
@@ -84,7 +84,7 @@ TEST_F(DuckDBStoreTest, GetAllReturnsAllEntries) {
   }
 
   auto all = store_->get_all();
-  EXPECT_EQ(all.size(), 3);
+  EXPECT_EQ(all.size(), 3u);
 }
 
 // ── Embedding 向量存取测试 ───────────────────────
@@ -106,7 +106,7 @@ TEST_F(DuckDBStoreTest, EmbeddingPersistence) {
 
   auto read = store_->read(*id);
   ASSERT_TRUE(read);
-  ASSERT_EQ(read->embedding.size(), 128);
+  ASSERT_EQ(read->embedding.size(), 128u);
 
   for (size_t i = 0; i < emb.size(); ++i) {
     EXPECT_NEAR(read->embedding[i], emb[i], 1e-5f);
@@ -155,7 +155,7 @@ TEST_F(DuckDBStoreTest, HNSWSemanticSearch) {
 
   auto results = store_->search(query, filter, 5);
   ASSERT_TRUE(results);
-  ASSERT_GE(results->size(), 1);
+  ASSERT_GE(results->size(), 1u);
   EXPECT_EQ(results->front().entry.content, "Memory about cats");
 }
 
@@ -187,7 +187,7 @@ TEST_F(DuckDBStoreTest, ScopeFilterInSearch) {
 
   auto results = store_->search(emb, filter, 5);
   ASSERT_TRUE(results);
-  ASSERT_EQ(results->size(), 1);
+  ASSERT_EQ(results->size(), 1u);
   EXPECT_EQ(results->front().entry.user_id, "user_a");
 }
 
@@ -216,16 +216,16 @@ TEST_F(DuckDBStoreTest, PersistenceAcrossRestarts) {
     (void)store_->write(e2);
   }
 
-  EXPECT_EQ(store_->size(), 2);
+  EXPECT_EQ(store_->size(), 2u);
 
   // 销毁并重新创建（模拟重启）
   store_.reset();
   store_ = std::make_unique<DuckDBLongTermMemory>(test_dir_);
 
-  EXPECT_EQ(store_->size(), 2);
+  EXPECT_EQ(store_->size(), 2u);
 
   auto all = store_->get_all();
-  EXPECT_EQ(all.size(), 2);
+  EXPECT_EQ(all.size(), 2u);
 
   bool found1 = false, found2 = false;
   for (const auto &e : all) {
@@ -242,7 +242,7 @@ TEST_F(DuckDBStoreTest, PersistenceAcrossRestarts) {
   filter.user_id = "user_1";
   auto results = store_->search(emb, filter, 5);
   ASSERT_TRUE(results);
-  ASSERT_GE(results->size(), 1);
+  ASSERT_GE(results->size(), 1u);
   EXPECT_EQ(results->front().entry.content, "Persistent memory 1");
 }
 
@@ -260,20 +260,20 @@ TEST_F(DuckDBStoreTest, SQLQueryBasic) {
   // Basic SELECT
   auto qr = store_->sql_query("SELECT id, content FROM entries ORDER BY id");
   ASSERT_TRUE(qr.ok());
-  EXPECT_EQ(qr.columns.size(), 2);
-  EXPECT_EQ(qr.rows.size(), 5);
+  EXPECT_EQ(qr.columns.size(), 2u);
+  EXPECT_EQ(qr.rows.size(), 5u);
 
   // Filter query
   auto qr2 = store_->sql_query(
       "SELECT content FROM entries WHERE user_id = 'user_a'");
   ASSERT_TRUE(qr2.ok());
-  EXPECT_EQ(qr2.rows.size(), 3);
+  EXPECT_EQ(qr2.rows.size(), 3u);
 
   // Aggregation
   auto qr3 = store_->sql_query(
       "SELECT user_id, COUNT(*) as cnt FROM entries GROUP BY user_id");
   ASSERT_TRUE(qr3.ok());
-  EXPECT_EQ(qr3.rows.size(), 2);
+  EXPECT_EQ(qr3.rows.size(), 2u);
 }
 
 TEST_F(DuckDBStoreTest, SQLQueryRejectsDML) {
@@ -311,7 +311,7 @@ TEST_F(DuckDBStoreTest, QueryByFilterRejectsInjection) {
   // Valid queries should still work
   auto qr4 = store_->query_by_filter("importance > 0.0");
   EXPECT_TRUE(qr4.ok());
-  EXPECT_EQ(qr4.rows.size(), 1);
+  EXPECT_EQ(qr4.rows.size(), 1u);
 }
 
 TEST_F(DuckDBStoreTest, BlobEdgeCases) {
@@ -332,7 +332,7 @@ TEST_F(DuckDBStoreTest, BlobEdgeCases) {
   ASSERT_TRUE(id2);
   auto r2 = store_->read(*id2);
   ASSERT_TRUE(r2);
-  ASSERT_EQ(r2->embedding.size(), 1);
+  ASSERT_EQ(r2->embedding.size(), 1u);
   EXPECT_NEAR(r2->embedding[0], 1.0f, 1e-5f);
 }
 
@@ -347,7 +347,7 @@ TEST_F(DuckDBStoreTest, AggregateQuery) {
 
   auto qr = store_->aggregate("type");
   ASSERT_TRUE(qr.ok());
-  EXPECT_EQ(qr.rows.size(), 2);
+  EXPECT_EQ(qr.rows.size(), 2u);
 }
 
 // ── MemorySystem DuckDB 后端集成测试 ──────────────
@@ -367,14 +367,14 @@ TEST_F(DuckDBStoreTest, MemorySystemWithDuckDBBackend) {
       mem.add_episodic("Important event", emb, "user_1", "session_1", 0.9f);
   ASSERT_TRUE(id);
 
-  EXPECT_GE(mem.long_term().size(), 1);
+  EXPECT_GE(mem.long_term().size(), 1u);
   EXPECT_EQ(mem.long_term().name(), "DuckDBLongTermMemory");
 
   MemoryFilter filter;
   filter.user_id = "user_1";
   auto results = mem.recall(emb, filter, 5);
   ASSERT_TRUE(results);
-  ASSERT_GE(results->size(), 1);
+  ASSERT_GE(results->size(), 1u);
 
   bool found = false;
   for (const auto &r : *results) {
@@ -405,7 +405,7 @@ TEST_F(DuckDBStoreTest, MemorySystemDuckDBEnumCreatesCorrectBackend) {
       v /= norm;
 
     (void)mem.remember("DuckDB enum test data", emb, "agent", 0.9f);
-    EXPECT_GE(mem.long_term().size(), 1);
+    EXPECT_GE(mem.long_term().size(), 1u);
   }
 
   fs::remove_all(duckdb_dir);

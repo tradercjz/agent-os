@@ -38,7 +38,7 @@ TEST_F(MemorySystemTest, BasicHNSWInsertionAndSearch) {
 
   auto results = mem_sys_->recall(query, filter, 5);
   ASSERT_TRUE(results);
-  ASSERT_GE(results->size(), 1);
+  ASSERT_GE(results->size(), 1u);
 
   // The closest should be Memory 2
   EXPECT_EQ(results->front().entry.content, "Memory 2");
@@ -46,7 +46,7 @@ TEST_F(MemorySystemTest, BasicHNSWInsertionAndSearch) {
   // Test exact matching retrieval
   auto results2 = mem_sys_->recall(emb1, filter, 5);
   ASSERT_TRUE(results2);
-  ASSERT_GE(results2->size(), 1);
+  ASSERT_GE(results2->size(), 1u);
   // Find Memory 1
   bool found = false;
   for (auto &r : *results2) {
@@ -65,7 +65,7 @@ TEST_F(MemorySystemTest, ConsolidatePromotesImportantMemories) {
 
   // Consolidate with threshold 0.6 — should promote 1
   size_t promoted = mem_sys_->consolidate(0.6f);
-  EXPECT_GE(promoted, 1);
+  EXPECT_GE(promoted, 1u);
 }
 
 TEST_F(MemorySystemTest, RememberAndRecallById) {
@@ -85,7 +85,7 @@ TEST_F(MemorySystemTest, EmptyEmbeddingGracefulHandling) {
   auto res = mem_sys_->recall(empty_emb, {}, 5);
   ASSERT_TRUE(res);
   ASSERT_EQ(res->size(),
-            2); // 1 from WM + 1 from STM（importance=0.5 < 0.7 阈值，不写入 LTM）
+            2u); // 1 from WM + 1 from STM（importance=0.5 < 0.7 阈值，不写入 LTM）
   EXPECT_EQ(res->front().entry.content, "Text only");
 }
 
@@ -113,14 +113,14 @@ TEST(ShortTermMemoryTest, HNSWCompactionAfterManyDeletes) {
     ids.push_back(*id);
   }
 
-  EXPECT_EQ(stm.size(), 20);
+  EXPECT_EQ(stm.size(), 20u);
 
   // Delete 15 entries (>50% threshold triggers compaction)
   for (int i = 0; i < 15; ++i) {
     (void)stm.forget(ids[i]);
   }
 
-  EXPECT_EQ(stm.size(), 5);
+  EXPECT_EQ(stm.size(), 5u);
 
   // Remaining entries should still be searchable
   memory::MemoryFilter filter;
@@ -133,7 +133,7 @@ TEST(ShortTermMemoryTest, HNSWCompactionAfterManyDeletes) {
 
   auto results = stm.search(query, filter, 5);
   ASSERT_TRUE(results);
-  EXPECT_GE(results->size(), 1);
+  EXPECT_GE(results->size(), 1u);
 }
 
 // ── Const accessor tests ─────────────────────────────────────
@@ -144,7 +144,7 @@ TEST(MemorySystemConstTest, ConstAccessorsWork) {
 
   const memory::MemorySystem mem(temp_dir);
   // These should compile with const ref
-  EXPECT_EQ(mem.long_term().size(), 0);
+  EXPECT_EQ(mem.long_term().size(), 0u);
   EXPECT_EQ(mem.long_term().name(), "LongTermMemory");
 
   std::filesystem::remove_all(temp_dir);
@@ -200,5 +200,5 @@ TEST_F(MemorySystemTest, ConsolidateWithTimeout) {
   EXPECT_LT(elapsed.count(), 5000) << "consolidate() took too long; may be hanging";
 
   // Should have promoted some memories (those with importance >= 0.4)
-  EXPECT_GE(promoted, 0);
+  EXPECT_GE(promoted, 0u);
 }

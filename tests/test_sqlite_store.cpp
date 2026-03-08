@@ -51,13 +51,13 @@ TEST_F(SQLiteStoreTest, ForgetEntry) {
 
   auto id = store_->write(entry);
   ASSERT_TRUE(id);
-  EXPECT_EQ(store_->size(), 1);
+  EXPECT_EQ(store_->size(), 1u);
 
   auto result = store_->forget(*id);
   ASSERT_TRUE(result);
   EXPECT_TRUE(*result);
 
-  EXPECT_EQ(store_->size(), 0);
+  EXPECT_EQ(store_->size(), 0u);
 
   // Read after forget should fail
   auto read = store_->read(*id);
@@ -65,7 +65,7 @@ TEST_F(SQLiteStoreTest, ForgetEntry) {
 }
 
 TEST_F(SQLiteStoreTest, SizeReflectsEntries) {
-  EXPECT_EQ(store_->size(), 0);
+  EXPECT_EQ(store_->size(), 0u);
 
   for (int i = 0; i < 5; ++i) {
     MemoryEntry e;
@@ -73,7 +73,7 @@ TEST_F(SQLiteStoreTest, SizeReflectsEntries) {
     (void)store_->write(e);
   }
 
-  EXPECT_EQ(store_->size(), 5);
+  EXPECT_EQ(store_->size(), 5u);
 }
 
 TEST_F(SQLiteStoreTest, GetAllReturnsAllEntries) {
@@ -85,7 +85,7 @@ TEST_F(SQLiteStoreTest, GetAllReturnsAllEntries) {
   }
 
   auto all = store_->get_all();
-  EXPECT_EQ(all.size(), 3);
+  EXPECT_EQ(all.size(), 3u);
 }
 
 // ── Embedding 向量存取测试 ───────────────────────
@@ -109,7 +109,7 @@ TEST_F(SQLiteStoreTest, EmbeddingPersistence) {
   // Read back and verify embedding
   auto read = store_->read(*id);
   ASSERT_TRUE(read);
-  ASSERT_EQ(read->embedding.size(), 128);
+  ASSERT_EQ(read->embedding.size(), 128u);
 
   for (size_t i = 0; i < emb.size(); ++i) {
     EXPECT_NEAR(read->embedding[i], emb[i], 1e-5f);
@@ -161,7 +161,7 @@ TEST_F(SQLiteStoreTest, HNSWSemanticSearch) {
 
   auto results = store_->search(query, filter, 5);
   ASSERT_TRUE(results);
-  ASSERT_GE(results->size(), 1);
+  ASSERT_GE(results->size(), 1u);
   EXPECT_EQ(results->front().entry.content, "Memory about cats");
 }
 
@@ -194,7 +194,7 @@ TEST_F(SQLiteStoreTest, ScopeFilterInSearch) {
 
   auto results = store_->search(emb, filter, 5);
   ASSERT_TRUE(results);
-  ASSERT_EQ(results->size(), 1);
+  ASSERT_EQ(results->size(), 1u);
   EXPECT_EQ(results->front().entry.user_id, "user_a");
 }
 
@@ -224,17 +224,17 @@ TEST_F(SQLiteStoreTest, PersistenceAcrossRestarts) {
     (void)store_->write(e2);
   }
 
-  EXPECT_EQ(store_->size(), 2);
+  EXPECT_EQ(store_->size(), 2u);
 
   // 销毁并重新创建（模拟重启）
   store_.reset();
   store_ = std::make_unique<SQLiteLongTermMemory>(test_dir_);
 
   // 数据应该仍然存在
-  EXPECT_EQ(store_->size(), 2);
+  EXPECT_EQ(store_->size(), 2u);
 
   auto all = store_->get_all();
-  EXPECT_EQ(all.size(), 2);
+  EXPECT_EQ(all.size(), 2u);
 
   // 验证数据内容
   bool found1 = false, found2 = false;
@@ -252,7 +252,7 @@ TEST_F(SQLiteStoreTest, PersistenceAcrossRestarts) {
   filter.user_id = "user_1";
   auto results = store_->search(emb, filter, 5);
   ASSERT_TRUE(results);
-  ASSERT_GE(results->size(), 1);
+  ASSERT_GE(results->size(), 1u);
   EXPECT_EQ(results->front().entry.content, "Persistent memory 1");
 }
 
@@ -275,7 +275,7 @@ TEST_F(SQLiteStoreTest, MemorySystemWithSQLiteBackend) {
   ASSERT_TRUE(id);
 
   // LTM 应该有条目（importance 0.9 > 0.7 阈值）
-  EXPECT_GE(mem.long_term().size(), 1);
+  EXPECT_GE(mem.long_term().size(), 1u);
   EXPECT_EQ(mem.long_term().name(), "SQLiteLongTermMemory");
 
   // 召回应该有结果
@@ -283,7 +283,7 @@ TEST_F(SQLiteStoreTest, MemorySystemWithSQLiteBackend) {
   filter.user_id = "user_1";
   auto results = mem.recall(emb, filter, 5);
   ASSERT_TRUE(results);
-  ASSERT_GE(results->size(), 1);
+  ASSERT_GE(results->size(), 1u);
 
   bool found = false;
   for (const auto &r : *results) {
@@ -318,7 +318,7 @@ TEST_F(SQLiteStoreTest, MemorySystemSQLiteEnumCreatesCorrectBackend) {
       v /= norm;
 
     (void)mem.remember("SQLite enum test data", emb, "agent", 0.9f);
-    EXPECT_GE(mem.long_term().size(), 1);
+    EXPECT_GE(mem.long_term().size(), 1u);
   }
 
   // 验证 FileBased 枚举仍正常工作

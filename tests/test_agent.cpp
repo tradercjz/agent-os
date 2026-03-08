@@ -50,7 +50,7 @@ TEST_F(AgentOSTest, CreateAndDestroyAgent) {
 
   auto agent = os_->create_agent(cfg);
   ASSERT_NE(agent, nullptr);
-  EXPECT_GT(agent->id(), 0);
+  EXPECT_GT(agent->id(), 0u);
 
   os_->destroy_agent(agent->id());
 }
@@ -131,7 +131,7 @@ TEST_F(AgentOSTest, SubmitAsyncTask) {
   auto tid_result = os_->submit_task("test_task", [&] { counter++; });
   ASSERT_TRUE(tid_result.has_value());
   auto tid = *tid_result;
-  EXPECT_GT(tid, 0);
+  EXPECT_GT(tid, 0u);
 
   os_->scheduler().wait_for(tid, Duration{5000});
   EXPECT_EQ(counter.load(), 1);

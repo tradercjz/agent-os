@@ -69,10 +69,10 @@ TEST_F(ContextWindowTest, EvictionPrefersUserOverAssistant) {
 }
 
 TEST_F(ContextWindowTest, MessageCount) {
-  EXPECT_EQ(win.message_count(), 0);
+  EXPECT_EQ(win.message_count(), 0u);
   win.try_add(Message::user("a"));
   win.try_add(Message::user("b"));
-  EXPECT_EQ(win.message_count(), 2);
+  EXPECT_EQ(win.message_count(), 2u);
 }
 
 TEST_F(ContextWindowTest, Utilization) {
@@ -114,7 +114,7 @@ TEST(SnapshotTest, SerializeDeserializeRoundTrip) {
   auto restored = ContextSnapshot::deserialize(serialized);
 
   ASSERT_TRUE(restored.has_value());
-  EXPECT_EQ(restored->agent_id, 42);
+  EXPECT_EQ(restored->agent_id, 42u);
   EXPECT_EQ(restored->messages.size(), 3u);
   EXPECT_EQ(restored->messages[0].role, Role::System);
   EXPECT_EQ(restored->messages[0].content, "System prompt");
@@ -207,7 +207,7 @@ TEST(ContextSnapshotTest, RoundtripWithSpecialChars) {
   EXPECT_EQ(restored->messages[0].content, "Hello\nWorld");
   EXPECT_EQ(restored->messages[1].content, "Tab\there\rand\\backslash");
   EXPECT_TRUE(restored->messages[2].content.empty());
-  EXPECT_EQ(restored->agent_id, 42);
+  EXPECT_EQ(restored->agent_id, 42u);
 }
 
 TEST(ContextSnapshotTest, DeserializeRejectsOversizedInput) {
@@ -221,6 +221,6 @@ TEST(ContextSnapshotTest, DeserializeRejectsOversizedInput) {
 TEST_F(ContextWindowTest, EmptyMessageHandling) {
   // Empty messages should still be addable (the validator is in Agent::think, not ContextWindow)
   win.add_evict_if_needed(Message::user(""));
-  EXPECT_EQ(win.message_count(), 1);
+  EXPECT_EQ(win.message_count(), 1u);
   EXPECT_EQ(win.messages().back().content, "");
 }
