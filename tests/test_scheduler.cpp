@@ -209,3 +209,39 @@ TEST_F(SchedulerTest, TaskCancellation) {
   EXPECT_TRUE(cancelled);
   EXPECT_EQ(sched->task_state(task->id), TaskState::Cancelled);
 }
+
+TEST_F(SchedulerTest, CancelWakesWaitFor) {
+  // Task that blocks — cancel should wake wait_for immediately
+  auto blocker = std::make_shared<AgentTaskDescriptor>();
+  blocker->id = Scheduler::new_task_id();
+  blocker->name = "slow_task";
+  blocker->priority = Priority::Normal;
+  blocker->work = [] { std::this_thread::sleep_for(std::chrono::seconds(30)); };
+
+  // Dependent task that will never run
+  auto task = std::make_shared<AgentTaskDescriptor>();
+  task->id = Scheduler::new_task_id();
+  task->name = "dependent";
+  task->priority = Priority::Normal;
+  task->depends_on = {blocker->id};
+  task->work = [] {};
+
+  sched->submit(blocker);
+  sched->submit(task);
+
+  // Cancel in a separate thread after 50ms
+  std::thread canceller([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    sched->cancel(task->id);
+  });
+
+  auto start = now();
+  bool done = sched->wait_for(task->id, Duration{5000});
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now() - start);
+
+  EXPECT_TRUE(done); // Should return true (Cancelled is terminal)
+  EXPECT_LT(elapsed.count(), 2000); // Should wake quickly, not timeout at 5s
+  EXPECT_EQ(sched->task_state(task->id), TaskState::Cancelled);
+
+  canceller.join();
+}
