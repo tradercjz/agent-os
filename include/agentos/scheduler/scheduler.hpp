@@ -391,16 +391,21 @@ private:
                 TimePoint oldest_time = TimePoint::max();
                 for (TaskId wid : waiting) {
                     auto it = all_tasks_.find(wid);
+                    // Re-check state under lock to avoid TOCTOU
                     if (it != all_tasks_.end() &&
-                        it->second->state == TaskState::Pending &&
+                        it->second->state.load() == TaskState::Pending &&
                         it->second->enqueue_time < oldest_time) {
                         oldest_time = it->second->enqueue_time;
                         oldest = wid;
                     }
                 }
                 if (oldest) {
-                    all_tasks_[oldest]->state = TaskState::Cancelled;
-                    dep_graph_.complete_task(oldest); // 强制解除阻塞
+                    auto expected = TaskState::Pending;
+                    if (all_tasks_[oldest]->state.compare_exchange_strong(
+                            expected, TaskState::Cancelled)) {
+                        dep_graph_.complete_task(oldest); // 强制解除阻塞
+                        done_cv_.notify_all();
+                    }
                 }
             }
         }

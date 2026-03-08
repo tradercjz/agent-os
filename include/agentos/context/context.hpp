@@ -23,6 +23,7 @@ namespace fs = std::filesystem;
 // § 3.1  ContextWindow — Token 预算管理器
 // ─────────────────────────────────────────────────────────────
 
+/// @note Not thread-safe. Callers must synchronize externally (e.g. via ContextManager).
 class ContextWindow {
 public:
   explicit ContextWindow(TokenCount max_tokens = 8192)

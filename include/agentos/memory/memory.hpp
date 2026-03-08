@@ -3,6 +3,7 @@
 // AgentOS :: Module 4 — Memory System
 // 工作记忆 / 短期记忆 / 长期记忆，统一 IMemoryStore 接口
 // ============================================================
+#include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
 #include <algorithm>
 #include <cmath>
@@ -123,8 +124,8 @@ public:
       entry.id = "wm_" + std::to_string(id_counter_++);
     entry.created_at = entry.accessed_at = now();
 
-    // LRU 驱逐
-    if (store_.size() >= capacity_ && !store_.empty()) {
+    // LRU 驱逐：确保添加后不超过 capacity
+    while (store_.size() >= capacity_ && !store_.empty()) {
       auto oldest = std::min_element(
           store_.begin(), store_.end(), [](const auto &a, const auto &b) {
             return a.second.accessed_at < b.second.accessed_at;
@@ -469,6 +470,9 @@ public:
         ofs << c;
     }
     ofs << "\n";
+    ofs.flush();
+    if (!ofs.good())
+      return make_error(ErrorCode::MemoryWriteFailed, "LTM: disk write failed (disk full?)");
 
     hnswlib::labeltype node_label = hnswlib::labeltype(-1);
     bool has_embedding = !entry.embedding.empty();
@@ -485,13 +489,18 @@ public:
     }
 
     if (has_embedding) {
-      // 容量不足时动态扩容
-      if (hnsw_index_->cur_element_count >= hnsw_index_->max_elements_) {
-        hnsw_index_->resizeIndex(hnsw_index_->max_elements_ * 2);
+      try {
+        // 容量不足时动态扩容
+        if (hnsw_index_->cur_element_count >= hnsw_index_->max_elements_) {
+          hnsw_index_->resizeIndex(hnsw_index_->max_elements_ * 2);
+        }
+        node_label = label_counter_++;
+        hnsw_index_->addPoint(entry.embedding.data(), node_label);
+        label_to_id_[node_label] = entry.id;
+      } catch (const std::exception &e) {
+        LOG_WARN(std::string("LTM: HNSW indexing failed: ") + e.what());
+        has_embedding = false; // 降级：存储条目但不索引向量
       }
-      node_label = label_counter_++;
-      hnsw_index_->addPoint(entry.embedding.data(), node_label);
-      label_to_id_[node_label] = entry.id;
     }
 
     index_[entry.id] = {entry.id,      node_label,     entry.importance,

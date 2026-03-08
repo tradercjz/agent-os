@@ -152,7 +152,7 @@ ToolResult HttpFetchTool::execute(const ParsedArgs &args) {
   auto url = args.get("url");
   if (url.empty())
     return ToolResult::fail("URL is required");
-  if (url.substr(0, 4) != "http")
+  if (!url.starts_with("http"))
     return ToolResult::fail("Only http/https URLs are allowed");
 
   // SSRF protection: block private/internal network access
