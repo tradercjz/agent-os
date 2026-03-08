@@ -337,7 +337,7 @@ inline Result<std::string> ReActAgent::run(std::string user_input) {
     // ── 完成（无工具调用）──
     if (!resp->wants_tool_call()) {
       // 将最终结果存入记忆
-      remember(fmt::format("Q: {} → A: {}", user_input, resp->content), 0.6f);
+      (void)remember(fmt::format("Q: {} → A: {}", user_input, resp->content), 0.6f);
       return resp->content;
     }
 

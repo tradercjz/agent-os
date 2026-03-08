@@ -884,11 +884,11 @@ public:
     auto wm_id = working_->write(entry);
 
     // L1 短期记忆（总写）
-    short_term_->write(entry);
+    (void)short_term_->write(entry);
 
     // L2 长期记忆（重要性 > 0.7 时持久化）
     if (importance > 0.7f) {
-      long_term_->write(entry);
+      (void)long_term_->write(entry);
     }
 
     return wm_id;
@@ -933,9 +933,9 @@ public:
 
   // 遗忘：从所有层删除
   void forget(const std::string &id) {
-    working_->forget(id);
-    short_term_->forget(id);
-    long_term_->forget(id);
+    (void)working_->forget(id);
+    (void)short_term_->forget(id);
+    (void)long_term_->forget(id);
   }
 
   // 将工作记忆中的重要内容晋升到长期记忆，返回晋升数量
@@ -944,7 +944,7 @@ public:
     size_t promoted = 0;
     for (auto &entry : r) {
       if (entry.importance >= importance_threshold) {
-        long_term_->write(entry);
+        (void)long_term_->write(entry);
         ++promoted;
       }
     }

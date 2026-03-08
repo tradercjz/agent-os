@@ -33,7 +33,7 @@ Unexpected<std::decay_t<E>> make_unexpected(E&& e) {
 }
 
 template<typename T, typename E>
-class Expected {
+class [[nodiscard]] Expected {
 public:
     using value_type = T;
     using error_type = E;
@@ -80,7 +80,7 @@ private:
 
 // void 特化
 template<typename E>
-class Expected<void, E> {
+class [[nodiscard]] Expected<void, E> {
 public:
     Expected() noexcept : has_value_(true) {}
     Expected(Unexpected<E> u) : has_value_(false), err_(std::move(u.err)) {}

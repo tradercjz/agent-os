@@ -70,7 +70,7 @@ TEST_F(SQLiteStoreTest, SizeReflectsEntries) {
   for (int i = 0; i < 5; ++i) {
     MemoryEntry e;
     e.content = "Memory #" + std::to_string(i);
-    store_->write(e);
+    (void)store_->write(e);
   }
 
   EXPECT_EQ(store_->size(), 5);
@@ -81,7 +81,7 @@ TEST_F(SQLiteStoreTest, GetAllReturnsAllEntries) {
     MemoryEntry e;
     e.content = "Item " + std::to_string(i);
     e.user_id = "user_x";
-    store_->write(e);
+    (void)store_->write(e);
   }
 
   auto all = store_->get_all();
@@ -148,8 +148,8 @@ TEST_F(SQLiteStoreTest, HNSWSemanticSearch) {
   e2.user_id = "user_1";
   e2.importance = 0.9f;
 
-  store_->write(e1);
-  store_->write(e2);
+  (void)store_->write(e1);
+  (void)store_->write(e2);
 
   // Query close to emb1
   Embedding query(128, 0.1f);
@@ -185,8 +185,8 @@ TEST_F(SQLiteStoreTest, ScopeFilterInSearch) {
   e2.embedding = emb;
   e2.user_id = "user_b";
 
-  store_->write(e1);
-  store_->write(e2);
+  (void)store_->write(e1);
+  (void)store_->write(e2);
 
   // Filter for user_a only
   MemoryFilter filter;
@@ -215,13 +215,13 @@ TEST_F(SQLiteStoreTest, PersistenceAcrossRestarts) {
     e1.embedding = emb;
     e1.user_id = "user_1";
     e1.importance = 0.8f;
-    store_->write(e1);
+    (void)store_->write(e1);
 
     MemoryEntry e2;
     e2.content = "Persistent memory 2";
     e2.user_id = "user_1";
     e2.importance = 0.6f;
-    store_->write(e2);
+    (void)store_->write(e2);
   }
 
   EXPECT_EQ(store_->size(), 2);
@@ -317,7 +317,7 @@ TEST_F(SQLiteStoreTest, MemorySystemSQLiteEnumCreatesCorrectBackend) {
     for (float &v : emb)
       v /= norm;
 
-    mem.remember("SQLite enum test data", emb, "agent", 0.9f);
+    (void)mem.remember("SQLite enum test data", emb, "agent", 0.9f);
     EXPECT_GE(mem.long_term().size(), 1);
   }
 

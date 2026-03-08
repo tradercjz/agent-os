@@ -301,7 +301,7 @@ public:
         std::ifstream ifs(entry.path());
         std::string content((std::istreambuf_iterator<char>(ifs)),
                             std::istreambuf_iterator<char>());
-        ingest_text(entry.path().filename().string(), content);
+        (void)ingest_text(entry.path().filename().string(), content);
       }
     }
   }

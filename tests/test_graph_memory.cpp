@@ -51,13 +51,13 @@ TEST(GraphMemoryTest, KHopSearch) {
 
   memory::LocalGraphMemory graph(test_dir);
 
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "Alice", .target_id = "Bob", .relation = "knows"});
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "Bob", .target_id = "Charlie", .relation = "knows"});
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "Charlie", .target_id = "NewYork", .relation = "lives_in"});
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "Alice", .target_id = "IceCream", .relation = "likes"});
 
   // 1-hop search
@@ -86,10 +86,10 @@ TEST(GraphMemoryTest, WALPersistence) {
   {
     // Write to graph
     memory::LocalGraphMemory graph(test_dir);
-    graph.add_node(memory::GraphNode{.id = "Dog", .type = "Animal"});
-    graph.add_edge(memory::GraphEdge{
+    (void)graph.add_node(memory::GraphNode{.id = "Dog", .type = "Animal"});
+    (void)graph.add_edge(memory::GraphEdge{
         .source_id = "Dog", .target_id = "Cat", .relation = "chases"});
-    graph.add_edge(memory::GraphEdge{
+    (void)graph.add_edge(memory::GraphEdge{
         .source_id = "Cat", .target_id = "Mouse", .relation = "eats"});
   } // Graph goes out of scope, WAL flushed
 
@@ -123,12 +123,12 @@ TEST(GraphMemoryTest, WALReplayDeduplicatesEdges) {
   {
     memory::LocalGraphMemory graph(test_dir);
     // 添加同一条边两次（不同 weight）
-    graph.add_edge(memory::GraphEdge{
+    (void)graph.add_edge(memory::GraphEdge{
         .source_id = "A", .target_id = "B", .relation = "r1", .weight = 1.0f});
-    graph.add_edge(memory::GraphEdge{
+    (void)graph.add_edge(memory::GraphEdge{
         .source_id = "A", .target_id = "B", .relation = "r1", .weight = 2.0f});
     // 不同 relation 的边应保留
-    graph.add_edge(memory::GraphEdge{
+    (void)graph.add_edge(memory::GraphEdge{
         .source_id = "A", .target_id = "B", .relation = "r2", .weight = 3.0f});
 
     auto edges = graph.get_edges("A");
@@ -157,7 +157,7 @@ TEST(GraphMemoryTest, UpdateNode) {
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
-  graph.add_node(memory::GraphNode{.id = "X", .type = "Person", .content = "old"});
+  (void)graph.add_node(memory::GraphNode{.id = "X", .type = "Person", .content = "old"});
 
   // Update content only
   auto r1 = graph.update_node("X", "new content");
@@ -191,11 +191,11 @@ TEST(GraphMemoryTest, DeleteNode) {
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "A", .target_id = "B", .relation = "r1"});
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "B", .target_id = "C", .relation = "r2"});
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "C", .target_id = "B", .relation = "r3"});
 
   // Delete B — should remove outgoing edges from B and incoming edges to B
@@ -238,9 +238,9 @@ TEST(GraphMemoryTest, DeleteEdge) {
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "A", .target_id = "B", .relation = "r1"});
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "A", .target_id = "B", .relation = "r2"});
 
   // Delete one edge
@@ -275,11 +275,11 @@ TEST(GraphMemoryTest, CleanupBefore) {
 
   memory::LocalGraphMemory graph(test_dir);
   // Edge with end_ts=100 (expired)
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "A", .target_id = "B", .relation = "old",
       .weight = 1.0f, .start_ts = 10, .end_ts = 100});
   // Edge with end_ts=UINT64_MAX (indefinite)
-  graph.add_edge(memory::GraphEdge{
+  (void)graph.add_edge(memory::GraphEdge{
       .source_id = "A", .target_id = "C", .relation = "current"});
 
   auto removed = graph.cleanup_before(200);

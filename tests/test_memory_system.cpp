@@ -59,9 +59,9 @@ TEST_F(MemorySystemTest, BasicHNSWInsertionAndSearch) {
 TEST_F(MemorySystemTest, ConsolidatePromotesImportantMemories) {
   Embedding emb(128, 0.5f);
   // Add a high-importance memory
-  mem_sys_->add_episodic("Important fact", emb, "user_1", "s1", 0.9f);
+  (void)mem_sys_->add_episodic("Important fact", emb, "user_1", "s1", 0.9f);
   // Add a low-importance memory
-  mem_sys_->add_episodic("Trivial fact", emb, "user_1", "s1", 0.3f);
+  (void)mem_sys_->add_episodic("Trivial fact", emb, "user_1", "s1", 0.3f);
 
   // Consolidate with threshold 0.6 — should promote 1
   size_t promoted = mem_sys_->consolidate(0.6f);

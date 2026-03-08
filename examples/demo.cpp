@@ -126,7 +126,7 @@ void demo_scheduler() {
     exec_order.push_back("C");
     counter++;
   };
-  sched.submit(task_c);
+  (void)sched.submit(task_c);
 
   // 等待所有任务完成
   sched.wait_for(id_b, Duration{5000});

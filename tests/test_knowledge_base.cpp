@@ -56,8 +56,8 @@ TEST(KnowledgeBaseTest, BasicIngestionAndFusion) {
   auto mock_llm = std::make_shared<MockEmbeddingBackend>();
   KnowledgeBase kb(mock_llm, 1536);
 
-  kb.ingest_text("doc1", "The apple is red and delicious.");
-  kb.ingest_text("doc2", "The banana is yellow and sweet.");
+  (void)kb.ingest_text("doc1", "The apple is red and delicious.");
+  (void)kb.ingest_text("doc2", "The banana is yellow and sweet.");
 
   auto results = kb.search("delicious apple", 2);
 
@@ -75,7 +75,7 @@ TEST(KnowledgeBaseTest, OverlappingChunks) {
       "We need to ensure it splits correctly. "
       "It continues with more information about apples and bananas. ";
 
-  kb.ingest_text("long_doc", long_text);
+  (void)kb.ingest_text("long_doc", long_text);
 
   auto results = kb.search("overlap logic", 1);
   ASSERT_FALSE(results.empty());
@@ -105,7 +105,7 @@ TEST(KnowledgeBaseTest, GraphRAGIntegration) {
   KnowledgeBase kb(mock_llm, 1536);
   kb.attach_graph(graph);
 
-  kb.ingest_text("news1",
+  (void)kb.ingest_text("news1",
                  "Apple announced a new product today. Tim Cook presented.");
 
   // 3. 搜索（带 GraphRAG 扩展）
@@ -127,7 +127,7 @@ TEST(KnowledgeBaseTest, SearchWithoutGraphReturnsEmptyContext) {
   auto mock_llm = std::make_shared<MockEmbeddingBackend>();
   KnowledgeBase kb(mock_llm, 1536);
 
-  kb.ingest_text("doc1", "Some text about Apple products.");
+  (void)kb.ingest_text("doc1", "Some text about Apple products.");
   auto results = kb.search("Apple", 1);
 
   ASSERT_FALSE(results.empty());
@@ -145,8 +145,8 @@ TEST(KnowledgeBaseTest, SaveAndLoad) {
   // 1. 创建 KB 并 ingest 文档
   {
     KnowledgeBase kb(mock_llm, 1536);
-    kb.ingest_text("doc1", "The apple is red and delicious.");
-    kb.ingest_text("doc2", "The banana is yellow and sweet.");
+    (void)kb.ingest_text("doc1", "The apple is red and delicious.");
+    (void)kb.ingest_text("doc2", "The banana is yellow and sweet.");
 
     // 验证搜索正常
     auto results = kb.search("delicious apple", 2);
@@ -188,8 +188,8 @@ TEST(KnowledgeBaseTest, BM25RemoveDocumentCleansIndex) {
   auto mock_llm = std::make_shared<MockEmbeddingBackend>();
   KnowledgeBase kb(mock_llm, 1536);
 
-  kb.ingest_text("doc_apple", "Apple is a delicious red fruit.");
-  kb.ingest_text("doc_banana", "Banana is a yellow tropical fruit.");
+  (void)kb.ingest_text("doc_apple", "Apple is a delicious red fruit.");
+  (void)kb.ingest_text("doc_banana", "Banana is a yellow tropical fruit.");
 
   // 删除前：搜索 "apple" 应返回 doc_apple
   auto before = kb.search("apple fruit", 5);
@@ -224,8 +224,8 @@ TEST(KnowledgeBaseTest, RemoveDocumentRemovesChunks) {
   auto mock_llm = std::make_shared<MockEmbeddingBackend>();
   KnowledgeBase kb(mock_llm, 1536);
 
-  kb.ingest_text("doc_to_remove", "Content about Apple products.");
-  kb.ingest_text("doc_keep", "Content about banana smoothies.");
+  (void)kb.ingest_text("doc_to_remove", "Content about Apple products.");
+  (void)kb.ingest_text("doc_keep", "Content about banana smoothies.");
 
   EXPECT_EQ(kb.document_count(), 2);
   EXPECT_GE(kb.chunk_count(), 2);
@@ -281,7 +281,7 @@ TEST(KnowledgeBaseTest, ChunkConfigurable) {
       "This is a sentence about apples. Another sentence about bananas. "
       "More text about oranges. Some content about grapes. Final words about "
       "pears and melons for testing the chunking mechanism.";
-  kb.ingest_text("chunked_doc", long_text);
+  (void)kb.ingest_text("chunked_doc", long_text);
   EXPECT_GE(kb.chunk_count(), 1u);
 }
 
@@ -293,8 +293,8 @@ TEST(KnowledgeBaseTest, DocumentAndChunkCounts) {
   EXPECT_EQ(kb.document_count(), 0u);
   EXPECT_EQ(kb.chunk_count(), 0u);
 
-  kb.ingest_text("d1", "First document.");
-  kb.ingest_text("d2", "Second document.");
+  (void)kb.ingest_text("d1", "First document.");
+  (void)kb.ingest_text("d2", "Second document.");
 
   EXPECT_EQ(kb.document_count(), 2u);
   EXPECT_GE(kb.chunk_count(), 2u);

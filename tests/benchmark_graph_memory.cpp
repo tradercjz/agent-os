@@ -53,7 +53,7 @@ int main() {
 
   // Benchmark Node Insertion
   for (int i = 0; i < NUM_NODES; ++i) {
-    graph.add_node(
+    (void)graph.add_node(
         memory::GraphNode{.id = node_ids[i], .type = "Entity", .content = ""});
   }
   double insert_nodes_time = sw.elapsed_ms();
@@ -76,7 +76,7 @@ int main() {
     if (src == dst)
       continue; // Skip self loops for simplicity
 
-    graph.add_edge(memory::GraphEdge{.source_id = node_ids[src],
+    (void)graph.add_edge(memory::GraphEdge{.source_id = node_ids[src],
                                      .target_id = node_ids[dst],
                                      .relation = relations[rel_dist(rng)],
                                      .weight = 1.0f,

@@ -80,7 +80,7 @@ public:
 
       // ── 无工具调用：直接返回 ───────────────────────────
       if (!resp->wants_tool_call()) {
-        remember(fmt::format("Q: {} → A: {}", user_input, resp->content), 0.6f);
+        (void)remember(fmt::format("Q: {} → A: {}", user_input, resp->content), 0.6f);
         return resp->content;
       }
 
@@ -240,7 +240,7 @@ int main() {
   }
 
   // ── 6. 退出前快照上下文 ──────────────────────────────────
-  os.ctx().snapshot(agent->id(), R"({"session":"openai_demo"})");
+  (void)os.ctx().snapshot(agent->id(), R"({"session":"openai_demo"})");
   print_info("上下文已保存。");
 
   return 0;

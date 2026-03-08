@@ -32,8 +32,8 @@ TEST_F(DependencyGraphTest, CompleteTaskUnblocksDependents) {
   graph.add_task(1, Priority::Normal);
   graph.add_task(2, Priority::Normal);
   graph.add_task(3, Priority::Normal);
-  graph.add_dependency(2, 1); // 2 depends on 1
-  graph.add_dependency(3, 1); // 3 depends on 1
+  (void)graph.add_dependency(2, 1); // 2 depends on 1
+  (void)graph.add_dependency(3, 1); // 3 depends on 1
 
   auto ready = graph.complete_task(1);
   EXPECT_GE(ready.size(), 2); // both 2 and 3 should be ready
@@ -42,7 +42,7 @@ TEST_F(DependencyGraphTest, CompleteTaskUnblocksDependents) {
 TEST_F(DependencyGraphTest, CircularDependencyRejected) {
   graph.add_task(1, Priority::Normal);
   graph.add_task(2, Priority::Normal);
-  graph.add_dependency(2, 1); // 2 → 1
+  (void)graph.add_dependency(2, 1); // 2 → 1
   auto r = graph.add_dependency(1, 2);  // 1 → 2 would create cycle
   EXPECT_FALSE(r);
   EXPECT_EQ(r.error().code, ErrorCode::CircularDependency);
@@ -53,8 +53,8 @@ TEST_F(DependencyGraphTest, CriticalPathBoosting) {
   graph.add_task(1, Priority::Normal);
   graph.add_task(2, Priority::Normal);
   graph.add_task(3, Priority::Normal);
-  graph.add_dependency(2, 1);
-  graph.add_dependency(3, 2);
+  (void)graph.add_dependency(2, 1);
+  (void)graph.add_dependency(3, 2);
 
   std::unordered_map<TaskId, int> boosts;
   graph.boost_critical_path(boosts);
@@ -68,7 +68,7 @@ TEST_F(DependencyGraphTest, NoCycleNonDeadlock) {
   // 简单依赖链（20 依赖 10）不构成死锁
   graph.add_task(10, Priority::Normal);
   graph.add_task(20, Priority::Normal);
-  graph.add_dependency(20, 10);
+  (void)graph.add_dependency(20, 10);
 
   std::vector<TaskId> waiting = {10, 20};
   bool deadlock = graph.detect_deadlock(waiting);
@@ -127,8 +127,8 @@ TEST_F(SchedulerTest, DependencyOrderingRespected) {
     order.push_back(2);
   };
 
-  sched->submit(t1);
-  sched->submit(t2);
+  (void)sched->submit(t1);
+  (void)sched->submit(t2);
 
   sched->wait_for(t2->id, Duration{5000});
 
@@ -143,15 +143,15 @@ TEST_F(DependencyGraphTest, CompleteTaskNoDuplicateReady) {
   graph.add_task(1, Priority::Normal);
   graph.add_task(2, Priority::Normal);
   graph.add_task(3, Priority::Normal);
-  graph.add_dependency(2, 1); // 2 depends on 1
-  graph.add_dependency(3, 1); // 3 depends on 1
+  (void)graph.add_dependency(2, 1); // 2 depends on 1
+  (void)graph.add_dependency(3, 1); // 3 depends on 1
 
   auto ready1 = graph.complete_task(1);
   EXPECT_EQ(ready1.size(), 2u); // 2 和 3 都就绪
 
   // 再完成一个任务后，之前已返回的 3 不应再出现
   graph.add_task(4, Priority::Normal);
-  graph.add_dependency(4, 2);
+  (void)graph.add_dependency(4, 2);
   auto ready2 = graph.complete_task(2);
   // 只应返回 4（新就绪），不应包含 3（上次已返回）
   for (auto id : ready2) {
@@ -167,7 +167,7 @@ TEST_F(SchedulerTest, WaitForUsesConditionVariable) {
   task->priority = Priority::Normal;
   task->work = [] {}; // 瞬间完成
 
-  sched->submit(task);
+  (void)sched->submit(task);
 
   auto start = now();
   bool done = sched->wait_for(task->id, Duration{5000});
@@ -202,8 +202,8 @@ TEST_F(SchedulerTest, TaskCancellation) {
   task->depends_on = {blocker->id};
   task->work = [&] { ran = true; };
 
-  sched->submit(blocker);
-  sched->submit(task);
+  (void)sched->submit(blocker);
+  (void)sched->submit(task);
 
   bool cancelled = sched->cancel(task->id);
   EXPECT_TRUE(cancelled);
@@ -226,8 +226,8 @@ TEST_F(SchedulerTest, CancelWakesWaitFor) {
   task->depends_on = {blocker->id};
   task->work = [] {};
 
-  sched->submit(blocker);
-  sched->submit(task);
+  (void)sched->submit(blocker);
+  (void)sched->submit(task);
 
   // Cancel in a separate thread after 50ms
   std::thread canceller([&] {

@@ -191,7 +191,7 @@ TEST_F(ECLTest, InjectionInArgsBlocked) {
 }
 
 TEST_F(ECLTest, AuditLogRecorded) {
-  ecl.before_tool_call(1, "http_fetch", "{}");
+  (void)ecl.before_tool_call(1, "http_fetch", "{}");
   EXPECT_FALSE(ecl.audit_log().empty());
 }
 
