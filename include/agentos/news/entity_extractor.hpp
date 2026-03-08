@@ -85,18 +85,18 @@ struct EntityPattern {
 class IEntityExtractor {
 public:
     virtual ~IEntityExtractor() = default;
-    
+
     // 从文本中提取实体
-    virtual Result<std::vector<Entity>> extract(const std::string& text) = 0;
-    
+    [[nodiscard]] virtual Result<std::vector<Entity>> extract(const std::string& text) = 0;
+
     // 批量提取
-    virtual Result<std::vector<Entity>> extract_batch(const std::vector<std::string>& texts) = 0;
-    
+    [[nodiscard]] virtual Result<std::vector<Entity>> extract_batch(const std::vector<std::string>& texts) = 0;
+
     // 获取支持的实体类型
-    virtual std::vector<EntityType> get_supported_types() const = 0;
-    
+    virtual std::vector<EntityType> get_supported_types() const noexcept = 0;
+
     // 更新实体库
-    virtual void update_entity_library(const std::vector<Entity>& entities) = 0;
+    virtual void update_entity_library(const std::vector<Entity>& entities) noexcept = 0;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -106,11 +106,11 @@ public:
 class RuleBasedEntityExtractor : public IEntityExtractor {
 public:
     RuleBasedEntityExtractor();
-    
-    Result<std::vector<Entity>> extract(const std::string& text) override;
-    Result<std::vector<Entity>> extract_batch(const std::vector<std::string>& texts) override;
-    std::vector<EntityType> get_supported_types() const override;
-    void update_entity_library(const std::vector<Entity>& entities) override;
+
+    [[nodiscard]] Result<std::vector<Entity>> extract(const std::string& text) override;
+    [[nodiscard]] Result<std::vector<Entity>> extract_batch(const std::vector<std::string>& texts) override;
+    std::vector<EntityType> get_supported_types() const noexcept override;
+    void update_entity_library(const std::vector<Entity>& entities) noexcept override;
     
     // 添加自定义模式
     void add_pattern(EntityType type, const std::string& pattern, 
@@ -140,14 +140,14 @@ private:
 class MLBasedEntityExtractor : public IEntityExtractor {
 public:
     explicit MLBasedEntityExtractor(const std::string& model_path = "");
-    
-    Result<std::vector<Entity>> extract(const std::string& text) override;
-    Result<std::vector<Entity>> extract_batch(const std::vector<std::string>& texts) override;
-    std::vector<EntityType> get_supported_types() const override;
-    void update_entity_library(const std::vector<Entity>& entities) override;
-    
+
+    [[nodiscard]] Result<std::vector<Entity>> extract(const std::string& text) override;
+    [[nodiscard]] Result<std::vector<Entity>> extract_batch(const std::vector<std::string>& texts) override;
+    std::vector<EntityType> get_supported_types() const noexcept override;
+    void update_entity_library(const std::vector<Entity>& entities) noexcept override;
+
     // 加载预训练模型
-    Result<bool> load_model(const std::string& model_path);
+    [[nodiscard]] Result<bool> load_model(const std::string& model_path);
     
     // 在线学习
     void train_online(const std::string& text, const std::vector<Entity>& gold_entities);
@@ -187,11 +187,11 @@ public:
 class HybridEntityExtractor : public IEntityExtractor {
 public:
     explicit HybridEntityExtractor(const std::string& model_path = "");
-    
-    Result<std::vector<Entity>> extract(const std::string& text) override;
-    Result<std::vector<Entity>> extract_batch(const std::vector<std::string>& texts) override;
-    std::vector<EntityType> get_supported_types() const override;
-    void update_entity_library(const std::vector<Entity>& entities) override;
+
+    [[nodiscard]] Result<std::vector<Entity>> extract(const std::string& text) override;
+    [[nodiscard]] Result<std::vector<Entity>> extract_batch(const std::vector<std::string>& texts) override;
+    std::vector<EntityType> get_supported_types() const noexcept override;
+    void update_entity_library(const std::vector<Entity>& entities) noexcept override;
     
 private:
     std::unique_ptr<RuleBasedEntityExtractor> rule_extractor_;

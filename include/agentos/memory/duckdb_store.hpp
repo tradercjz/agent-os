@@ -54,9 +54,9 @@ public:
   DuckDBConn(const DuckDBConn &) = delete;
   DuckDBConn &operator=(const DuckDBConn &) = delete;
 
-  bool is_open() const { return opened_; }
+  bool is_open() const noexcept { return opened_; }
 
-  bool exec(const std::string &sql) {
+  [[nodiscard]] bool exec(const std::string &sql) {
     if (!con_)
       return false;
     try {
@@ -98,7 +98,7 @@ public:
 
   ~DuckDBLongTermMemory() override { save_hnsw_index(); }
 
-  Result<std::string> write(MemoryEntry entry) override {
+  [[nodiscard]] Result<std::string> write(MemoryEntry entry) override {
     std::lock_guard lk(mu_);
 
     if (!db_.is_open())
@@ -165,12 +165,12 @@ public:
     return entry.id;
   }
 
-  Result<MemoryEntry> read(const std::string &id) override {
+  [[nodiscard]] Result<MemoryEntry> read(const std::string &id) override {
     std::lock_guard lk(mu_);
     return read_locked(id);
   }
 
-  Result<bool> forget(const std::string &id) override {
+  [[nodiscard]] Result<bool> forget(const std::string &id) override {
     std::lock_guard lk(mu_);
 
     // Remove from HNSW
@@ -198,9 +198,9 @@ public:
     }
   }
 
-  Result<std::vector<SearchResult>> search(const Embedding &q_emb,
-                                           const MemoryFilter &filter,
-                                           size_t top_k = 5) override {
+  [[nodiscard]] Result<std::vector<SearchResult>> search(const Embedding &q_emb,
+                                                        const MemoryFilter &filter,
+                                                        size_t top_k = 5) override {
     std::lock_guard lk(mu_);
     std::vector<SearchResult> results;
 
@@ -278,7 +278,7 @@ public:
     return results;
   }
 
-  size_t size() const override {
+  size_t size() const noexcept override {
     std::lock_guard lk(mu_);
     if (!db_.is_open())
       return 0;
@@ -298,7 +298,7 @@ public:
     }
   }
 
-  std::string name() const override { return "DuckDBLongTermMemory"; }
+  std::string name() const noexcept override { return "DuckDBLongTermMemory"; }
 
   // ── 结构化 SQL 查询接口（DuckDB 特有）──────────────────
 
@@ -524,8 +524,10 @@ private:
       if (blob.size() % sizeof(float) == 0) {
         size_t num_floats = blob.size() / sizeof(float);
         if (num_floats > 0 && num_floats <= 10000) {
-          const float *data = reinterpret_cast<const float *>(blob.data());
-          entry.embedding.assign(data, data + num_floats);
+          // Safe: use memcpy to handle potentially unaligned BLOB data
+          std::vector<float> embedding(num_floats);
+          std::memcpy(embedding.data(), blob.data(), num_floats * sizeof(float));
+          entry.embedding = std::move(embedding);
         }
       }
     }
@@ -623,6 +625,9 @@ private:
         hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
             space_.get(), max_elements_, 16, 200);
       } else if (entry.embedding.size() != dim_) {
+        LOG_WARN(fmt::format("DuckDB store: embedding dimension mismatch for entry '{}': "
+                             "expected {}, got {}. Storing without vector index.",
+                             entry.id, dim_, entry.embedding.size()));
         has_embedding = false;
       }
     }
@@ -648,7 +653,7 @@ private:
       label_to_id_[label] = entry.id;
     }
 
-    // 更新元数据缓存
+    // 更新元数据缓存（在事务提交前更新，保证一致性）
     id_meta_[entry.id] = {entry.user_id, entry.agent_id, entry.session_id,
                           entry.type, entry.importance};
   }
@@ -709,8 +714,9 @@ private:
             continue;
           size_t num_floats = blob.size() / sizeof(float);
 
-          const float *data = reinterpret_cast<const float *>(blob.data());
-          Embedding emb(data, data + num_floats);
+          // Safe: use memcpy to handle potentially unaligned BLOB data
+          Embedding emb(num_floats);
+          std::memcpy(emb.data(), blob.data(), num_floats * sizeof(float));
 
           entries_with_emb.push_back({id, std::move(emb)});
           metas.push_back(meta);

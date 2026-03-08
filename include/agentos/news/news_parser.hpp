@@ -55,15 +55,15 @@ struct NewsSourceConfig {
 class INewsParser {
 public:
     virtual ~INewsParser() = default;
-    
+
     // 解析原始数据为标准化资讯条目
-    virtual Result<std::vector<NewsArticle>> parse(const std::string& raw_data) = 0;
-    
+    [[nodiscard]] virtual Result<std::vector<NewsArticle>> parse(const std::string& raw_data) = 0;
+
     // 获取解析器类型
-    virtual std::string get_type() const = 0;
-    
+    virtual std::string get_type() const noexcept = 0;
+
     // 验证数据格式
-    virtual bool validate_format(const std::string& raw_data) = 0;
+    virtual bool validate_format(const std::string& raw_data) const noexcept = 0;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -72,9 +72,9 @@ public:
 
 class RSSParser : public INewsParser {
 public:
-    Result<std::vector<NewsArticle>> parse(const std::string& raw_data) override;
-    std::string get_type() const override { return "rss"; }
-    bool validate_format(const std::string& raw_data) override;
+    [[nodiscard]] Result<std::vector<NewsArticle>> parse(const std::string& raw_data) override;
+    std::string get_type() const noexcept override { return "rss"; }
+    bool validate_format(const std::string& raw_data) const noexcept override;
     
 private:
     std::string extract_xml_content(const std::string& xml, const std::string& tag);
@@ -88,10 +88,10 @@ private:
 class JSONAPIParser : public INewsParser {
 public:
     explicit JSONAPIParser(const std::string& field_mapping = "");
-    
-    Result<std::vector<NewsArticle>> parse(const std::string& raw_data) override;
-    std::string get_type() const override { return "json_api"; }
-    bool validate_format(const std::string& raw_data) override;
+
+    [[nodiscard]] Result<std::vector<NewsArticle>> parse(const std::string& raw_data) override;
+    std::string get_type() const noexcept override { return "json_api"; }
+    bool validate_format(const std::string& raw_data) const noexcept override;
     
 private:
     std::string field_mapping_; // JSON字段映射配置
@@ -124,18 +124,18 @@ private:
 class NewsFetcher {
 public:
     explicit NewsFetcher(const NewsSourceConfig& config);
-    
+
     // 获取资讯数据
-    Result<std::string> fetch();
-    
+    [[nodiscard]] Result<std::string> fetch();
+
     // 获取配置
-    const NewsSourceConfig& get_config() const { return config_; }
-    
+    const NewsSourceConfig& get_config() const noexcept { return config_; }
+
     // 检查是否需要更新
-    bool should_update() const;
-    
+    bool should_update() const noexcept;
+
     // 更新最后获取时间
-    void mark_fetched();
+    void mark_fetched() noexcept;
     
 private:
     NewsSourceConfig config_;
@@ -153,29 +153,33 @@ private:
 class NewsParserManager {
 public:
     explicit NewsParserManager() = default;
-    
+
     // 添加资讯源
-    Result<bool> add_source(const NewsSourceConfig& config);
-    
+    [[nodiscard]] Result<bool> add_source(const NewsSourceConfig& config);
+
     // 移除资讯源
-    Result<bool> remove_source(const std::string& source_name);
-    
+    [[nodiscard]] Result<bool> remove_source(const std::string& source_name);
+
     // 获取所有资讯源
-    std::vector<NewsSourceConfig> get_sources() const;
-    
+    std::vector<NewsSourceConfig> get_sources() const noexcept;
+
     // 获取指定源的资讯
-    Result<std::vector<NewsArticle>> fetch_news(const std::string& source_name);
-    
+    [[nodiscard]] Result<std::vector<NewsArticle>> fetch_news(const std::string& source_name);
+
     // 获取所有源的资讯
-    Result<std::vector<NewsArticle>> fetch_all_news();
-    
+    [[nodiscard]] Result<std::vector<NewsArticle>> fetch_all_news();
+
     // 获取需要更新的源
-    std::vector<std::string> get_sources_to_update();
+    std::vector<std::string> get_sources_to_update() const noexcept;
     
 private:
-    std::unordered_map<std::string, NewsFetcher> fetchers_;
+    // THREAD-SAFETY: Use shared_ptr to prevent use-after-move if remove_source() is called
+    // while async operations hold references to the fetcher.
+    std::unordered_map<std::string, std::shared_ptr<NewsFetcher>> fetchers_;
     std::unordered_map<std::string, std::unique_ptr<INewsParser>> parsers_;
-    
+
+    // IMPORTANT: Any code that starts async operations on a fetcher MUST capture the
+    // shared_ptr by value, not by reference, to extend the fetcher's lifetime.
     Result<std::vector<NewsArticle>> process_source(const std::string& source_name);
 };
 

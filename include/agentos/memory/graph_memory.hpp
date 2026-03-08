@@ -233,6 +233,10 @@ public:
   }
 
   Result<size_t> cleanup_before(uint64_t cutoff_ts) override {
+    // THREAD-SAFETY: Holds mu_ for the duration of cleanup, blocking all concurrent writes.
+    // Do NOT call from within a graph callback or from code already holding mu_, as this
+    // can cause deadlock if a write callback attempts to re-enter the graph.
+    // For best practices, call during low-traffic periods or schedule via a maintenance thread.
     std::lock_guard lk(mu_);
     size_t removed = 0;
     for (auto &[src, edge_list] : edges_) {
@@ -291,6 +295,9 @@ public:
     q.push({start_node_id, 0});
     visited.insert(start_node_id);
 
+    // THREAD-SAFETY: BFS traversal takes a snapshot of edges to prevent iterator
+    // invalidation from concurrent modifications. For each node, we copy its
+    // adjacency list before iterating to ensure safe access under the lock.
     while (!q.empty()) {
       auto [curr_id, depth] = q.front();
       q.pop();
@@ -300,15 +307,20 @@ public:
       if (depth >= k)
         continue;
 
-      if (edges_.find(curr_id) != edges_.end()) {
-        for (const auto &edge : edges_[curr_id]) {
-          // Temporal filter
-          if (edge.start_ts <= current_ts && edge.end_ts >= current_ts) {
-            result.edges.push_back(edge);
-            if (visited.find(edge.target_id) == visited.end()) {
-              visited.insert(edge.target_id);
-              q.push({edge.target_id, depth + 1});
-            }
+      // Snapshot the neighbor list for this node to prevent iterator invalidation
+      std::vector<GraphEdge> neighbors;
+      if (auto it = edges_.find(curr_id); it != edges_.end()) {
+        neighbors = it->second; // Copy under lock
+      }
+
+      // Iterate over the snapshot safely
+      for (const auto &edge : neighbors) {
+        // Temporal filter
+        if (edge.start_ts <= current_ts && edge.end_ts >= current_ts) {
+          result.edges.push_back(edge);
+          if (visited.find(edge.target_id) == visited.end()) {
+            visited.insert(edge.target_id);
+            q.push({edge.target_id, depth + 1});
           }
         }
       }

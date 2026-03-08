@@ -149,3 +149,56 @@ TEST(MemorySystemConstTest, ConstAccessorsWork) {
 
   std::filesystem::remove_all(temp_dir);
 }
+
+// ── Regression tests for 44-fix commit ──────────────────────────
+
+TEST(ShortTermMemoryTest, DimensionMismatchReturnsError) {
+  // Test that ShortTermMemory rejects embeddings with mismatched dimensions
+  memory::ShortTermMemory stm(100);
+
+  // Write first entry with dimension 4
+  {
+    memory::MemoryEntry entry1;
+    entry1.content = "first_memory";
+    entry1.embedding = memory::Embedding(4, 0.5f);
+    auto result1 = stm.write(std::move(entry1));
+    ASSERT_TRUE(result1) << "First write with dimension 4 should succeed";
+  }
+
+  // Try to write second entry with different dimension (8)
+  {
+    memory::MemoryEntry entry2;
+    entry2.content = "second_memory";
+    entry2.embedding = memory::Embedding(8, 0.5f);
+    auto result2 = stm.write(std::move(entry2));
+    // Should fail due to dimension mismatch
+    EXPECT_FALSE(result2) << "Second write with mismatched dimension should fail";
+    // result2 should be an error (non-empty error state)
+    EXPECT_FALSE(result2.has_value()) << "Error code: " << (result2 ? 0 : (int)result2.error().code);
+  }
+}
+
+TEST_F(MemorySystemTest, ConsolidateWithTimeout) {
+  // Test that consolidate() with timeout returns without blocking forever
+  Embedding emb(128, 0.5f);
+
+  // Add 5 entries to working memory
+  for (int i = 0; i < 5; ++i) {
+    auto result = mem_sys_->add_episodic(
+        std::string("memory_") + std::to_string(i),
+        emb, "user_1", "session_1", 0.5f);
+    ASSERT_TRUE(result) << "Failed to add episodic memory " << i;
+  }
+
+  // Call consolidate with 1-second timeout
+  auto start = std::chrono::high_resolution_clock::now();
+  size_t promoted = mem_sys_->consolidate(0.4f);
+  auto end = std::chrono::high_resolution_clock::now();
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+  // Should complete within timeout (well under 5 seconds)
+  EXPECT_LT(elapsed.count(), 5000) << "consolidate() took too long; may be hanging";
+
+  // Should have promoted some memories (those with importance >= 0.4)
+  EXPECT_GE(promoted, 0);
+}

@@ -43,6 +43,7 @@ public:
     }
   }
 
+  [[nodiscard]]
   std::vector<Match> search(const std::string &query,
                              size_t top_k = 10) const {
     auto query_tokens = Tokenizer::instance().cut(query);
@@ -119,7 +120,8 @@ public:
     return true;
   }
 
-  size_t size() const {
+  [[nodiscard]]
+  size_t size() const noexcept {
     std::lock_guard lk(mu_);
     return doc_lengths_.size();
   }
@@ -185,14 +187,17 @@ public:
     ifs.read(reinterpret_cast<char *>(&b_), sizeof(b_));
     ifs.read(reinterpret_cast<char *>(&total_length_), sizeof(total_length_));
 
-    // Sanity limit for string lengths (100MB) and counts (10M)
+    // Sanity limit for string lengths (64KB per entry) and counts (10M)
+    constexpr uint32_t kMaxStringLen = 64 * 1024;
     constexpr uint32_t max_str_len = 100 * 1024 * 1024;
     constexpr uint32_t max_count = 10'000'000;
 
     auto read_checked_str = [&]() -> std::string {
       uint32_t slen;
       ifs.read(reinterpret_cast<char *>(&slen), 4);
-      if (!ifs.good() || slen > max_str_len) return {};
+      if (!ifs.good()) return {};
+      // Strict sanity check: reject zero-length and excessively long strings
+      if (slen == 0 || slen > kMaxStringLen) return {};
       std::string s(slen, '\0');
       ifs.read(s.data(), slen);
       return s;

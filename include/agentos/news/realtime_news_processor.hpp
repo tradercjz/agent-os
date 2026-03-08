@@ -138,29 +138,29 @@ struct NewsEvent {
 class IRealtimeProcessor {
 public:
     virtual ~IRealtimeProcessor() = default;
-    
+
     // 启动/停止处理器
-    virtual Result<bool> start() = 0;
-    virtual Result<bool> stop() = 0;
-    virtual bool is_running() const = 0;
-    
+    [[nodiscard]] virtual Result<bool> start() = 0;
+    [[nodiscard]] virtual Result<bool> stop() = 0;
+    virtual bool is_running() const noexcept = 0;
+
     // 添加资讯源
-    virtual Result<bool> add_news_source(const NewsSourceConfig& config) = 0;
-    virtual Result<bool> remove_news_source(const std::string& source_name) = 0;
-    
+    [[nodiscard]] virtual Result<bool> add_news_source(const NewsSourceConfig& config) = 0;
+    [[nodiscard]] virtual Result<bool> remove_news_source(const std::string& source_name) = 0;
+
     // 手动添加资讯
-    virtual Result<bool> add_article(const NewsArticle& article) = 0;
-    virtual Result<bool> add_articles(const std::vector<NewsArticle>& articles) = 0;
-    
+    [[nodiscard]] virtual Result<bool> add_article(const NewsArticle& article) = 0;
+    [[nodiscard]] virtual Result<bool> add_articles(const std::vector<NewsArticle>& articles) = 0;
+
     // 获取统计信息
-    virtual ProcessingStats get_stats() const = 0;
-    
+    virtual ProcessingStats get_stats() const noexcept = 0;
+
     // 事件回调
-    virtual void set_event_callback(std::function<void(const NewsEvent&)> callback) = 0;
-    
+    virtual void set_event_callback(std::function<void(const NewsEvent&)> callback) noexcept = 0;
+
     // 配置管理
-    virtual void update_config(const RealtimeConfig& config) = 0;
-    virtual const RealtimeConfig& get_config() const = 0;
+    virtual void update_config(const RealtimeConfig& config) noexcept = 0;
+    virtual const RealtimeConfig& get_config() const noexcept = 0;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -172,31 +172,31 @@ public:
     explicit RealtimeNewsProcessor(
         std::shared_ptr<agentos::memory::MemorySystem> memory_system,
         const RealtimeConfig& config = RealtimeConfig{});
-    
+
     ~RealtimeNewsProcessor() override;
-    
+
     // IRealtimeProcessor 接口实现
-    Result<bool> start() override;
-    Result<bool> stop() override;
-    bool is_running() const override { return running_; }
-    
-    Result<bool> add_news_source(const NewsSourceConfig& config) override;
-    Result<bool> remove_news_source(const std::string& source_name) override;
-    
-    Result<bool> add_article(const NewsArticle& article) override;
-    Result<bool> add_articles(const std::vector<NewsArticle>& articles) override;
-    
-    ProcessingStats get_stats() const override;
-    
-    void set_event_callback(std::function<void(const NewsEvent&)> callback) override;
-    
-    void update_config(const RealtimeConfig& config) override;
-    const RealtimeConfig& get_config() const override { return config_; }
+    [[nodiscard]] Result<bool> start() override;
+    [[nodiscard]] Result<bool> stop() override;
+    bool is_running() const noexcept override { return running_; }
+
+    [[nodiscard]] Result<bool> add_news_source(const NewsSourceConfig& config) override;
+    [[nodiscard]] Result<bool> remove_news_source(const std::string& source_name) override;
+
+    [[nodiscard]] Result<bool> add_article(const NewsArticle& article) override;
+    [[nodiscard]] Result<bool> add_articles(const std::vector<NewsArticle>& articles) override;
+
+    ProcessingStats get_stats() const noexcept override;
+
+    void set_event_callback(std::function<void(const NewsEvent&)> callback) noexcept override;
+
+    void update_config(const RealtimeConfig& config) noexcept override;
+    const RealtimeConfig& get_config() const noexcept override { return config_; }
     
     // 额外方法
-    void force_cleanup();                    // 强制清理
-    void rebuild_graph();                   // 重建图
-    std::vector<std::string> get_active_sources() const;
+    void force_cleanup() noexcept;                    // 强制清理
+    void rebuild_graph() noexcept;                   // 重建图
+    std::vector<std::string> get_active_sources() const noexcept;
     
 private:
     // 核心组件
@@ -236,8 +236,8 @@ private:
     void stats_loop();                      // 统计更新循环
     
     // 资讯处理
-    Result<bool> process_article(const NewsArticle& article);
-    Result<bool> process_article_batch(const std::vector<NewsArticle>& articles);
+    [[nodiscard]] Result<bool> process_article(const NewsArticle& article);
+    [[nodiscard]] Result<bool> process_article_batch(const std::vector<NewsArticle>& articles);
     
     // 队列操作
     bool enqueue_article(const NewsArticle& article);
@@ -269,18 +269,20 @@ private:
 class NewsEventBus {
 public:
     static NewsEventBus& instance();
-    
+
     // 订阅事件（返回订阅 ID，用于取消订阅）
     size_t subscribe(NewsEventType type, std::function<void(const NewsEvent&)> callback);
     void unsubscribe(NewsEventType type, size_t subscription_id);
-    
+
     // 发布事件
+    // THREAD-SAFETY: Dispatches to subscribers under subscribers_mutex_, then updates
+    // event_history_ under history_mutex_ (separate lock scope to avoid ordering races).
     void publish(const NewsEvent& event);
-    
+
     // 获取事件历史
-    std::vector<NewsEvent> get_event_history(NewsEventType type, 
+    std::vector<NewsEvent> get_event_history(NewsEventType type,
                                             std::chrono::seconds duration = std::chrono::seconds{300}) const;
-    
+
 private:
     NewsEventBus() = default;
 
@@ -292,8 +294,10 @@ private:
     std::unordered_map<NewsEventType, std::vector<Subscription>> subscribers_;
     std::mutex subscribers_mutex_;
     std::atomic<size_t> next_subscription_id_{1};
-    
+
     // 事件历史（可选）
+    // NOTE: Must be protected separately from subscribers_ to avoid deadlock and ordering races.
+    // publish() releases subscribers_mutex_ before acquiring history_mutex_.
     std::vector<NewsEvent> event_history_;
     std::mutex history_mutex_;
     static constexpr size_t max_history_size = 10000;

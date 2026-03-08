@@ -39,9 +39,14 @@ public:
     return instance_;
   }
 
-  std::vector<std::string> cut(const std::string &text) {
+  [[nodiscard]]
+  std::vector<std::string> cut(const std::string &text) noexcept {
     std::vector<std::string> words;
 #ifdef AGENTOS_ENABLE_JIEBA
+    if (!is_ready()) {
+      // Return empty result if jieba initialization failed
+      return words;
+    }
     jieba_->CutForSearch(text, words, true);
 #else
     // Fallback: split on whitespace and common punctuation
@@ -63,21 +68,35 @@ public:
     return words;
   }
 
-private:
-  Tokenizer() {
+  [[nodiscard]]
+  bool is_ready() const noexcept {
 #ifdef AGENTOS_ENABLE_JIEBA
-    const std::string dict_path =
-        std::string(CPPJIEBA_DICT_DIR) + "/jieba.dict.utf8";
-    const std::string hmm_path =
-        std::string(CPPJIEBA_DICT_DIR) + "/hmm_model.utf8";
-    const std::string user_dict =
-        std::string(CPPJIEBA_DICT_DIR) + "/user.dict.utf8";
-    const std::string idf_path = std::string(CPPJIEBA_DICT_DIR) + "/idf.utf8";
-    const std::string stop_word =
-        std::string(CPPJIEBA_DICT_DIR) + "/stop_words.utf8";
+    return !init_failed_;
+#else
+    return true;
+#endif
+  }
 
-    jieba_ = std::make_unique<cppjieba::Jieba>(dict_path, hmm_path, user_dict,
-                                               idf_path, stop_word);
+private:
+  Tokenizer() noexcept {
+#ifdef AGENTOS_ENABLE_JIEBA
+    try {
+      const std::string dict_path =
+          std::string(CPPJIEBA_DICT_DIR) + "/jieba.dict.utf8";
+      const std::string hmm_path =
+          std::string(CPPJIEBA_DICT_DIR) + "/hmm_model.utf8";
+      const std::string user_dict =
+          std::string(CPPJIEBA_DICT_DIR) + "/user.dict.utf8";
+      const std::string idf_path = std::string(CPPJIEBA_DICT_DIR) + "/idf.utf8";
+      const std::string stop_word =
+          std::string(CPPJIEBA_DICT_DIR) + "/stop_words.utf8";
+
+      jieba_ = std::make_unique<cppjieba::Jieba>(dict_path, hmm_path, user_dict,
+                                                 idf_path, stop_word);
+      init_failed_ = false;
+    } catch (const std::exception &e) {
+      init_failed_ = true;
+    }
 #endif
   }
 
@@ -86,6 +105,7 @@ private:
 
 #ifdef AGENTOS_ENABLE_JIEBA
   std::unique_ptr<cppjieba::Jieba> jieba_;
+  bool init_failed_{false};
 #endif
 };
 

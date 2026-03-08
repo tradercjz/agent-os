@@ -116,21 +116,21 @@ struct RelationPattern {
 class IRelationExtractor {
 public:
     virtual ~IRelationExtractor() = default;
-    
+
     // 从文本和实体中提取关系
-    virtual Result<std::vector<Relation>> extract_relations(
-        const std::string& text, 
+    [[nodiscard]] virtual Result<std::vector<Relation>> extract_relations(
+        const std::string& text,
         const std::vector<Entity>& entities) = 0;
-    
+
     // 批量提取
-    virtual Result<std::vector<Relation>> extract_relations_batch(
+    [[nodiscard]] virtual Result<std::vector<Relation>> extract_relations_batch(
         const std::vector<std::pair<std::string, std::vector<Entity>>>& text_entity_pairs) = 0;
-    
+
     // 获取支持的关系类型
-    virtual std::vector<RelationType> get_supported_types() const = 0;
-    
+    virtual std::vector<RelationType> get_supported_types() const noexcept = 0;
+
     // 更新关系模式库
-    virtual void update_relation_patterns(const std::vector<RelationPattern>& patterns) = 0;
+    virtual void update_relation_patterns(const std::vector<RelationPattern>& patterns) noexcept = 0;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -140,16 +140,16 @@ public:
 class RuleBasedRelationExtractor : public IRelationExtractor {
 public:
     RuleBasedRelationExtractor();
-    
-    Result<std::vector<Relation>> extract_relations(
-        const std::string& text, 
+
+    [[nodiscard]] Result<std::vector<Relation>> extract_relations(
+        const std::string& text,
         const std::vector<Entity>& entities) override;
-        
-    Result<std::vector<Relation>> extract_relations_batch(
+
+    [[nodiscard]] Result<std::vector<Relation>> extract_relations_batch(
         const std::vector<std::pair<std::string, std::vector<Entity>>>& text_entity_pairs) override;
-        
-    std::vector<RelationType> get_supported_types() const override;
-    void update_relation_patterns(const std::vector<RelationPattern>& patterns) override;
+
+    std::vector<RelationType> get_supported_types() const noexcept override;
+    void update_relation_patterns(const std::vector<RelationPattern>& patterns) noexcept override;
     
     // 添加自定义关系模式
     void add_pattern(RelationType type, const std::string& pattern, 
@@ -180,19 +180,19 @@ private:
 class MLBasedRelationExtractor : public IRelationExtractor {
 public:
     explicit MLBasedRelationExtractor(const std::string& model_path = "");
-    
-    Result<std::vector<Relation>> extract_relations(
-        const std::string& text, 
+
+    [[nodiscard]] Result<std::vector<Relation>> extract_relations(
+        const std::string& text,
         const std::vector<Entity>& entities) override;
-        
-    Result<std::vector<Relation>> extract_relations_batch(
+
+    [[nodiscard]] Result<std::vector<Relation>> extract_relations_batch(
         const std::vector<std::pair<std::string, std::vector<Entity>>>& text_entity_pairs) override;
-        
-    std::vector<RelationType> get_supported_types() const override;
-    void update_relation_patterns(const std::vector<RelationPattern>& patterns) override;
-    
+
+    std::vector<RelationType> get_supported_types() const noexcept override;
+    void update_relation_patterns(const std::vector<RelationPattern>& patterns) noexcept override;
+
     // 加载预训练模型
-    Result<bool> load_model(const std::string& model_path);
+    [[nodiscard]] Result<bool> load_model(const std::string& model_path);
     
     // 在线学习
     void train_online(const std::string& text, const std::vector<Entity>& entities,
@@ -236,16 +236,16 @@ public:
 class HybridRelationExtractor : public IRelationExtractor {
 public:
     explicit HybridRelationExtractor(const std::string& model_path = "");
-    
-    Result<std::vector<Relation>> extract_relations(
-        const std::string& text, 
+
+    [[nodiscard]] Result<std::vector<Relation>> extract_relations(
+        const std::string& text,
         const std::vector<Entity>& entities) override;
-        
-    Result<std::vector<Relation>> extract_relations_batch(
+
+    [[nodiscard]] Result<std::vector<Relation>> extract_relations_batch(
         const std::vector<std::pair<std::string, std::vector<Entity>>>& text_entity_pairs) override;
-        
-    std::vector<RelationType> get_supported_types() const override;
-    void update_relation_patterns(const std::vector<RelationPattern>& patterns) override;
+
+    std::vector<RelationType> get_supported_types() const noexcept override;
+    void update_relation_patterns(const std::vector<RelationPattern>& patterns) noexcept override;
     
 private:
     std::unique_ptr<RuleBasedRelationExtractor> rule_extractor_;

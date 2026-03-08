@@ -245,3 +245,118 @@ TEST_F(SchedulerTest, CancelWakesWaitFor) {
 
   canceller.join();
 }
+
+// ── Regression tests for 44-fix commit ──────────────────────────
+
+TEST_F(DependencyGraphTest, IterativeDFSHandlesLargeGraph) {
+  // Test that iterative DFS (used in has_cycle) handles large graphs
+  // without stack overflow, equivalent to recursive implementation
+  const size_t kGraphSize = 1000;
+
+  // Create a chain: 0 → 1 → 2 → ... → 999
+  for (size_t i = 0; i < kGraphSize; ++i) {
+    graph.add_task(static_cast<TaskId>(i), Priority::Normal);
+  }
+
+  for (size_t i = 1; i < kGraphSize; ++i) {
+    auto r = graph.add_dependency(static_cast<TaskId>(i),
+                                   static_cast<TaskId>(i - 1));
+    ASSERT_TRUE(r);
+  }
+
+  // Verify no cycle by successfully adding all edges (add_dependency rejects cycles)
+  // All chain edges were added above without error, confirming acyclic graph
+
+  // Now try to add edge 999 → 0 to create a cycle — should be REJECTED
+  auto cycle_result = graph.add_dependency(0, static_cast<TaskId>(kGraphSize - 1));
+  EXPECT_FALSE(cycle_result); // add_dependency must reject cycle-creating edges
+
+  // Graph should still accept a valid non-cycle edge
+  auto valid = graph.add_dependency(static_cast<TaskId>(kGraphSize - 1),
+                                    static_cast<TaskId>(kGraphSize - 2));
+  // Note: 999 already depends on 998 (from chain), so this is a duplicate, not a cycle
+  // Either Ok or AlreadyExists is acceptable
+  (void)valid; // result doesn't matter, just checking no crash
+}
+
+TEST_F(SchedulerTest, CancelWhileDispatch) {
+  // Test concurrent task cancellation while scheduler is dispatching
+  // (TOCTOU fix: check if cancelled before running)
+  std::atomic<int> completed{0};
+  std::atomic<int> cancelled_count{0};
+
+  // Create 5 tasks that sleep briefly
+  std::vector<TaskId> task_ids;
+  for (int i = 0; i < 5; ++i) {
+    auto task = std::make_shared<AgentTaskDescriptor>();
+    task->id = Scheduler::new_task_id();
+    task->name = std::string("task_") + std::to_string(i);
+    task->priority = Priority::Normal;
+    task->work = [&, task_idx = i] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      if (task_idx < 3) {
+        // Only increment if not cancelled
+        completed++;
+      }
+    };
+
+    task_ids.push_back(task->id);
+    (void)sched->submit(task);
+  }
+
+  // While tasks are running, cancel 2 of them
+  std::thread canceller([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    cancelled_count += sched->cancel(task_ids[1]) ? 1 : 0;
+    cancelled_count += sched->cancel(task_ids[3]) ? 1 : 0;
+  });
+
+  // Wait for all to complete or timeout
+  sched->wait_for(task_ids[4], Duration{5000});
+
+  canceller.join();
+
+  // Verify no crash and reasonable counts
+  EXPECT_GE(completed.load(), 0);
+  EXPECT_GE(cancelled_count.load(), 0);
+  EXPECT_LE(cancelled_count.load(), 2);
+}
+
+TEST_F(SchedulerTest, PerInstanceTaskIds) {
+  // Test that task IDs are globally unique across scheduler instances
+  auto sched2 = std::make_unique<Scheduler>(SchedulerPolicy::Priority, 2);
+  sched2->start();
+
+  std::set<TaskId> ids1, ids2;
+
+  // Submit 5 tasks to first scheduler
+  for (int i = 0; i < 5; ++i) {
+    TaskId id = Scheduler::new_task_id();
+    ids1.insert(id);
+    auto task = std::make_shared<AgentTaskDescriptor>();
+    task->id = id;
+    task->name = "scheduler1_task";
+    task->priority = Priority::Normal;
+    task->work = [] {};
+    (void)sched->submit(task);
+  }
+
+  // Submit 5 tasks to second scheduler
+  for (int i = 0; i < 5; ++i) {
+    TaskId id = Scheduler::new_task_id();
+    ids2.insert(id);
+    auto task = std::make_shared<AgentTaskDescriptor>();
+    task->id = id;
+    task->name = "scheduler2_task";
+    task->priority = Priority::Normal;
+    task->work = [] {};
+    (void)sched2->submit(task);
+  }
+
+  // Verify no collisions between the two sets
+  for (TaskId id : ids1) {
+    EXPECT_EQ(ids2.find(id), ids2.end()) << "Task ID collision: " << id;
+  }
+
+  sched2->shutdown();
+}

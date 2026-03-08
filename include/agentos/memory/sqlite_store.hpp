@@ -63,10 +63,10 @@ public:
   SQLiteDB(const SQLiteDB &) = delete;
   SQLiteDB &operator=(const SQLiteDB &) = delete;
 
-  bool is_open() const { return opened_; }
-  sqlite3 *raw() const { return db_; }
+  bool is_open() const noexcept { return opened_; }
+  sqlite3 *raw() const noexcept { return db_; }
 
-  bool exec(const std::string &sql) {
+  [[nodiscard]] bool exec(const std::string &sql) {
     char *err = nullptr;
     int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err);
     if (err) {
@@ -76,7 +76,8 @@ public:
   }
 
   // 带语句缓存的 prepare（mutable: 语句缓存是逻辑 const 的优化）
-  sqlite3_stmt *prepare(const std::string &sql) const {
+  // Statement cache is keyed by full SQL text; invalidate with clear_stmt_cache() if schema changes.
+  [[nodiscard]] sqlite3_stmt *prepare(const std::string &sql) const {
     auto it = stmt_cache_.find(sql);
     if (it != stmt_cache_.end()) {
       sqlite3_reset(it->second);
@@ -91,6 +92,15 @@ public:
 
     stmt_cache_[sql] = stmt;
     return stmt;
+  }
+
+  /// Clear all cached prepared statements. Call this if schema changes or validation logic changes.
+  void clear_stmt_cache() {
+    for (auto &[sql, stmt] : stmt_cache_) {
+      if (stmt)
+        sqlite3_finalize(stmt);
+    }
+    stmt_cache_.clear();
   }
 
 private:
@@ -123,7 +133,7 @@ public:
 
   ~SQLiteLongTermMemory() { save_hnsw_index(); }
 
-  Result<std::string> write(MemoryEntry entry) override {
+  [[nodiscard]] Result<std::string> write(MemoryEntry entry) override {
     std::lock_guard lk(mu_);
 
     if (!db_.is_open())
@@ -181,12 +191,12 @@ public:
     return entry.id;
   }
 
-  Result<MemoryEntry> read(const std::string &id) override {
+  [[nodiscard]] Result<MemoryEntry> read(const std::string &id) override {
     std::lock_guard lk(mu_);
     return read_locked(id);
   }
 
-  Result<bool> forget(const std::string &id) override {
+  [[nodiscard]] Result<bool> forget(const std::string &id) override {
     std::lock_guard lk(mu_);
 
     // Remove from HNSW
@@ -206,9 +216,9 @@ public:
     return rc == SQLITE_DONE && sqlite3_changes(db_.raw()) > 0;
   }
 
-  Result<std::vector<SearchResult>> search(const Embedding &q_emb,
-                                           const MemoryFilter &filter,
-                                           size_t top_k = 5) override {
+  [[nodiscard]] Result<std::vector<SearchResult>> search(const Embedding &q_emb,
+                                                        const MemoryFilter &filter,
+                                                        size_t top_k = 5) override {
     std::lock_guard lk(mu_);
     std::vector<SearchResult> results;
 
@@ -279,7 +289,7 @@ public:
     return results;
   }
 
-  size_t size() const override {
+  size_t size() const noexcept override {
     std::lock_guard lk(mu_);
     if (!db_.is_open())
       return 0;
@@ -292,7 +302,7 @@ public:
     return 0;
   }
 
-  std::string name() const override { return "SQLiteLongTermMemory"; }
+  std::string name() const noexcept override { return "SQLiteLongTermMemory"; }
 
 private:
   // ── 元数据缓存（用于 HNSW filter，避免每次 filter 都读 SQLite）──
@@ -382,13 +392,15 @@ private:
 
     // Embedding from BLOB
     if (sqlite3_column_type(stmt, 11) != SQLITE_NULL) {
-      const float *blob_data =
-          static_cast<const float *>(sqlite3_column_blob(stmt, 11));
+      const void *blob_data = sqlite3_column_blob(stmt, 11);
       int blob_bytes = sqlite3_column_bytes(stmt, 11);
       if (blob_data && blob_bytes > 0 && blob_bytes % sizeof(float) == 0) {
         size_t num_floats = static_cast<size_t>(blob_bytes) / sizeof(float);
-        if (num_floats <= 10000) // cap to prevent OOM from malformed data
-          entry.embedding.assign(blob_data, blob_data + num_floats);
+        if (num_floats <= 10000) { // cap to prevent OOM from malformed data
+          // Safe: use memcpy to handle potentially unaligned BLOB data
+          entry.embedding.resize(num_floats);
+          std::memcpy(entry.embedding.data(), blob_data, num_floats * sizeof(float));
+        }
       }
     }
 
@@ -463,6 +475,9 @@ private:
         hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
             space_.get(), max_elements_, 16, 200);
       } else if (entry.embedding.size() != dim_) {
+        LOG_WARN(fmt::format("SQLite store: embedding dimension mismatch for entry '{}': "
+                             "expected {}, got {}. Storing without vector index.",
+                             entry.id, dim_, entry.embedding.size()));
         has_embedding = false;
       }
     }
@@ -488,7 +503,7 @@ private:
       label_to_id_[label] = entry.id;
     }
 
-    // 更新元数据缓存
+    // 更新元数据缓存（在事务提交前更新，保证一致性）
     id_meta_[entry.id] = {entry.user_id, entry.agent_id, entry.session_id,
                           entry.type, entry.importance};
   }
@@ -530,12 +545,15 @@ private:
       meta.type = col4 ? std::string(reinterpret_cast<const char *>(col4)) : "";
       meta.importance = static_cast<float>(sqlite3_column_double(stmt, 5));
 
-      const float *blob =
-          static_cast<const float *>(sqlite3_column_blob(stmt, 6));
+      const void *blob = sqlite3_column_blob(stmt, 6);
       int blob_bytes = sqlite3_column_bytes(stmt, 6);
       size_t num_floats = blob_bytes / sizeof(float);
 
-      Embedding emb(blob, blob + num_floats);
+      // Safe: use memcpy to handle potentially unaligned BLOB data
+      Embedding emb(num_floats);
+      if (blob && num_floats > 0) {
+        std::memcpy(emb.data(), blob, num_floats * sizeof(float));
+      }
       entries_with_emb.push_back({id, std::move(emb)});
       metas.push_back(meta);
       id_meta_[id] = metas.back();

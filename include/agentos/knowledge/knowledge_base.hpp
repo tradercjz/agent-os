@@ -59,7 +59,8 @@ public:
   }
 
   // ── 配置访问 ─────────────────────────────────────
-  const std::string &embedding_model() const {
+  [[nodiscard]]
+  const std::string &embedding_model() const noexcept {
     std::lock_guard lk(mu_);
     return embedding_model_;
   }
@@ -68,11 +69,13 @@ public:
     embedding_model_ = model;
   }
 
-  size_t chunk_size() const {
+  [[nodiscard]]
+  size_t chunk_size() const noexcept {
     std::lock_guard lk(mu_);
     return chunk_size_;
   }
-  size_t chunk_overlap() const {
+  [[nodiscard]]
+  size_t chunk_overlap() const noexcept {
     std::lock_guard lk(mu_);
     return chunk_overlap_;
   }
@@ -90,6 +93,7 @@ public:
   }
 
   // ── 文本摄入（返回成功摄入的 chunk 数量）─────────────
+  [[nodiscard]]
   Result<size_t> ingest_text(const std::string &doc_id, const std::string &text) {
     std::lock_guard lk(mu_);
     auto chunks = chunk_text(text, chunk_size_, chunk_overlap_);
@@ -117,13 +121,31 @@ public:
           resp->embeddings[0].size() == dim_) {
         // 动态扩容（saturated doubling）
         if (next_hnsw_id_ >= max_chunks_) {
-          if (max_chunks_ > SIZE_MAX / 2) continue; // overflow guard
+          if (max_chunks_ > SIZE_MAX / 2) {
+            LOG_ERROR(fmt::format("[KB] HNSW index capacity exceeded, cannot add chunk {}", chunk_id));
+            continue; // Skip chunk, log error instead of silent loss
+          }
           max_chunks_ *= 2;
-          hnsw_->resizeIndex(max_chunks_);
+          try {
+            hnsw_->resizeIndex(max_chunks_);
+          } catch (const std::exception &e) {
+            LOG_ERROR(fmt::format("[KB] Failed to resize HNSW index: {}", e.what()));
+            continue;
+          }
+          // Verify new capacity before adding point
+          if (next_hnsw_id_ >= max_chunks_) {
+            LOG_ERROR(fmt::format("[KB] HNSW resize failed to create capacity for chunk {}", chunk_id));
+            continue;
+          }
         }
-        hnsw_->addPoint(resp->embeddings[0].data(), next_hnsw_id_);
-        hnsw_id_to_chunk_[next_hnsw_id_] = chunk_id;
-        next_hnsw_id_++;
+        try {
+          hnsw_->addPoint(resp->embeddings[0].data(), next_hnsw_id_);
+          hnsw_id_to_chunk_[next_hnsw_id_] = chunk_id;
+          next_hnsw_id_++;
+        } catch (const std::exception &e) {
+          LOG_ERROR(fmt::format("[KB] Failed to add point to HNSW: {}", e.what()));
+          continue;
+        }
       }
       ++ingested;
     }
@@ -302,11 +324,13 @@ public:
   }
 
   // ── 统计 ─────────────────────────────────────────
-  size_t chunk_count() const {
+  [[nodiscard]]
+  size_t chunk_count() const noexcept {
     std::lock_guard lk(mu_);
     return chunk_content_.size();
   }
-  size_t document_count() const {
+  [[nodiscard]]
+  size_t document_count() const noexcept {
     std::lock_guard lk(mu_);
     std::unordered_set<std::string> docs;
     for (const auto &[_, doc_id] : chunk_docs_)
@@ -315,6 +339,7 @@ public:
   }
 
   // ── Hybrid 检索 + 可选 GraphRAG 扩展 ───────────────
+  [[nodiscard]]
   std::vector<SearchResult> search(const std::string &query,
                                     size_t top_k = 5,
                                     int graph_hops = 0) {
@@ -631,6 +656,7 @@ private:
   }
 
   // ── GraphRAG：实体匹配 + K-hop 子图 → 文本上下文 ──
+  [[nodiscard]]
   std::string build_graph_context(
       const std::string &query,
       const std::vector<SearchResult> &results,
@@ -666,6 +692,11 @@ private:
 
     for (const auto &entity : matched_entities) {
       auto sub = graph_->k_hop(entity, hops);
+      if (sub.triples.empty()) {
+        // Log warning when entity not found in graph
+        LOG_WARN(fmt::format("GraphRAG: entity '{}' not found in graph, skipping expansion", entity));
+        continue;
+      }
       for (const auto &t : sub.triples) {
         std::string key = t.src + "|" + t.relation + "|" + t.dst;
         if (seen_triples.insert(key).second) {

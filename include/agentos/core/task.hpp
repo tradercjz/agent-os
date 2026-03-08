@@ -116,10 +116,20 @@ public:
     }
 
     // ── 同步运行（在非协程环境中使用）────────────────────────
-    T run() {
-        // 使用简单的手动驱动
+    /// Synchronously drives this coroutine to completion.
+    /// PRECONDITION: This coroutine must NOT co_await any externally-completed
+    /// awaitables (e.g., network I/O, timers). Use only for pure-compute coroutines
+    /// that co_yield intermediate values or co_return final results immediately.
+    /// For async coroutines, integrate with an event loop instead.
+    [[nodiscard]] T run() {
+        static constexpr size_t kMaxIterations = 1'000'000;
+        size_t iter = 0;
         handle_.resume();
         while (!handle_.done()) {
+            if (++iter > kMaxIterations) {
+                throw std::runtime_error("Task::run() exceeded max iterations - "
+                    "coroutine may be awaiting external event; use async runner instead");
+            }
             handle_.resume();
         }
         return handle_.promise().result();
