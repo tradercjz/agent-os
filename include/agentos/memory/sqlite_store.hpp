@@ -6,6 +6,7 @@
 // ============================================================
 
 #include "agentos/core/types.hpp"
+#include "agentos/core/logger.hpp"
 #include "agentos/memory/memory.hpp"
 #include <cstring>
 #include <sqlite3.h>
@@ -111,7 +112,7 @@ public:
 
     auto db_path = (dir_ / "memory.db").string();
     if (!db_.open(db_path)) {
-      std::cerr << "[SQLiteLTM] Failed to open database: " << db_path << "\n";
+      LOG_ERROR(fmt::format("[SQLiteLTM] Failed to open database: {}", db_path));
       return;
     }
 
@@ -573,7 +574,7 @@ private:
     if (!fs::exists(idx_path))
       return;
 
-    std::cout << "[SQLiteLTM] Migrating from file-based storage...\n";
+    LOG_INFO("[SQLiteLTM] Migrating from file-based storage...");
 
     std::ifstream ifs(idx_path);
     std::string line;
@@ -675,8 +676,7 @@ private:
     }
 
     if (migrated > 0) {
-      std::cout << "[SQLiteLTM] Migrated " << migrated
-                << " entries from file storage.\n";
+      LOG_INFO(fmt::format("[SQLiteLTM] Migrated {} entries from file storage", migrated));
       // 删除旧索引文件
       fs::remove(idx_path);
       auto old_hnsw = dir_ / "hnsw_index.bin";

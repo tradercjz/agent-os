@@ -10,7 +10,7 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <hnswlib/hnswlib.h>
 #pragma GCC diagnostic pop
-#include <iostream>
+#include <agentos/core/logger.hpp>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -89,8 +89,7 @@ public:
   Result<size_t> ingest_text(const std::string &doc_id, const std::string &text) {
     std::lock_guard lk(mu_);
     auto chunks = chunk_text(text, chunk_size_, chunk_overlap_);
-    std::cout << "[KB Ingestion] Document [" << doc_id << "] parsed into "
-              << chunks.size() << " chunks.\n";
+    LOG_DEBUG(fmt::format("[KB] Document [{}] parsed into {} chunks", doc_id, chunks.size()));
 
     size_t ingested = 0;
     for (size_t i = 0; i < chunks.size(); ++i) {
@@ -133,7 +132,7 @@ public:
 
     // 1. BM25 索引
     if (!bm25_.save(dir / "bm25_index.bin")) {
-      std::cerr << "[KB] Failed to save BM25 index\n";
+      LOG_ERROR("[KB] Failed to save BM25 index");
       return false;
     }
 
@@ -142,7 +141,7 @@ public:
       try {
         hnsw_->saveIndex((dir / "hnsw_index.bin").string());
       } catch (const std::exception &e) {
-        std::cerr << "[KB] Failed to save HNSW index: " << e.what() << "\n";
+        LOG_ERROR(fmt::format("[KB] Failed to save HNSW index: {}", e.what()));
         return false;
       }
     }
@@ -192,8 +191,7 @@ public:
       write_str(chunk_id);
     }
 
-    std::cout << "[KB] Saved: " << n_chunks << " chunks, " << n_hnsw
-              << " HNSW points → " << dir << "\n";
+    LOG_INFO(fmt::format("[KB] Saved: {} chunks, {} HNSW points -> {}", n_chunks, n_hnsw, dir.string()));
     return ofs.good();
   }
 
@@ -204,7 +202,7 @@ public:
 
     // 1. BM25 索引
     if (!bm25_.load(dir / "bm25_index.bin")) {
-      std::cerr << "[KB] Failed to load BM25 index\n";
+      LOG_ERROR("[KB] Failed to load BM25 index");
       return false;
     }
 
@@ -282,19 +280,19 @@ public:
         hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
             space_.get(), hnsw_path.string());
       } catch (const std::exception &e) {
-        std::cerr << "[KB] Failed to load HNSW: " << e.what() << "\n";
+        LOG_WARN(fmt::format("[KB] Failed to load HNSW: {}", e.what()));
         hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
             space_.get(), max_chunks_);
       }
     }
 
-    std::cout << "[KB] Loaded: " << n_chunks << " chunks from " << dir << "\n";
+    LOG_INFO(fmt::format("[KB] Loaded: {} chunks from {}", n_chunks, dir.string()));
     return ifs.good();
   }
 
   void ingest_directory(const fs::path &dir) {
     if (!fs::exists(dir) || !fs::is_directory(dir)) {
-      std::cerr << "[KB Error] Directory does not exist: " << dir << "\n";
+      LOG_ERROR(fmt::format("[KB] Directory does not exist: {}", dir.string()));
       return;
     }
     for (const auto &entry : fs::recursive_directory_iterator(dir)) {
