@@ -142,9 +142,9 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
   }
 
   if (exit_code != 0 && output.empty()) {
-    return ToolResult{false, fmt::format("Command failed with exit code {}", exit_code), {}};
+    return ToolResult{false, fmt::format("Command failed with exit code {}", exit_code), "", truncated};
   }
-  return ToolResult{true, output, {}};
+  return ToolResult{true, output, "", truncated};
 }
 
 // ---- HttpFetchTool Implementation ----

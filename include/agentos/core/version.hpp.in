@@ -1,0 +1,3 @@
+#pragma once
+#define AGENTOS_VERSION "@PROJECT_VERSION@"
+#define AGENTOS_GIT_VERSION "@GIT_VERSION@"

@@ -52,11 +52,32 @@ public:
   void add_evict_if_needed(const kernel::Message &msg) {
     TokenCount cost = kernel::ILLMBackend::estimate_tokens(msg.content) + 4;
     while (!messages_.empty() && used_tokens_ + cost > max_tokens_) {
-      // Determine first evictable index: preserve system message at position 0
-      size_t evict_idx = (messages_[0].role == kernel::Role::System) ? 1 : 0;
-      if (evict_idx >= messages_.size())
-        break; // Only system messages remain
-
+      // Find non-system message to evict.
+      // Strategy: skip system messages; among non-system, pick the one with
+      // lowest importance / (access + 1). On tie, pick the oldest (lowest index).
+      size_t evict_idx = messages_.size();  // sentinel: nothing to evict
+      float worst_score = std::numeric_limits<float>::max();
+      for (size_t i = 0; i < messages_.size(); ++i) {
+        if (messages_[i].role == kernel::Role::System) continue;
+        // Lower score = more likely to be evicted
+        float score = static_cast<float>(i);  // proxy for age (lower index = older)
+        // Boost by role importance: User(0.1) < Tool(0.3) < Assistant(0.5)
+        if (messages_[i].role == kernel::Role::User) score -= 1000.0f;
+        else if (messages_[i].role == kernel::Role::Tool) score -= 500.0f;
+        else if (messages_[i].role == kernel::Role::Assistant) score -= 100.0f;
+        if (score < worst_score) {
+          worst_score = score;
+          evict_idx = i;
+        }
+      }
+      if (evict_idx >= messages_.size()) {
+        // ALL messages are system messages — cannot evict further
+        // Log warning: new message will cause budget overrun
+        LOG_WARN(fmt::format("[Context] Cannot evict: only system messages remain. "
+                             "Token budget may be exceeded (used={}, cost={}, max={})",
+                             used_tokens_, cost, max_tokens_));
+        break;
+      }
       evicted_.push_back(messages_[evict_idx]);
       used_tokens_ -= kernel::ILLMBackend::estimate_tokens(messages_[evict_idx].content) + 4;
       messages_.erase(messages_.begin() + evict_idx);

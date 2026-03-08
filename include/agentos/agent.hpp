@@ -220,8 +220,14 @@ public:
             errors.push_back("snapshot_dir must not be empty");
         if (c.ltm_dir.empty())
             errors.push_back("ltm_dir must not be empty");
-        if (c.scheduler_threads > 64)
-            errors.push_back("scheduler_threads exceeds maximum (64)");
+
+        unsigned int hw_threads = std::thread::hardware_concurrency();
+        if (hw_threads == 0) hw_threads = 4;  // Fallback if detection fails
+        unsigned int max_allowed = std::max(4u, hw_threads * 4);  // Allow 4x oversubscription max
+        if (c.scheduler_threads > max_allowed)
+            errors.push_back(fmt::format("scheduler_threads ({}) exceeds 4x hardware concurrency ({}). "
+                                       "Max allowed: {}", c.scheduler_threads, hw_threads, max_allowed));
+
         if (!errors.empty()) {
             std::string error_msg = "AgentOS config validation failed:";
             for (const auto &err : errors) {
@@ -568,11 +574,21 @@ inline std::optional<bus::BusMessage> Agent::recv(Duration timeout) {
 
 inline Result<std::string> ReActAgent::run(std::string user_input) {
   // 先从记忆中检索相关上下文
+  // Recall with single retry on transient failure
   auto recall_result = recall(user_input, 3);
   if (!recall_result) {
-    LOG_WARN(fmt::format("[ReActAgent] recall failed: {}", recall_result.error().message));
-    // Continue without memory context (degraded mode)
-  } else if (!recall_result->empty()) {
+    LOG_WARN(fmt::format("[ReActAgent] recall failed (attempt 1): {}",
+                         recall_result.error().message));
+    // Single retry after brief backoff for transient errors
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    recall_result = recall(user_input, 3);
+    if (!recall_result) {
+      LOG_WARN(fmt::format("[ReActAgent] recall failed (attempt 2): {} — continuing without memory",
+                           recall_result.error().message));
+    }
+  }
+
+  if (recall_result && !recall_result->empty()) {
     std::string mem_ctx = "相关记忆：\n";
     for (auto &sr : *recall_result) {
       mem_ctx += "- " + sr.entry.content + "\n";

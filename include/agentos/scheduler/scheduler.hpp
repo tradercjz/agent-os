@@ -161,6 +161,30 @@ public:
         return false;
     }
 
+    /// Returns topological order of all tasks for debugging.
+    /// Requires the caller to hold the lock or use within a synchronized context.
+    std::vector<TaskId> topological_sort_locked() const {
+        std::unordered_map<TaskId, int> in_degree;
+        for (auto& [id, node] : nodes_) {
+            if (!in_degree.contains(id)) in_degree[id] = 0;
+            for (TaskId dep : node.deps) in_degree[dep]++;
+        }
+        std::queue<TaskId> q;
+        for (auto& [id, deg] : in_degree)
+            if (deg == 0) q.push(id);
+        std::vector<TaskId> result;
+        while (!q.empty()) {
+            TaskId cur = q.front(); q.pop();
+            result.push_back(cur);
+            auto it = nodes_.find(cur);
+            if (it == nodes_.end()) continue;
+            for (TaskId dep : it->second.deps) {
+                if (--in_degree[dep] == 0) q.push(dep);
+            }
+        }
+        return result;
+    }
+
 private:
     struct Node {
         Priority              priority;
@@ -235,28 +259,6 @@ private:
             return false;
         };
         return dfs(start);
-    }
-
-    std::vector<TaskId> topological_sort_locked() const {
-        std::unordered_map<TaskId, int> in_degree;
-        for (auto& [id, node] : nodes_) {
-            if (!in_degree.contains(id)) in_degree[id] = 0;
-            for (TaskId dep : node.deps) in_degree[dep]++;
-        }
-        std::queue<TaskId> q;
-        for (auto& [id, deg] : in_degree)
-            if (deg == 0) q.push(id);
-        std::vector<TaskId> result;
-        while (!q.empty()) {
-            TaskId cur = q.front(); q.pop();
-            result.push_back(cur);
-            auto it = nodes_.find(cur);
-            if (it == nodes_.end()) continue;
-            for (TaskId dep : it->second.deps) {
-                if (--in_degree[dep] == 0) q.push(dep);
-            }
-        }
-        return result;
     }
 
     mutable std::mutex                     mu_;
@@ -377,6 +379,13 @@ public:
     const SchedulerMetrics& metrics() const noexcept { return metrics_; }
 
     bool is_running() const noexcept { return running_.load(); }
+
+    /// Returns current task execution order for debugging/testing.
+    /// Thread-safe: acquires internal lock.
+    [[nodiscard]] std::vector<TaskId> debug_execution_order() const {
+        std::lock_guard lk(mu_);
+        return dep_graph_.topological_sort_locked();
+    }
 
     /// Drain: wait for all pending/running tasks to finish (up to timeout)
     bool drain(Duration timeout = Duration{kDefaultWaitTimeout}) {
@@ -549,7 +558,10 @@ private:
                                                     std::memory_order_acquire)) {
                 priority_queue_.pop();
             } else {
-                // Task state changed (cancelled/running), skip it
+                // Task state changed (e.g., cancelled) — remove from queue to prevent zombie
+                priority_queue_.pop();
+                LOG_WARN(fmt::format("[Scheduler] Task {} skipped in dequeue: state was {} (expected Pending)",
+                                     task->id, static_cast<int>(expected)));
                 task = nullptr;
             }
         } else if (!fifo_queue_.empty()) {
@@ -560,7 +572,10 @@ private:
                                                     std::memory_order_acquire)) {
                 fifo_queue_.pop();
             } else {
-                // Task state changed (cancelled/running), skip it
+                // Task state changed (e.g., cancelled) — remove from queue to prevent zombie
+                fifo_queue_.pop();
+                LOG_WARN(fmt::format("[Scheduler] Task {} skipped in dequeue: state was {} (expected Pending)",
+                                     task->id, static_cast<int>(expected)));
                 task = nullptr;
             }
         }

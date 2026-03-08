@@ -71,10 +71,21 @@ public:
                             filepath.data(), line,
                             static_cast<int>(msg.size()), msg.data());
 
-    std::lock_guard lk(mu_);
-    if (custom_sink_) {
-      custom_sink_(level, std::string_view(buf, len > 0 ? len : 0));
+    // Take snapshot of sink under lock
+    LogSink sink_copy;
+    {
+      std::lock_guard lk(mu_);
+      sink_copy = custom_sink_;
+    }
+
+    // Format and output WITHOUT holding lock (prevents re-entrant deadlock)
+    auto formatted = std::string_view(buf, len > 0 ? len : 0);
+
+    if (sink_copy) {
+      sink_copy(level, formatted);
     } else {
+      // Default: write to stderr (only lock for shared stderr access)
+      std::lock_guard lk(mu_);
       std::fputs(buf, stderr);
     }
   }

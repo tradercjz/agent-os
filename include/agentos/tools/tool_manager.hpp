@@ -107,6 +107,26 @@ struct ParsedArgs {
   }
 };
 
+// Helper: basic UTF-8 validation (rejects truncated/overlong sequences)
+static bool is_valid_utf8(const std::string &s) {
+    const auto *bytes = reinterpret_cast<const unsigned char *>(s.data());
+    size_t len = s.size();
+    for (size_t i = 0; i < len; ) {
+        if (bytes[i] <= 0x7F) { ++i; continue; }
+        size_t seq_len;
+        if      ((bytes[i] & 0xE0) == 0xC0) seq_len = 2;
+        else if ((bytes[i] & 0xF0) == 0xE0) seq_len = 3;
+        else if ((bytes[i] & 0xF8) == 0xF0) seq_len = 4;
+        else return false;  // Invalid leading byte
+        if (i + seq_len > len) return false;  // Truncated sequence
+        for (size_t j = 1; j < seq_len; ++j) {
+            if ((bytes[i + j] & 0xC0) != 0x80) return false;  // Invalid continuation
+        }
+        i += seq_len;
+    }
+    return true;
+}
+
 /// Validate parsed args against schema (required params)
 inline Result<void> validate_tool_args(const ToolSchema &schema,
                                         const ParsedArgs &args) {
@@ -118,6 +138,15 @@ inline Result<void> validate_tool_args(const ToolSchema &schema,
           fmt::format("Missing required parameter '{}'", p.name));
     }
   }
+
+  // Validate UTF-8 encoding of string arguments
+  for (const auto &[key, val] : args.values) {
+    if (!is_valid_utf8(val)) {
+      return make_error(ErrorCode::InvalidArgument,
+          fmt::format("Tool argument '{}' contains invalid UTF-8", key));
+    }
+  }
+
   return {};
 }
 
@@ -151,10 +180,11 @@ struct ToolResult {
   bool success;
   std::string output;
   std::string error;
+  bool truncated{false};  // NEW: true if output was cut short
 
-  static ToolResult ok(std::string out) { return {true, std::move(out), ""}; }
+  static ToolResult ok(std::string out) { return {true, std::move(out), "", false}; }
   static ToolResult fail(std::string err) {
-    return {false, "", std::move(err)};
+    return {false, "", std::move(err), false};
   }
 };
 
@@ -458,6 +488,13 @@ public:
         auto status = future.wait_for(
             std::chrono::milliseconds(schema.timeout_ms));
         if (status == std::future_status::timeout) {
+          // WARNING: std::async timeout does NOT cancel the tool execution.
+          // When timeout fires, the worker thread continues running in background.
+          // This means: (1) Resources (file handles, connections) stay open until
+          // tool completes naturally; (2) CPU continues to be consumed; (3) Multiple
+          // timed-out tools can accumulate background threads under load.
+          // TODO: Implement a bounded thread pool with cooperative cancellation
+          // using std::stop_token for production deployment.
           return ToolResult::fail(
               fmt::format("Tool '{}' timed out after {}ms",
                           call.name, schema.timeout_ms));
