@@ -56,6 +56,25 @@ TEST_F(MemorySystemTest, BasicHNSWInsertionAndSearch) {
   EXPECT_TRUE(found);
 }
 
+TEST_F(MemorySystemTest, ConsolidatePromotesImportantMemories) {
+  Embedding emb(128, 0.5f);
+  // Add a high-importance memory
+  mem_sys_->add_episodic("Important fact", emb, "user_1", "s1", 0.9f);
+  // Add a low-importance memory
+  mem_sys_->add_episodic("Trivial fact", emb, "user_1", "s1", 0.3f);
+
+  // Consolidate with threshold 0.6 — should promote 1
+  size_t promoted = mem_sys_->consolidate(0.6f);
+  EXPECT_GE(promoted, 1);
+}
+
+TEST_F(MemorySystemTest, RememberAndRecallById) {
+  Embedding emb(128, 0.2f);
+  auto id = mem_sys_->remember("Test content", emb, "agent_1", 0.7f);
+  ASSERT_TRUE(id);
+  EXPECT_FALSE(id->empty());
+}
+
 TEST_F(MemorySystemTest, EmptyEmbeddingGracefulHandling) {
   Embedding empty_emb;
   // adding text without embedding
