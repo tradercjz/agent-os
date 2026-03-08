@@ -36,7 +36,7 @@ TEST_F(DependencyGraphTest, CompleteTaskUnblocksDependents) {
   (void)graph.add_dependency(3, 1); // 3 depends on 1
 
   auto ready = graph.complete_task(1);
-  EXPECT_GE(ready.size(), 2); // both 2 and 3 should be ready
+  EXPECT_GE(ready.size(), 2u); // both 2 and 3 should be ready
 }
 
 TEST_F(DependencyGraphTest, CircularDependencyRejected) {
@@ -133,7 +133,7 @@ TEST_F(SchedulerTest, DependencyOrderingRespected) {
   sched->wait_for(t2->id, Duration{5000});
 
   std::lock_guard lk(order_mu);
-  ASSERT_EQ(order.size(), 2);
+  ASSERT_EQ(order.size(), 2u);
   EXPECT_EQ(order[0], 1); // t1 must run before t2
   EXPECT_EQ(order[1], 2);
 }

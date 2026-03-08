@@ -422,7 +422,9 @@ public:
   void graceful_shutdown(Duration timeout = Duration{10000}) {
     // 1. Stop accepting new agents
     // 2. Wait for pending tasks to complete
-    scheduler_->drain(timeout);
+    if (!scheduler_->drain(timeout)) {
+      LOG_WARN("AgentOS: graceful_shutdown drain timed out, forcing shutdown");
+    }
     // 3. Shutdown scheduler threads
     scheduler_->shutdown();
   }

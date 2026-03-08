@@ -54,7 +54,7 @@ public:
     if (doc_lengths_.empty())
       return {};
 
-    double avgdl = static_cast<double>(total_length_) / doc_lengths_.size();
+    double avgdl = static_cast<double>(total_length_) / static_cast<double>(doc_lengths_.size());
     double N = static_cast<double>(doc_lengths_.size());
 
     // Use a min-heap of size top_k to limit memory to O(top_k) not O(N)
@@ -68,11 +68,11 @@ public:
         continue;
 
       const auto &doc_tfs = it->second;
-      double df = doc_tfs.size();
+      double df = static_cast<double>(doc_tfs.size());
       double idf = std::log(1.0 + (N - df + 0.5) / (df + 0.5));
 
       for (const auto &[doc_id, tf] : doc_tfs) {
-        double doc_len = doc_lengths_.at(doc_id);
+        double doc_len = static_cast<double>(doc_lengths_.at(doc_id));
         double numerator = tf * (k1_ + 1.0);
         double denominator = tf + k1_ * (1.0 - b_ + b_ * (doc_len / avgdl));
         double score = idf * (numerator / denominator);
@@ -200,7 +200,6 @@ public:
 
     // Sanity limit for string lengths (64KB per entry) and counts (10M)
     constexpr uint32_t kMaxStringLen = 64 * 1024;
-    constexpr uint32_t max_str_len = 100 * 1024 * 1024;
     constexpr uint32_t max_count = 10'000'000;
 
     auto read_checked_str = [&]() -> std::string {

@@ -136,7 +136,7 @@ TEST_F(AgentBusTest, UnsubscribeStopsDelivery) {
 
 TEST_F(AgentBusTest, AuditTrailRecorded) {
   bus->send(BusMessage::make_request(10, 20, "t", "p"));
-  EXPECT_GE(bus->audit_trail().size(), 1);
+  EXPECT_GE(bus->audit_trail().size(), 1u);
 }
 
 TEST_F(AgentBusTest, AuditTrailDequeCapBehavior) {
@@ -212,34 +212,34 @@ TEST(AgentBusSecurityTest, InjectionRedaction) {
 
 TEST(ChannelTest, BackpressureDropTracking) {
   Channel ch(1, 3); // max depth = 3
-  EXPECT_EQ(ch.dropped_count(), 0);
+  EXPECT_EQ(ch.dropped_count(), 0u);
 
   // Fill channel
   for (int i = 0; i < 3; ++i) {
     EXPECT_TRUE(ch.push(BusMessage::make_event(1, "test", "msg")));
   }
-  EXPECT_EQ(ch.depth(), 3);
+  EXPECT_EQ(ch.depth(), 3u);
 
   // Next push should be rejected
   EXPECT_FALSE(ch.push(BusMessage::make_event(1, "test", "overflow")));
-  EXPECT_EQ(ch.dropped_count(), 1);
+  EXPECT_EQ(ch.dropped_count(), 1u);
 
   // And again
   EXPECT_FALSE(ch.push(BusMessage::make_event(1, "test", "overflow2")));
-  EXPECT_EQ(ch.dropped_count(), 2);
+  EXPECT_EQ(ch.dropped_count(), 2u);
 }
 
 TEST_F(AgentBusTest, TotalDroppedAcrossChannels) {
-  EXPECT_EQ(bus->total_dropped_messages(), 0);
+  EXPECT_EQ(bus->total_dropped_messages(), 0u);
 }
 
 TEST_F(AgentBusTest, ChannelDepthQuery) {
-  EXPECT_EQ(bus->channel_depth(10), 0);
+  EXPECT_EQ(bus->channel_depth(10), 0u);
 
   // Push a message to agent 10 (from agent 20)
   bus->send(BusMessage::make_request(20, 10, "test", "data"));
-  EXPECT_EQ(bus->channel_depth(10), 1);
+  EXPECT_EQ(bus->channel_depth(10), 1u);
 
   // Non-existent agent
-  EXPECT_EQ(bus->channel_depth(999), 0);
+  EXPECT_EQ(bus->channel_depth(999), 0u);
 }

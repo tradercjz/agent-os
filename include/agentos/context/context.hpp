@@ -92,7 +92,7 @@ public:
   TokenCount used_tokens() const { return used_tokens_; }
   TokenCount max_tokens() const { return max_tokens_; }
   float utilization() const {
-    return static_cast<float>(used_tokens_) / max_tokens_;
+    return static_cast<float>(used_tokens_) / static_cast<float>(max_tokens_);
   }
 
   bool is_near_full(float threshold = 0.85f) const {
@@ -209,7 +209,11 @@ struct ContextSnapshot {
           }
         }
         snap.messages.push_back(
-            {.role = static_cast<kernel::Role>(role_id), .content = content});
+            {.role = static_cast<kernel::Role>(role_id),
+             .content = content,
+             .name = "",
+             .tool_call_id = "",
+             .tool_calls = {}});
       } else if (line.starts_with("META:")) {
         snap.metadata_json = line.substr(5);
       }

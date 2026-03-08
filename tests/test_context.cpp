@@ -15,8 +15,8 @@ protected:
 
 TEST_F(ContextWindowTest, TryAddSucceeds) {
   EXPECT_TRUE(win.try_add(Message::system("Hi")));
-  EXPECT_GT(win.used_tokens(), 0);
-  EXPECT_EQ(win.messages().size(), 1);
+  EXPECT_GT(win.used_tokens(), 0u);
+  EXPECT_EQ(win.messages().size(), 1u);
 }
 
 TEST_F(ContextWindowTest, TryAddFailsOnOverflow) {
@@ -85,7 +85,7 @@ TEST_F(ContextWindowTest, Utilization) {
 TEST_F(ContextWindowTest, InjectSummary) {
   win.try_add(Message::user("old"));
   win.inject_summary("Summary of old content");
-  EXPECT_GE(win.messages().size(), 2);
+  EXPECT_GE(win.messages().size(), 2u);
   // Summary should be at the front
   EXPECT_TRUE(win.messages().front().content.find("摘要") !=
               std::string::npos);
@@ -94,7 +94,7 @@ TEST_F(ContextWindowTest, InjectSummary) {
 TEST_F(ContextWindowTest, Reset) {
   win.try_add(Message::user("data"));
   win.reset();
-  EXPECT_EQ(win.used_tokens(), 0);
+  EXPECT_EQ(win.used_tokens(), 0u);
   EXPECT_TRUE(win.messages().empty());
 }
 
@@ -115,7 +115,7 @@ TEST(SnapshotTest, SerializeDeserializeRoundTrip) {
 
   ASSERT_TRUE(restored.has_value());
   EXPECT_EQ(restored->agent_id, 42);
-  EXPECT_EQ(restored->messages.size(), 3);
+  EXPECT_EQ(restored->messages.size(), 3u);
   EXPECT_EQ(restored->messages[0].role, Role::System);
   EXPECT_EQ(restored->messages[0].content, "System prompt");
   EXPECT_EQ(restored->messages[1].content, "Hello world");
@@ -166,7 +166,7 @@ TEST_F(ContextManagerTest, SnapshotAndRestore) {
   ASSERT_TRUE(r);
 
   auto &restored_win = mgr_->get_window(100);
-  EXPECT_EQ(restored_win.messages().size(), 3);
+  EXPECT_EQ(restored_win.messages().size(), 3u);
 }
 
 TEST_F(ContextManagerTest, CompressWithSummary) {
@@ -203,7 +203,7 @@ TEST(ContextSnapshotTest, RoundtripWithSpecialChars) {
   auto restored = ContextSnapshot::deserialize(serialized);
 
   ASSERT_TRUE(restored.has_value());
-  ASSERT_EQ(restored->messages.size(), 3);
+  ASSERT_EQ(restored->messages.size(), 3u);
   EXPECT_EQ(restored->messages[0].content, "Hello\nWorld");
   EXPECT_EQ(restored->messages[1].content, "Tab\there\rand\\backslash");
   EXPECT_TRUE(restored->messages[2].content.empty());

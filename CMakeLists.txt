@@ -120,6 +120,11 @@ FetchContent_Declare(
   URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.zip
 )
 FetchContent_MakeAvailable(hnswlib)
+# Mark hnswlib includes as SYSTEM to suppress third-party warnings under -Werror
+get_target_property(_hnswlib_dirs hnswlib INTERFACE_INCLUDE_DIRECTORIES)
+if(_hnswlib_dirs)
+    set_target_properties(hnswlib PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_hnswlib_dirs}")
+endif()
 
 # ---- cppjieba (optional) ----
 option(AGENTOS_ENABLE_JIEBA "Enable cppjieba Chinese tokenization support" ON)
@@ -160,6 +165,9 @@ target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(agentos PUBLIC ${SQLITE3_INCLUDE_DIRS})
 target_include_directories(agentos PUBLIC ${DUCKDB_INCLUDE_DIR})
 target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_LIBRARIES} ${DUCKDB_LIBRARY})
+
+# Treat DuckDB headers as SYSTEM includes to suppress third-party warnings
+target_include_directories(agentos SYSTEM PUBLIC ${DUCKDB_INCLUDE_DIR})
 
 # R6-2: Production-grade: treat warnings as errors
 target_compile_options(agentos PRIVATE
