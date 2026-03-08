@@ -293,19 +293,19 @@ public:
         }
 
         // Helper lambda: check if keyword match at position pos is at word boundary
-        auto at_word_boundary = [&](const std::string &text, size_t pos, size_t kw_len) -> bool {
-            bool left_ok  = (pos == 0 || !std::isalnum(static_cast<unsigned char>(text[pos - 1])));
-            bool right_ok = (pos + kw_len >= text.size() ||
-                             !std::isalnum(static_cast<unsigned char>(text[pos + kw_len])));
+        auto at_word_boundary = [&](const std::string &haystack, size_t pos, size_t kw_len) -> bool {
+            bool left_ok  = (pos == 0 || !std::isalnum(static_cast<unsigned char>(haystack[pos - 1])));
+            bool right_ok = (pos + kw_len >= haystack.size() ||
+                             !std::isalnum(static_cast<unsigned char>(haystack[pos + kw_len])));
             return left_ok && right_ok;
         };
 
         // Helper lambda for word-boundary aware search
-        auto contains_keyword = [&](const std::string& text, const std::string& kw) -> bool {
+        auto contains_keyword = [&](const std::string& haystack, const std::string& kw) -> bool {
             size_t pos = 0;
-            while ((pos = text.find(kw, pos)) != std::string::npos) {
+            while ((pos = haystack.find(kw, pos)) != std::string::npos) {
                 // Check word boundaries
-                if (at_word_boundary(text, pos, kw.size())) return true;
+                if (at_word_boundary(haystack, pos, kw.size())) return true;
                 pos += kw.size();
             }
             return false;
