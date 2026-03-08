@@ -77,7 +77,7 @@ struct MemoryEntry {
   std::unordered_map<std::string, std::string> tags;
   // FIX #17: Precondition: both vectors must be non-empty and same size.
   // Returns normalized cosine similarity (assumes inputs are L2-normalized).
-  static float cosine_similarity(const Embedding &a, const Embedding &b) {
+  [[nodiscard]] static float cosine_similarity(const Embedding &a, const Embedding &b) noexcept {
     // Runtime guards that work in release builds
     if (a.empty() || b.empty()) return 0.0f;
     if (a.size() != b.size()) return 0.0f;

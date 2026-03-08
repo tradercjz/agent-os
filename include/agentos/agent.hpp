@@ -12,6 +12,7 @@
 #include <agentos/security/security.hpp>
 #include <agentos/tools/tool_manager.hpp>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <functional>
 #include <future>
@@ -65,11 +66,15 @@ class AgentOS; // 前向声明
 class Agent : private NonCopyable {
 public:
   Agent(AgentId id, AgentConfig cfg, AgentOS *os)
-      : id_(id), config_(std::move(cfg)), os_(os) {}
+      : id_(id), config_(std::move(cfg)), os_(os) {
+    assert(os_ != nullptr && "Agent must be created with a valid AgentOS pointer");
+  }
 
   virtual ~Agent() {
-    // Signal async tasks that agent is being destroyed
-    *alive_ = false;
+    // Signal async tasks that agent is being destroyed.
+    // Uses release ordering so the store is visible to any thread that
+    // subsequently loads alive_ with acquire ordering in run_async().
+    alive_->store(false, std::memory_order_release);
   }
 
   // Explicitly deleted to prevent accidental copies.

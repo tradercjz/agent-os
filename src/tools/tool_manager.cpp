@@ -73,14 +73,14 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
 
   int pipefd[2];
   if (pipe(pipefd) == -1) {
-    return ToolResult{false, "Failed to create pipe", {}};
+    return ToolResult{.success = false, .output = "", .error = "Failed to create pipe"};
   }
 
   pid_t pid = fork();
   if (pid == -1) {
     close(pipefd[0]);
     close(pipefd[1]);
-    return ToolResult{false, "Failed to fork process", {}};
+    return ToolResult{.success = false, .output = "", .error = "Failed to fork process"};
   }
 
   if (pid == 0) {
@@ -142,7 +142,7 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
   }
 
   if (exit_code != 0 && output.empty()) {
-    return ToolResult{false, fmt::format("Command failed with exit code {}", exit_code), "", truncated};
+    return ToolResult{.success = false, .output = fmt::format("Command failed with exit code {}", exit_code), .error = "", .truncated = truncated};
   }
   return ToolResult{true, output, "", truncated};
 }

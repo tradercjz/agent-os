@@ -54,35 +54,35 @@ class IGraphMemory {
 public:
   virtual ~IGraphMemory() = default;
 
-  virtual Result<bool> add_node(GraphNode node) = 0;
-  virtual Result<bool> add_edge(GraphEdge edge) = 0;
+  [[nodiscard]] virtual Result<bool> add_node(GraphNode node) = 0;
+  [[nodiscard]] virtual Result<bool> add_edge(GraphEdge edge) = 0;
 
   // Update node content/type (returns false if node doesn't exist)
-  virtual Result<bool> update_node(const std::string &node_id,
+  [[nodiscard]] virtual Result<bool> update_node(const std::string &node_id,
                                    std::string new_content,
                                    std::string new_type = "") = 0;
 
   // Delete a node and all its edges
-  virtual Result<bool> delete_node(const std::string &node_id) = 0;
+  [[nodiscard]] virtual Result<bool> delete_node(const std::string &node_id) = 0;
 
   // Delete a specific edge
-  virtual Result<bool> delete_edge(const std::string &source_id,
+  [[nodiscard]] virtual Result<bool> delete_edge(const std::string &source_id,
                                    const std::string &target_id,
                                    const std::string &relation) = 0;
 
   // Quick adjacent search
-  virtual Result<std::vector<GraphEdge>>
+  [[nodiscard]] virtual Result<std::vector<GraphEdge>>
   get_edges(const std::string &node_id) = 0;
-  virtual Result<std::vector<GraphEdge>>
+  [[nodiscard]] virtual Result<std::vector<GraphEdge>>
   get_edges_by_relation(const std::string &node_id,
                         const std::string &relation) = 0;
 
   // Semantic K-hop Subgraph retrieval
-  virtual Result<Subgraph> k_hop_search(const std::string &start_node_id, int k,
+  [[nodiscard]] virtual Result<Subgraph> k_hop_search(const std::string &start_node_id, int k,
                                         uint64_t current_ts = 0) = 0;
 
   // Prune expired edges (end_ts < cutoff_ts), returns count removed
-  virtual Result<size_t> cleanup_before(uint64_t cutoff_ts) = 0;
+  [[nodiscard]] virtual Result<size_t> cleanup_before(uint64_t cutoff_ts) = 0;
 
   virtual void save_snapshot() = 0;
 };
@@ -105,7 +105,7 @@ public:
 
   static constexpr size_t WAL_COMPACT_THRESHOLD = 5000;
 
-  Result<bool> add_node(GraphNode node) override {
+  [[nodiscard]] Result<bool> add_node(GraphNode node) override {
     std::lock_guard lk(mu_);
     if (node.created_at == 0)
       node.created_at = now_ts();
@@ -120,7 +120,7 @@ public:
     return true;
   }
 
-  Result<bool> add_edge(GraphEdge edge) override {
+  [[nodiscard]] Result<bool> add_edge(GraphEdge edge) override {
     std::lock_guard lk(mu_);
     if (edge.start_ts == 0)
       edge.start_ts = now_ts();
@@ -169,7 +169,7 @@ public:
     return true;
   }
 
-  Result<bool> update_node(const std::string &node_id,
+  [[nodiscard]] Result<bool> update_node(const std::string &node_id,
                            std::string new_content,
                            std::string new_type = "") override {
     std::lock_guard lk(mu_);
@@ -186,7 +186,7 @@ public:
     return true;
   }
 
-  Result<bool> delete_node(const std::string &node_id) override {
+  [[nodiscard]] Result<bool> delete_node(const std::string &node_id) override {
     std::lock_guard lk(mu_);
     auto it = nodes_.find(node_id);
     if (it == nodes_.end())
@@ -208,7 +208,7 @@ public:
     return true;
   }
 
-  Result<bool> delete_edge(const std::string &source_id,
+  [[nodiscard]] Result<bool> delete_edge(const std::string &source_id,
                            const std::string &target_id,
                            const std::string &relation) override {
     std::lock_guard lk(mu_);
@@ -232,7 +232,7 @@ public:
     return true;
   }
 
-  Result<size_t> cleanup_before(uint64_t cutoff_ts) override {
+  [[nodiscard]] Result<size_t> cleanup_before(uint64_t cutoff_ts) override {
     // THREAD-SAFETY: Holds mu_ for the duration of cleanup, blocking all concurrent writes.
     // Do NOT call from within a graph callback or from code already holding mu_, as this
     // can cause deadlock if a write callback attempts to re-enter the graph.
@@ -255,7 +255,7 @@ public:
     return removed;
   }
 
-  Result<std::vector<GraphEdge>>
+  [[nodiscard]] Result<std::vector<GraphEdge>>
   get_edges(const std::string &node_id) override {
     std::lock_guard lk(mu_);
     if (auto it = edges_.find(node_id); it != edges_.end()) {
@@ -264,7 +264,7 @@ public:
     return std::vector<GraphEdge>{};
   }
 
-  Result<std::vector<GraphEdge>>
+  [[nodiscard]] Result<std::vector<GraphEdge>>
   get_edges_by_relation(const std::string &node_id,
                         const std::string &relation) override {
     std::lock_guard lk(mu_);
@@ -278,7 +278,7 @@ public:
     return res;
   }
 
-  Result<Subgraph> k_hop_search(const std::string &start_node_id, int k,
+  [[nodiscard]] Result<Subgraph> k_hop_search(const std::string &start_node_id, int k,
                                 uint64_t current_ts = 0) override {
     std::lock_guard lk(mu_);
     if (current_ts == 0)
@@ -450,7 +450,11 @@ private:
       wal << record;
       wal.flush();
     }
-    fs::remove(tmp_path);
+    std::error_code ec;
+    fs::remove(tmp_path, ec);
+    if (ec) {
+      LOG_WARN(fmt::format("GraphMemory: failed to remove temp WAL: {}", ec.message()));
+    }
   }
 
   // Verify and strip CRC suffix from WAL line. Returns empty string if invalid.
