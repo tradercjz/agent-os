@@ -224,6 +224,8 @@ public:
     auto read_str = [&]() -> std::string {
       uint32_t len;
       ifs.read(reinterpret_cast<char *>(&len), 4);
+      if (!ifs.good() || len > 100 * 1024 * 1024) // 100MB sanity limit
+        return {};
       std::string s(len, '\0');
       ifs.read(s.data(), len);
       return s;
@@ -235,22 +237,26 @@ public:
     // chunk_content_
     uint32_t n_chunks;
     ifs.read(reinterpret_cast<char *>(&n_chunks), 4);
+    if (!ifs.good() || n_chunks > 10'000'000) return false; // Sanity limit
     chunk_content_.clear();
     chunk_content_.reserve(n_chunks);
     for (uint32_t i = 0; i < n_chunks; ++i) {
       auto id = read_str();
       auto content = read_str();
+      if (!ifs.good()) return false;
       chunk_content_[std::move(id)] = std::move(content);
     }
 
     // chunk_docs_
     uint32_t n_docs;
     ifs.read(reinterpret_cast<char *>(&n_docs), 4);
+    if (!ifs.good() || n_docs > 10'000'000) return false;
     chunk_docs_.clear();
     chunk_docs_.reserve(n_docs);
     for (uint32_t i = 0; i < n_docs; ++i) {
       auto chunk_id = read_str();
       auto doc_id = read_str();
+      if (!ifs.good()) return false;
       chunk_docs_[std::move(chunk_id)] = std::move(doc_id);
     }
 
@@ -258,6 +264,7 @@ public:
     ifs.read(reinterpret_cast<char *>(&next_hnsw_id_), sizeof(next_hnsw_id_));
     uint32_t n_hnsw;
     ifs.read(reinterpret_cast<char *>(&n_hnsw), 4);
+    if (!ifs.good() || n_hnsw > 10'000'000) return false;
     hnsw_id_to_chunk_.clear();
     hnsw_id_to_chunk_.reserve(n_hnsw);
     for (uint32_t i = 0; i < n_hnsw; ++i) {
