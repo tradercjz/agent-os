@@ -460,7 +460,7 @@ private:
   };
 
   void create_schema() {
-    db_.exec(
+    if (!db_.exec(
         "CREATE TABLE IF NOT EXISTS entries ("
         "  id VARCHAR PRIMARY KEY,"
         "  content VARCHAR NOT NULL,"
@@ -474,13 +474,19 @@ private:
         "  created_at BIGINT DEFAULT 0,"
         "  accessed_at BIGINT DEFAULT 0,"
         "  embedding BLOB"
-        ")");
+        ")")) {
+      LOG_WARN("DuckDBStore: failed to create entries table");
+      return;
+    }
 
-    // 为 filter 常用字段建索引
-    db_.exec("CREATE INDEX IF NOT EXISTS idx_user_id ON entries(user_id)");
-    db_.exec("CREATE INDEX IF NOT EXISTS idx_type ON entries(type)");
-    db_.exec(
-        "CREATE INDEX IF NOT EXISTS idx_importance ON entries(importance)");
+    // 为 filter 常用字段建索引（best-effort，失败仅记录警告）
+    if (!db_.exec("CREATE INDEX IF NOT EXISTS idx_user_id ON entries(user_id)"))
+      LOG_WARN("DuckDBStore: failed to create idx_user_id index");
+    if (!db_.exec("CREATE INDEX IF NOT EXISTS idx_type ON entries(type)"))
+      LOG_WARN("DuckDBStore: failed to create idx_type index");
+    if (!db_.exec(
+        "CREATE INDEX IF NOT EXISTS idx_importance ON entries(importance)"))
+      LOG_WARN("DuckDBStore: failed to create idx_importance index");
   }
 
   static constexpr const char *SELECT_ALL_COLS =

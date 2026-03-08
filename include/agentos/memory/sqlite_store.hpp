@@ -33,11 +33,11 @@ public:
       return false;
     }
 
-    // WAL 模式 + 性能调优
-    exec("PRAGMA journal_mode=WAL");
-    exec("PRAGMA synchronous=NORMAL");
-    exec("PRAGMA cache_size=-65536"); // 64MB cache
-    exec("PRAGMA temp_store=MEMORY");
+    // WAL 模式 + 性能调优（PRAGMA 失败非致命，仅影响性能）
+    (void)exec("PRAGMA journal_mode=WAL");
+    (void)exec("PRAGMA synchronous=NORMAL");
+    (void)exec("PRAGMA cache_size=-65536"); // 64MB cache
+    (void)exec("PRAGMA temp_store=MEMORY");
     opened_ = true;
     return true;
   }
@@ -341,7 +341,7 @@ private:
   };
 
   void create_schema() {
-    db_.exec(
+    if (!db_.exec(
         "CREATE TABLE IF NOT EXISTS entries ("
         "  id TEXT PRIMARY KEY,"
         "  content TEXT NOT NULL,"
@@ -355,11 +355,16 @@ private:
         "  created_at INTEGER DEFAULT 0,"
         "  accessed_at INTEGER DEFAULT 0,"
         "  embedding BLOB"
-        ")");
+        ")")) {
+      LOG_WARN("SQLiteStore: failed to create entries table");
+      return;
+    }
 
-    // 为 filter 常用字段建索引
-    db_.exec("CREATE INDEX IF NOT EXISTS idx_user_id ON entries(user_id)");
-    db_.exec("CREATE INDEX IF NOT EXISTS idx_type ON entries(type)");
+    // 为 filter 常用字段建索引（best-effort，失败仅记录警告）
+    if (!db_.exec("CREATE INDEX IF NOT EXISTS idx_user_id ON entries(user_id)"))
+      LOG_WARN("SQLiteStore: failed to create idx_user_id index");
+    if (!db_.exec("CREATE INDEX IF NOT EXISTS idx_type ON entries(type)"))
+      LOG_WARN("SQLiteStore: failed to create idx_type index");
   }
 
   // ── 从 SELECT 结果行提取 MemoryEntry（列顺序必须匹配 SELECT_ALL_COLS）──
