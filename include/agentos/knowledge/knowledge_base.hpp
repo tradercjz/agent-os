@@ -320,7 +320,7 @@ public:
           if (hnsw_) {
             try {
               hnsw_->markDelete(it->first);
-            } catch (...) {
+            } catch (const std::exception &) {
             }
           }
           it = hnsw_id_to_chunk_.erase(it);

@@ -348,7 +348,7 @@ public:
     std::priority_queue<std::pair<float, hnswlib::labeltype>> res;
     try {
       res = hnsw_index_->searchKnn(q_emb.data(), search_k, &custom_filter);
-    } catch (...) {
+    } catch (const std::exception &) {
       return results;
     }
 
@@ -585,7 +585,7 @@ public:
     std::priority_queue<std::pair<float, hnswlib::labeltype>> res;
     try {
       res = hnsw_index_->searchKnn(q_emb.data(), search_k, &ltm_filter);
-    } catch (...) {
+    } catch (const std::exception &) {
       return results;
     }
 

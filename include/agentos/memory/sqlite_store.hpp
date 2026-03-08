@@ -231,7 +231,7 @@ public:
     std::priority_queue<std::pair<float, hnswlib::labeltype>> res;
     try {
       res = hnsw_index_->searchKnn(q_emb.data(), search_k, &ltm_filter);
-    } catch (...) {
+    } catch (const std::exception &) {
       return results;
     }
 
@@ -538,7 +538,7 @@ private:
         try {
           uint64_t seq = std::stoull(id.substr(3));
           id_counter_ = std::max(id_counter_, seq + 1);
-        } catch (...) {
+        } catch (const std::exception &) {
         }
       }
     }
@@ -617,7 +617,7 @@ private:
       std::getline(mem_ifs, imp_str);
       try {
         entry.importance = std::stof(imp_str);
-      } catch (...) {
+      } catch (const std::exception &) {
         entry.importance = importance;
       }
       std::getline(mem_ifs, entry.user_id);
