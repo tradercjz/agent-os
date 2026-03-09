@@ -82,6 +82,7 @@ public:
     bool push(BusMessage msg) {
         std::lock_guard lk(mu_);
         if (queue_.size() >= max_depth_) {
+            dropped_count_++;
             return false; // Backpressure: caller should handle
         }
         queue_.push(std::move(msg));
@@ -115,12 +116,20 @@ public:
 
     AgentId owner() const { return owner_; }
 
+    size_t depth() const {
+        std::lock_guard lk(mu_);
+        return queue_.size();
+    }
+
+    size_t dropped_count() const { return dropped_count_; }
+
 private:
     AgentId owner_;
     size_t max_depth_;
     std::queue<BusMessage> queue_;
     mutable std::mutex mu_;
     std::condition_variable cv_;
+    std::atomic<size_t> dropped_count_{0};
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -259,6 +268,22 @@ public:
     }
 
     const std::deque<BusMessage>& audit_trail() const { return audit_trail_; }
+
+    /// Get total dropped messages across all channels
+    size_t total_dropped() const {
+        std::lock_guard lk(mu_);
+        size_t total = 0;
+        for (auto &[id, ch] : channels_)
+            total += ch->dropped_count();
+        return total;
+    }
+
+    /// Get channel queue depth for a specific agent
+    size_t channel_depth(AgentId id) const {
+        std::lock_guard lk(mu_);
+        auto it = channels_.find(id);
+        return it != channels_.end() ? it->second->depth() : 0;
+    }
 
 private:
     BusMessage redact_if_needed(BusMessage msg, AgentId /*recipient*/) const {

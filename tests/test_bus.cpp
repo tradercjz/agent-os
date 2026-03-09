@@ -207,3 +207,39 @@ TEST(AgentBusSecurityTest, InjectionRedaction) {
   EXPECT_TRUE(received->redacted);
   EXPECT_EQ(received->payload, "[REDACTED: injection detected]");
 }
+
+// ── Backpressure Stats ──────────────────────────────────────
+
+TEST(ChannelTest, BackpressureDropTracking) {
+  Channel ch(1, 3); // max depth = 3
+  EXPECT_EQ(ch.dropped_count(), 0);
+
+  // Fill channel
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_TRUE(ch.push(BusMessage::make_event(1, "test", "msg")));
+  }
+  EXPECT_EQ(ch.depth(), 3);
+
+  // Next push should be rejected
+  EXPECT_FALSE(ch.push(BusMessage::make_event(1, "test", "overflow")));
+  EXPECT_EQ(ch.dropped_count(), 1);
+
+  // And again
+  EXPECT_FALSE(ch.push(BusMessage::make_event(1, "test", "overflow2")));
+  EXPECT_EQ(ch.dropped_count(), 2);
+}
+
+TEST_F(AgentBusTest, TotalDroppedAcrossChannels) {
+  EXPECT_EQ(bus->total_dropped(), 0);
+}
+
+TEST_F(AgentBusTest, ChannelDepthQuery) {
+  EXPECT_EQ(bus->channel_depth(10), 0);
+
+  // Push a message to agent 10 (from agent 20)
+  bus->send(BusMessage::make_request(20, 10, "test", "data"));
+  EXPECT_EQ(bus->channel_depth(10), 1);
+
+  // Non-existent agent
+  EXPECT_EQ(bus->channel_depth(999), 0);
+}

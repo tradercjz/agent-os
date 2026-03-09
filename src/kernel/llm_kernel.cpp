@@ -263,6 +263,14 @@ OpenAIBackend::parse_response(const std::string &json_str) const {
   try {
     Json j = Json::parse(json_str);
 
+    // Check for API error in response body (e.g., content filtering)
+    if (j.contains("error") && j["error"].is_object()) {
+      auto &err = j["error"];
+      std::string msg = err.value("message", "Unknown API error");
+      return make_error(ErrorCode::LLMBackendError,
+                        fmt::format("API error: {}", msg));
+    }
+
     if (j.contains("choices") && j["choices"].is_array() &&
         !j["choices"].empty()) {
       auto &choice = j["choices"][0];
@@ -352,9 +360,29 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
   long http_code = 0;
   curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_code);
   if (http_code >= 400) {
+    // Parse API error response for better error messages
+    std::string error_msg;
+    try {
+      Json err_json = Json::parse(response_body);
+      if (err_json.contains("error") && err_json["error"].is_object()) {
+        auto &err_obj = err_json["error"];
+        if (err_obj.contains("message") && err_obj["message"].is_string())
+          error_msg = err_obj["message"].get<std::string>();
+      }
+    } catch (...) { /* not JSON, use raw body */ }
+
+    if (error_msg.empty())
+      error_msg = response_body.substr(0, 500); // Truncate long error bodies
+
+    // Distinguish transient from permanent errors
+    ErrorCode code = ErrorCode::LLMBackendError;
+    if (http_code == 429) {
+      code = ErrorCode::RateLimitExceeded;
+    }
+
     return make_error(
-        ErrorCode::LLMBackendError,
-        fmt::format("HTTP {} error: {}", http_code, response_body));
+        code,
+        fmt::format("HTTP {} error: {}", http_code, error_msg));
   }
 
   return response_body;

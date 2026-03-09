@@ -153,6 +153,10 @@ struct ContextSnapshot {
   }
 
   static std::optional<ContextSnapshot> deserialize(const std::string &data) {
+    constexpr size_t MAX_SNAPSHOT_SIZE = 50 * 1024 * 1024; // 50 MiB safety limit
+    if (data.size() > MAX_SNAPSHOT_SIZE)
+      return std::nullopt;
+
     ContextSnapshot snap;
     snap.captured_at = now();
     std::istringstream ss(data);

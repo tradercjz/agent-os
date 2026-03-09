@@ -184,3 +184,35 @@ TEST_F(ContextManagerTest, CompressWithSummary) {
   auto &compressed = mgr_->get_window(200);
   EXPECT_LE(compressed.used_tokens(), compressed.max_tokens());
 }
+
+// ── Snapshot Serialize/Deserialize Roundtrip ─────────────────
+
+TEST(ContextSnapshotTest, RoundtripWithSpecialChars) {
+  ContextSnapshot snap;
+  snap.agent_id = 42;
+  snap.session_id = "test_session";
+  snap.captured_at = now();
+  snap.metadata_json = R"({"key":"val"})";
+
+  // Add messages with special characters
+  snap.messages.push_back(Message::user("Hello\nWorld"));
+  snap.messages.push_back(Message::assistant("Tab\there\rand\\backslash"));
+  snap.messages.push_back(Message::system("")); // empty content
+
+  auto serialized = snap.serialize();
+  auto restored = ContextSnapshot::deserialize(serialized);
+
+  ASSERT_TRUE(restored.has_value());
+  ASSERT_EQ(restored->messages.size(), 3);
+  EXPECT_EQ(restored->messages[0].content, "Hello\nWorld");
+  EXPECT_EQ(restored->messages[1].content, "Tab\there\rand\\backslash");
+  EXPECT_TRUE(restored->messages[2].content.empty());
+  EXPECT_EQ(restored->agent_id, 42);
+}
+
+TEST(ContextSnapshotTest, DeserializeRejectsOversizedInput) {
+  // Create a string > 50 MiB
+  std::string huge(51 * 1024 * 1024, 'X');
+  auto result = ContextSnapshot::deserialize(huge);
+  EXPECT_FALSE(result.has_value());
+}

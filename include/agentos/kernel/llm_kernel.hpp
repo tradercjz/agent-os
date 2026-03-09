@@ -426,8 +426,9 @@ private:
   // Check if an error is transient (worth retrying)
   static bool is_transient_error(const Error &err) {
     // Retry on backend errors (HTTP 5xx, timeouts, network failures)
-    // Don't retry on auth errors, validation, rate limits, etc.
+    // Also retry on rate limits (429) with backoff
     if (err.code == ErrorCode::Timeout) return true;
+    if (err.code == ErrorCode::RateLimitExceeded) return true;
     if (err.code != ErrorCode::LLMBackendError) return false;
     // Check for 5xx patterns in error message
     auto &msg = err.message;
