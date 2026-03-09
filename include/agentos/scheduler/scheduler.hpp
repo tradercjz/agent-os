@@ -418,7 +418,7 @@ private:
             if (dep_graph_.detect_deadlock(waiting)) {
                 // 升级：将最老的 Pending 任务强制完成以打破死锁
                 std::lock_guard lk(mu_);
-                TaskId oldest = 0;
+                std::optional<TaskId> oldest;
                 TimePoint oldest_time = TimePoint::max();
                 for (TaskId wid : waiting) {
                     auto it = all_tasks_.find(wid);
@@ -430,11 +430,11 @@ private:
                         oldest = wid;
                     }
                 }
-                if (oldest) {
+                if (oldest.has_value()) {
                     auto expected = TaskState::Pending;
-                    if (all_tasks_[oldest]->state.compare_exchange_strong(
+                    if (all_tasks_[*oldest]->state.compare_exchange_strong(
                             expected, TaskState::Cancelled)) {
-                        dep_graph_.complete_task(oldest); // 强制解除阻塞
+                        dep_graph_.complete_task(*oldest); // 强制解除阻塞
                         done_cv_.notify_all();
                     }
                 }

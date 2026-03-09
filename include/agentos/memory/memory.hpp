@@ -248,7 +248,9 @@ public:
         try {
           // 容量不足时动态扩容（与 LTM 一致）
           if (hnsw_index_->cur_element_count >= hnsw_index_->max_elements_) {
-            hnsw_index_->resizeIndex(hnsw_index_->max_elements_ * 2);
+            size_t new_cap = hnsw_index_->max_elements_;
+            new_cap = (new_cap > SIZE_MAX / 2) ? SIZE_MAX / 2 : new_cap * 2;
+            hnsw_index_->resizeIndex(new_cap);
           }
           hnswlib::labeltype label = label_counter_++;
           hnsw_index_->addPoint(entry.embedding.data(), label);

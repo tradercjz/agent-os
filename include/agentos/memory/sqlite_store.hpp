@@ -150,7 +150,7 @@ public:
     sqlite3_bind_text(stmt, 6, entry.session_id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 7, entry.type.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_double(stmt, 8, entry.importance);
-    sqlite3_bind_int(stmt, 9, static_cast<int>(entry.access_count));
+    sqlite3_bind_int64(stmt, 9, static_cast<int64_t>(entry.access_count));
 
     auto created_us = std::chrono::duration_cast<std::chrono::microseconds>(
                           entry.created_at.time_since_epoch())
@@ -373,7 +373,7 @@ private:
     entry.type = col_text(stmt, 6);
 
     entry.importance = static_cast<float>(sqlite3_column_double(stmt, 7));
-    entry.access_count = static_cast<uint32_t>(sqlite3_column_int(stmt, 8));
+    entry.access_count = static_cast<uint32_t>(sqlite3_column_int64(stmt, 8));
 
     auto created_us = sqlite3_column_int64(stmt, 9);
     auto accessed_us = sqlite3_column_int64(stmt, 10);
@@ -385,8 +385,11 @@ private:
       const float *blob_data =
           static_cast<const float *>(sqlite3_column_blob(stmt, 11));
       int blob_bytes = sqlite3_column_bytes(stmt, 11);
-      size_t num_floats = blob_bytes / sizeof(float);
-      entry.embedding.assign(blob_data, blob_data + num_floats);
+      if (blob_data && blob_bytes > 0 && blob_bytes % sizeof(float) == 0) {
+        size_t num_floats = static_cast<size_t>(blob_bytes) / sizeof(float);
+        if (num_floats <= 10000) // cap to prevent OOM from malformed data
+          entry.embedding.assign(blob_data, blob_data + num_floats);
+      }
     }
 
     return entry;
@@ -465,9 +468,11 @@ private:
     }
 
     if (has_embedding) {
-      // 容量不足时动态扩容
+      // 容量不足时动态扩容（saturated doubling）
       if (hnsw_index_->cur_element_count >= hnsw_index_->max_elements_) {
-        hnsw_index_->resizeIndex(hnsw_index_->max_elements_ * 2);
+        size_t new_cap = hnsw_index_->max_elements_;
+        new_cap = (new_cap > SIZE_MAX / 2) ? SIZE_MAX / 2 : new_cap * 2;
+        hnsw_index_->resizeIndex(new_cap);
       }
 
       // 如果 ID 已存在，先标记删除旧的

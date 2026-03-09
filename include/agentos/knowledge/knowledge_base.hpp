@@ -115,8 +115,9 @@ public:
       auto resp = llm_->embed(req);
       if (resp && !resp->embeddings.empty() &&
           resp->embeddings[0].size() == dim_) {
-        // 动态扩容
+        // 动态扩容（saturated doubling）
         if (next_hnsw_id_ >= max_chunks_) {
+          if (max_chunks_ > SIZE_MAX / 2) continue; // overflow guard
           max_chunks_ *= 2;
           hnsw_->resizeIndex(max_chunks_);
         }

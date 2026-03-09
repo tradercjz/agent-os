@@ -523,7 +523,7 @@ private:
       auto blob = duckdb::StringValue::Get(emb_val);
       if (blob.size() % sizeof(float) == 0) {
         size_t num_floats = blob.size() / sizeof(float);
-        if (num_floats > 0) {
+        if (num_floats > 0 && num_floats <= 10000) {
           const float *data = reinterpret_cast<const float *>(blob.data());
           entry.embedding.assign(data, data + num_floats);
         }
@@ -628,9 +628,11 @@ private:
     }
 
     if (has_embedding) {
-      // 容量不足时动态扩容
+      // 容量不足时动态扩容（saturated doubling）
       if (hnsw_index_->cur_element_count >= hnsw_index_->max_elements_) {
-        hnsw_index_->resizeIndex(hnsw_index_->max_elements_ * 2);
+        size_t new_cap = hnsw_index_->max_elements_;
+        new_cap = (new_cap > SIZE_MAX / 2) ? SIZE_MAX / 2 : new_cap * 2;
+        hnsw_index_->resizeIndex(new_cap);
       }
 
       // 如果 ID 已存在，先标记删除旧的

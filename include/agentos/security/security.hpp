@@ -152,6 +152,10 @@ public:
     void taint(const std::string& data_id, TrustLevel level,
                std::string source = "") {
         std::lock_guard lk(mu_);
+        // Cap map size to prevent unbounded memory growth
+        if (taint_map_.size() >= kMaxTaintEntries && !taint_map_.contains(data_id)) {
+            return; // silently reject when full
+        }
         taint_map_[data_id] = {data_id, level, std::move(source)};
     }
 
@@ -193,6 +197,7 @@ public:
     }
 
 private:
+    static constexpr size_t kMaxTaintEntries = 100000;
     mutable std::mutex mu_;
     std::unordered_map<std::string, TaintedData> taint_map_;
 };
@@ -231,6 +236,10 @@ public:
     };
 
     DetectionResult scan(std::string_view text) const {
+        // Cap input length to prevent O(n*m) DoS on large payloads
+        if (text.size() > kMaxScanLength)
+            text = text.substr(0, kMaxScanLength);
+
         // Normalize: lowercase + collapse whitespace (defeat spacing bypass)
         std::string lower;
         lower.reserve(text.size());
@@ -297,6 +306,7 @@ public:
     }
 
 private:
+    static constexpr size_t kMaxScanLength = 100000; // 100KB scan cap
     mutable std::mutex mu_;
     std::vector<std::string> patterns_;
 };
