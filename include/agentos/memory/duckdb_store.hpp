@@ -9,7 +9,10 @@
 #include "agentos/core/types.hpp"
 #include "agentos/memory/memory.hpp"
 #include <cstring>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <duckdb.hpp>
+#pragma GCC diagnostic pop
 
 namespace agentos::memory {
 
@@ -367,9 +370,14 @@ public:
   }
 
   /// 预定义的结构化查询：按字段过滤 + 排序 + 限制
+  /// @note where_clause 和 order_by 经过安全校验（禁止分号、DDL 关键词）
   QueryResult query_by_filter(const std::string &where_clause = "1=1",
                               const std::string &order_by = "importance DESC",
                               size_t limit = 100) {
+    if (!validate_sql_fragment(where_clause) ||
+        !validate_sql_fragment(order_by)) {
+      return QueryResult{{}, {}, "Unsafe SQL fragment detected"};
+    }
     std::string sql = "SELECT id, content, source, user_id, type, importance, "
                       "access_count, created_at "
                       "FROM entries WHERE " +
@@ -379,9 +387,14 @@ public:
   }
 
   /// 聚合查询：按类型/用户统计
+  /// @note group_by 和 agg 经过安全校验
   QueryResult aggregate(const std::string &group_by,
                          const std::string &agg = "COUNT(*) as cnt, "
                                                    "AVG(importance) as avg_imp") {
+    if (!validate_sql_fragment(group_by) ||
+        !validate_sql_fragment(agg)) {
+      return QueryResult{{}, {}, "Unsafe SQL fragment detected"};
+    }
     std::string sql = "SELECT " + group_by + ", " + agg +
                       " FROM entries GROUP BY " + group_by +
                       " ORDER BY cnt DESC";
@@ -389,6 +402,27 @@ public:
   }
 
 private:
+  // ── SQL fragment 安全校验（防注入）──────────────────
+  static bool validate_sql_fragment(const std::string &s) {
+    // 禁止分号（多语句注入）
+    if (s.find(';') != std::string::npos)
+      return false;
+    // 禁止 NUL 字节
+    if (s.find('\0') != std::string::npos)
+      return false;
+    // 禁止 DDL/DML 关键词（大小写不敏感）
+    auto lower = s;
+    for (auto &c : lower)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char *kw :
+         {"drop ", "alter ", "create ", "insert ", "update ", "delete ",
+          "truncate ", "exec ", "execute "}) {
+      if (lower.find(kw) != std::string::npos)
+        return false;
+    }
+    return true;
+  }
+
   // ── 元数据缓存（用于 HNSW filter）──
   struct MetaRecord {
     std::string user_id;
@@ -482,14 +516,16 @@ private:
     entry.created_at = TimePoint(std::chrono::microseconds(created_us));
     entry.accessed_at = TimePoint(std::chrono::microseconds(accessed_us));
 
-    // Embedding from BLOB
+    // Embedding from BLOB（校验对齐）
     auto emb_val = chunk.GetValue(11, row);
     if (!emb_val.IsNull()) {
       auto blob = duckdb::StringValue::Get(emb_val);
-      size_t num_floats = blob.size() / sizeof(float);
-      if (num_floats > 0) {
-        const float *data = reinterpret_cast<const float *>(blob.data());
-        entry.embedding.assign(data, data + num_floats);
+      if (blob.size() % sizeof(float) == 0) {
+        size_t num_floats = blob.size() / sizeof(float);
+        if (num_floats > 0) {
+          const float *data = reinterpret_cast<const float *>(blob.data());
+          entry.embedding.assign(data, data + num_floats);
+        }
       }
     }
 
@@ -532,6 +568,8 @@ private:
 
     // Build WHERE clause with escaped string literals
     auto escape = [](const std::string &s) -> std::string {
+      if (s.find('\0') != std::string::npos)
+        return "''"; // reject NUL bytes
       std::string out;
       out.reserve(s.size() + 2);
       out += '\'';
@@ -664,9 +702,9 @@ private:
             continue;
 
           auto blob = duckdb::StringValue::Get(emb_val);
-          size_t num_floats = blob.size() / sizeof(float);
-          if (num_floats == 0)
+          if (blob.size() % sizeof(float) != 0 || blob.empty())
             continue;
+          size_t num_floats = blob.size() / sizeof(float);
 
           const float *data = reinterpret_cast<const float *>(blob.data());
           Embedding emb(data, data + num_floats);

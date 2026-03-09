@@ -31,8 +31,6 @@ int main() {
   std::cout << "  AgentOS CSR Graph Memory Benchmark\n";
   std::cout << "==========================================\n";
 
-  auto start_total = std::chrono::high_resolution_clock::now();
-
   // ---------------------------------------------------------
   // 1. Offline Graph Assimilation Phase (Building)
   // ---------------------------------------------------------

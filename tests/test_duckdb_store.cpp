@@ -288,6 +288,54 @@ TEST_F(DuckDBStoreTest, SQLQueryRejectsDML) {
   EXPECT_FALSE(qr3.ok());
 }
 
+TEST_F(DuckDBStoreTest, QueryByFilterRejectsInjection) {
+  MemoryEntry e;
+  e.content = "test";
+  (void)store_->write(e);
+
+  // Semicolon injection
+  auto qr = store_->query_by_filter("1=1; DROP TABLE entries --");
+  EXPECT_FALSE(qr.ok());
+
+  // DDL keyword injection
+  auto qr2 = store_->query_by_filter("1=1", "id; DELETE FROM entries --");
+  EXPECT_FALSE(qr2.ok());
+
+  // NUL byte
+  std::string with_nul = "type='x'";
+  with_nul += '\0';
+  with_nul += "OR 1=1";
+  auto qr3 = store_->query_by_filter(with_nul);
+  EXPECT_FALSE(qr3.ok());
+
+  // Valid queries should still work
+  auto qr4 = store_->query_by_filter("importance > 0.0");
+  EXPECT_TRUE(qr4.ok());
+  EXPECT_EQ(qr4.rows.size(), 1);
+}
+
+TEST_F(DuckDBStoreTest, BlobEdgeCases) {
+  // Empty embedding should store and read back as empty
+  MemoryEntry e1;
+  e1.content = "No embedding";
+  auto id1 = store_->write(e1);
+  ASSERT_TRUE(id1);
+  auto r1 = store_->read(*id1);
+  ASSERT_TRUE(r1);
+  EXPECT_TRUE(r1->embedding.empty());
+
+  // Single-float embedding
+  MemoryEntry e2;
+  e2.content = "Tiny embedding";
+  e2.embedding = {1.0f};
+  auto id2 = store_->write(e2);
+  ASSERT_TRUE(id2);
+  auto r2 = store_->read(*id2);
+  ASSERT_TRUE(r2);
+  ASSERT_EQ(r2->embedding.size(), 1);
+  EXPECT_NEAR(r2->embedding[0], 1.0f, 1e-5f);
+}
+
 TEST_F(DuckDBStoreTest, AggregateQuery) {
   for (int i = 0; i < 6; ++i) {
     MemoryEntry e;
