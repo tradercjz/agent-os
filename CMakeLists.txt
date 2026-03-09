@@ -34,6 +34,16 @@ find_package(CURL REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 
+# ---- DuckDB ----
+# macOS: brew install duckdb
+# Linux: see https://duckdb.org/docs/installation
+find_library(DUCKDB_LIBRARY duckdb HINTS /opt/homebrew/lib /usr/local/lib)
+find_path(DUCKDB_INCLUDE_DIR duckdb.hpp HINTS /opt/homebrew/include /usr/local/include)
+if(NOT DUCKDB_LIBRARY OR NOT DUCKDB_INCLUDE_DIR)
+    message(FATAL_ERROR "DuckDB not found. Install via: brew install duckdb")
+endif()
+message(STATUS "DuckDB: ${DUCKDB_LIBRARY}")
+
 # ---- GoogleTest ----
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
@@ -87,7 +97,8 @@ set(AGENTOS_SOURCES
 add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(agentos PUBLIC ${SQLITE3_INCLUDE_DIRS})
-target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_LIBRARIES})
+target_include_directories(agentos PUBLIC ${DUCKDB_INCLUDE_DIR})
+target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_LIBRARIES} ${DUCKDB_LIBRARY})
 
 if(AGENTOS_ENABLE_JIEBA)
     target_link_libraries(agentos PUBLIC cppjieba::cppjieba)
@@ -135,6 +146,7 @@ add_executable(
   tests/test_csr_graph.cpp
   tests/test_knowledge_base.cpp
   tests/test_sqlite_store.cpp
+  tests/test_duckdb_store.cpp
   tests/test_integration.cpp
   tests/test_logger.cpp
 )

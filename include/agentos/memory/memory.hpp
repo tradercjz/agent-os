@@ -806,7 +806,7 @@ private:
 class MemorySystem : private NonCopyable {
 public:
   // LTM 后端类型
-  enum class LTMBackend { FileBased, SQLite };
+  enum class LTMBackend { FileBased, SQLite, DuckDB };
 
   // 定义在 memory.cpp 以避免循环 include（SQLiteLongTermMemory 在 sqlite_store.hpp）
   explicit MemorySystem(fs::path ltm_dir = "/tmp/agentos_ltm",
