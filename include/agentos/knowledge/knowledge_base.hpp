@@ -11,6 +11,10 @@
 #include <hnswlib/hnswlib.h>
 #pragma GCC diagnostic pop
 #include <agentos/core/logger.hpp>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#include <duckdb.hpp>
+#pragma GCC diagnostic pop
 #include <memory>
 #include <mutex>
 #include <string>
@@ -125,18 +129,18 @@ public:
     return ingested;
   }
 
-  // ── 持久化 ───────────────────────────────────────
+  // ── 持久化（DuckDB + BM25/HNSW 二进制）──────────────
   bool save(const fs::path &dir) const {
     std::lock_guard lk(mu_);
     fs::create_directories(dir);
 
-    // 1. BM25 索引
+    // 1. BM25 索引（专用二进制格式）
     if (!bm25_.save(dir / "bm25_index.bin")) {
       LOG_ERROR("[KB] Failed to save BM25 index");
       return false;
     }
 
-    // 2. HNSW 索引
+    // 2. HNSW 索引（专用二进制格式）
     if (hnsw_ && next_hnsw_id_ > 0) {
       try {
         hnsw_->saveIndex((dir / "hnsw_index.bin").string());
@@ -146,58 +150,69 @@ public:
       }
     }
 
-    // 3. chunk 映射（chunk_content_ + chunk_docs_ + hnsw_id_to_chunk_）
-    std::ofstream ofs(dir / "kb_meta.bin", std::ios::binary);
-    if (!ofs)
+    // 3. chunk 元数据 → DuckDB
+    try {
+      auto db_path = (dir / "kb_meta.duckdb").string();
+      duckdb::DuckDB db(db_path);
+      duckdb::Connection con(db);
+
+      con.Query("DROP TABLE IF EXISTS kb_config");
+      con.Query("CREATE TABLE kb_config (key VARCHAR, value VARCHAR)");
+      con.Query("DROP TABLE IF EXISTS chunks");
+      con.Query("CREATE TABLE chunks ("
+                "  chunk_id VARCHAR PRIMARY KEY,"
+                "  doc_id VARCHAR NOT NULL,"
+                "  content VARCHAR NOT NULL)");
+      con.Query("DROP TABLE IF EXISTS hnsw_map");
+      con.Query("CREATE TABLE hnsw_map ("
+                "  label UBIGINT PRIMARY KEY,"
+                "  chunk_id VARCHAR NOT NULL)");
+
+      // Config
+      auto cfg = con.Prepare(
+          "INSERT INTO kb_config VALUES ($1, $2)");
+      (void)cfg->Execute(std::string("dim"), std::to_string(dim_));
+      (void)cfg->Execute(std::string("max_chunks"), std::to_string(max_chunks_));
+      (void)cfg->Execute(std::string("next_hnsw_id"), std::to_string(next_hnsw_id_));
+      (void)cfg->Execute(std::string("embedding_model"), embedding_model_);
+
+      // Chunks (batch insert via appender)
+      {
+        duckdb::Appender appender(con, "chunks");
+        for (const auto &[id, content] : chunk_content_) {
+          auto doc_it = chunk_docs_.find(id);
+          std::string doc_id = doc_it != chunk_docs_.end() ? doc_it->second : "";
+          appender.AppendRow(id, doc_id, content);
+        }
+        appender.Close();
+      }
+
+      // HNSW label map
+      {
+        duckdb::Appender appender(con, "hnsw_map");
+        for (const auto &[label, chunk_id] : hnsw_id_to_chunk_) {
+          appender.AppendRow(static_cast<uint64_t>(label), chunk_id);
+        }
+        appender.Close();
+      }
+
+      LOG_INFO(fmt::format("[KB] Saved: {} chunks, {} HNSW points -> {}",
+                           chunk_content_.size(), hnsw_id_to_chunk_.size(),
+                           dir.string()));
+    } catch (const std::exception &e) {
+      LOG_ERROR(fmt::format("[KB] Failed to save metadata: {}", e.what()));
       return false;
-
-    uint32_t magic = 0x4B424D54; // "KBMT"
-    ofs.write(reinterpret_cast<const char *>(&magic), 4);
-    ofs.write(reinterpret_cast<const char *>(&dim_), sizeof(dim_));
-    ofs.write(reinterpret_cast<const char *>(&max_chunks_), sizeof(max_chunks_));
-
-    auto write_str = [&](const std::string &s) {
-      uint32_t len = static_cast<uint32_t>(s.size());
-      ofs.write(reinterpret_cast<const char *>(&len), 4);
-      ofs.write(s.data(), len);
-    };
-
-    // Embedding model name
-    write_str(embedding_model_);
-
-    // chunk_content_
-    uint32_t n_chunks = static_cast<uint32_t>(chunk_content_.size());
-    ofs.write(reinterpret_cast<const char *>(&n_chunks), 4);
-    for (const auto &[id, content] : chunk_content_) {
-      write_str(id);
-      write_str(content);
     }
-
-    // chunk_docs_
-    uint32_t n_docs = static_cast<uint32_t>(chunk_docs_.size());
-    ofs.write(reinterpret_cast<const char *>(&n_docs), 4);
-    for (const auto &[chunk_id, doc_id] : chunk_docs_) {
-      write_str(chunk_id);
-      write_str(doc_id);
-    }
-
-    // hnsw_id_to_chunk_
-    auto nid = next_hnsw_id_;
-    ofs.write(reinterpret_cast<const char *>(&nid), sizeof(nid));
-    uint32_t n_hnsw = static_cast<uint32_t>(hnsw_id_to_chunk_.size());
-    ofs.write(reinterpret_cast<const char *>(&n_hnsw), 4);
-    for (const auto &[label, chunk_id] : hnsw_id_to_chunk_) {
-      ofs.write(reinterpret_cast<const char *>(&label), sizeof(label));
-      write_str(chunk_id);
-    }
-
-    LOG_INFO(fmt::format("[KB] Saved: {} chunks, {} HNSW points -> {}", n_chunks, n_hnsw, dir.string()));
-    return ofs.good();
+    return true;
   }
 
   bool load(const fs::path &dir) {
     std::lock_guard lk(mu_);
-    if (!fs::exists(dir / "kb_meta.bin"))
+
+    // DuckDB 格式优先，降级到旧二进制格式
+    bool has_duckdb = fs::exists(dir / "kb_meta.duckdb");
+    bool has_legacy = fs::exists(dir / "kb_meta.bin");
+    if (!has_duckdb && !has_legacy)
       return false;
 
     // 1. BM25 索引
@@ -206,75 +221,17 @@ public:
       return false;
     }
 
-    // 2. chunk 映射
-    std::ifstream ifs(dir / "kb_meta.bin", std::ios::binary);
-    if (!ifs)
-      return false;
-
-    uint32_t magic;
-    ifs.read(reinterpret_cast<char *>(&magic), 4);
-    if (magic != 0x4B424D54)
-      return false;
-
-    ifs.read(reinterpret_cast<char *>(&dim_), sizeof(dim_));
-    ifs.read(reinterpret_cast<char *>(&max_chunks_), sizeof(max_chunks_));
-
-    auto read_str = [&]() -> std::string {
-      uint32_t len;
-      ifs.read(reinterpret_cast<char *>(&len), 4);
-      if (!ifs.good() || len > 100 * 1024 * 1024) // 100MB sanity limit
-        return {};
-      std::string s(len, '\0');
-      ifs.read(s.data(), len);
-      return s;
-    };
-
-    // Embedding model name
-    embedding_model_ = read_str();
-
-    // chunk_content_
-    uint32_t n_chunks;
-    ifs.read(reinterpret_cast<char *>(&n_chunks), 4);
-    if (!ifs.good() || n_chunks > 10'000'000) return false; // Sanity limit
-    chunk_content_.clear();
-    chunk_content_.reserve(n_chunks);
-    for (uint32_t i = 0; i < n_chunks; ++i) {
-      auto id = read_str();
-      auto content = read_str();
-      if (!ifs.good()) return false;
-      chunk_content_[std::move(id)] = std::move(content);
+    if (has_duckdb) {
+      if (!load_from_duckdb(dir))
+        return false;
+    } else {
+      if (!load_from_legacy_bin(dir))
+        return false;
     }
 
-    // chunk_docs_
-    uint32_t n_docs;
-    ifs.read(reinterpret_cast<char *>(&n_docs), 4);
-    if (!ifs.good() || n_docs > 10'000'000) return false;
-    chunk_docs_.clear();
-    chunk_docs_.reserve(n_docs);
-    for (uint32_t i = 0; i < n_docs; ++i) {
-      auto chunk_id = read_str();
-      auto doc_id = read_str();
-      if (!ifs.good()) return false;
-      chunk_docs_[std::move(chunk_id)] = std::move(doc_id);
-    }
-
-    // hnsw_id_to_chunk_
-    ifs.read(reinterpret_cast<char *>(&next_hnsw_id_), sizeof(next_hnsw_id_));
-    uint32_t n_hnsw;
-    ifs.read(reinterpret_cast<char *>(&n_hnsw), 4);
-    if (!ifs.good() || n_hnsw > 10'000'000) return false;
-    hnsw_id_to_chunk_.clear();
-    hnsw_id_to_chunk_.reserve(n_hnsw);
-    for (uint32_t i = 0; i < n_hnsw; ++i) {
-      hnswlib::labeltype label;
-      ifs.read(reinterpret_cast<char *>(&label), sizeof(label));
-      auto chunk_id = read_str();
-      hnsw_id_to_chunk_[label] = std::move(chunk_id);
-    }
-
-    // 3. HNSW 索引
+    // HNSW 索引
     auto hnsw_path = dir / "hnsw_index.bin";
-    if (fs::exists(hnsw_path) && n_hnsw > 0) {
+    if (fs::exists(hnsw_path) && !hnsw_id_to_chunk_.empty()) {
       space_ = std::make_unique<hnswlib::InnerProductSpace>(dim_);
       try {
         hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
@@ -286,8 +243,9 @@ public:
       }
     }
 
-    LOG_INFO(fmt::format("[KB] Loaded: {} chunks from {}", n_chunks, dir.string()));
-    return ifs.good();
+    LOG_INFO(fmt::format("[KB] Loaded: {} chunks from {}",
+                         chunk_content_.size(), dir.string()));
+    return true;
   }
 
   void ingest_directory(const fs::path &dir) {
@@ -427,6 +385,122 @@ private:
 
   // GraphRAG
   std::shared_ptr<graph_engine::core::ImmutableGraph> graph_;
+
+  // ── DuckDB 元数据加载 ───────────────────────────────
+  bool load_from_duckdb(const fs::path &dir) {
+    try {
+      duckdb::DuckDB db((dir / "kb_meta.duckdb").string());
+      duckdb::Connection con(db);
+
+      // Config
+      auto cfg = con.Query("SELECT key, value FROM kb_config");
+      if (cfg->HasError()) return false;
+      while (auto chunk = cfg->Fetch()) {
+        for (idx_t row = 0; row < chunk->size(); row++) {
+          auto key = chunk->GetValue(0, row).ToString();
+          auto val = chunk->GetValue(1, row).ToString();
+          if (key == "dim") dim_ = static_cast<uint32_t>(std::stoul(val));
+          else if (key == "max_chunks") max_chunks_ = std::stoull(val);
+          else if (key == "next_hnsw_id") next_hnsw_id_ = std::stoull(val);
+          else if (key == "embedding_model") embedding_model_ = val;
+        }
+      }
+
+      // Chunks
+      chunk_content_.clear();
+      chunk_docs_.clear();
+      auto chunks = con.Query("SELECT chunk_id, doc_id, content FROM chunks");
+      if (chunks->HasError()) return false;
+      while (auto chunk = chunks->Fetch()) {
+        for (idx_t row = 0; row < chunk->size(); row++) {
+          auto cid = chunk->GetValue(0, row).ToString();
+          auto did = chunk->GetValue(1, row).ToString();
+          auto content = chunk->GetValue(2, row).ToString();
+          chunk_docs_[cid] = did;
+          chunk_content_[cid] = std::move(content);
+        }
+      }
+
+      // HNSW map
+      hnsw_id_to_chunk_.clear();
+      auto hmap = con.Query("SELECT label, chunk_id FROM hnsw_map");
+      if (hmap->HasError()) return false;
+      while (auto chunk = hmap->Fetch()) {
+        for (idx_t row = 0; row < chunk->size(); row++) {
+          auto label = static_cast<hnswlib::labeltype>(
+              chunk->GetValue(0, row).GetValue<uint64_t>());
+          auto cid = chunk->GetValue(1, row).ToString();
+          hnsw_id_to_chunk_[label] = std::move(cid);
+        }
+      }
+      return true;
+    } catch (const std::exception &e) {
+      LOG_ERROR(fmt::format("[KB] DuckDB load failed: {}", e.what()));
+      return false;
+    }
+  }
+
+  // ── 旧二进制格式兼容加载 ─────────────────────────────
+  bool load_from_legacy_bin(const fs::path &dir) {
+    std::ifstream ifs(dir / "kb_meta.bin", std::ios::binary);
+    if (!ifs) return false;
+
+    uint32_t magic;
+    ifs.read(reinterpret_cast<char *>(&magic), 4);
+    if (magic != 0x4B424D54) return false;
+
+    ifs.read(reinterpret_cast<char *>(&dim_), sizeof(dim_));
+    ifs.read(reinterpret_cast<char *>(&max_chunks_), sizeof(max_chunks_));
+
+    auto read_str = [&]() -> std::string {
+      uint32_t len;
+      ifs.read(reinterpret_cast<char *>(&len), 4);
+      if (!ifs.good() || len > 100 * 1024 * 1024) return {};
+      std::string s(len, '\0');
+      ifs.read(s.data(), len);
+      return s;
+    };
+
+    embedding_model_ = read_str();
+
+    uint32_t n_chunks;
+    ifs.read(reinterpret_cast<char *>(&n_chunks), 4);
+    if (!ifs.good() || n_chunks > 10'000'000) return false;
+    chunk_content_.clear();
+    chunk_content_.reserve(n_chunks);
+    for (uint32_t i = 0; i < n_chunks; ++i) {
+      auto id = read_str();
+      auto content = read_str();
+      if (!ifs.good()) return false;
+      chunk_content_[std::move(id)] = std::move(content);
+    }
+
+    uint32_t n_docs;
+    ifs.read(reinterpret_cast<char *>(&n_docs), 4);
+    if (!ifs.good() || n_docs > 10'000'000) return false;
+    chunk_docs_.clear();
+    chunk_docs_.reserve(n_docs);
+    for (uint32_t i = 0; i < n_docs; ++i) {
+      auto chunk_id = read_str();
+      auto doc_id = read_str();
+      if (!ifs.good()) return false;
+      chunk_docs_[std::move(chunk_id)] = std::move(doc_id);
+    }
+
+    ifs.read(reinterpret_cast<char *>(&next_hnsw_id_), sizeof(next_hnsw_id_));
+    uint32_t n_hnsw;
+    ifs.read(reinterpret_cast<char *>(&n_hnsw), 4);
+    if (!ifs.good() || n_hnsw > 10'000'000) return false;
+    hnsw_id_to_chunk_.clear();
+    hnsw_id_to_chunk_.reserve(n_hnsw);
+    for (uint32_t i = 0; i < n_hnsw; ++i) {
+      hnswlib::labeltype label;
+      ifs.read(reinterpret_cast<char *>(&label), sizeof(label));
+      auto chunk_id = read_str();
+      hnsw_id_to_chunk_[label] = std::move(chunk_id);
+    }
+    return ifs.good();
+  }
 
   // ── 句子级分块（UTF-8 安全）─────────────────────────
   static std::vector<std::string> split_sentences(const std::string &text) {
