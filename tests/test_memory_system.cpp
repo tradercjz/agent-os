@@ -88,3 +88,64 @@ TEST_F(MemorySystemTest, EmptyEmbeddingGracefulHandling) {
             2); // 1 from WM + 1 from STM（importance=0.5 < 0.7 阈值，不写入 LTM）
   EXPECT_EQ(res->front().entry.content, "Text only");
 }
+
+// ── HNSW Compaction after heavy forget() ─────────────────────
+
+TEST(ShortTermMemoryTest, HNSWCompactionAfterManyDeletes) {
+  memory::ShortTermMemory stm(1000);
+
+  // Write 20 entries with embeddings
+  std::vector<std::string> ids;
+  for (int i = 0; i < 20; ++i) {
+    memory::MemoryEntry e;
+    e.content = "mem_" + std::to_string(i);
+    memory::Embedding emb(64, 0.1f);
+    emb[i % 64] = 0.99f;
+    // normalize
+    float norm = 0;
+    for (float v : emb) norm += v * v;
+    norm = std::sqrt(norm);
+    for (float &v : emb) v /= norm;
+    e.embedding = emb;
+
+    auto id = stm.write(std::move(e));
+    ASSERT_TRUE(id);
+    ids.push_back(*id);
+  }
+
+  EXPECT_EQ(stm.size(), 20);
+
+  // Delete 15 entries (>50% threshold triggers compaction)
+  for (int i = 0; i < 15; ++i) {
+    (void)stm.forget(ids[i]);
+  }
+
+  EXPECT_EQ(stm.size(), 5);
+
+  // Remaining entries should still be searchable
+  memory::MemoryFilter filter;
+  memory::Embedding query(64, 0.1f);
+  query[15 % 64] = 0.95f;
+  float qnorm = 0;
+  for (float v : query) qnorm += v * v;
+  qnorm = std::sqrt(qnorm);
+  for (float &v : query) v /= qnorm;
+
+  auto results = stm.search(query, filter, 5);
+  ASSERT_TRUE(results);
+  EXPECT_GE(results->size(), 1);
+}
+
+// ── Const accessor tests ─────────────────────────────────────
+
+TEST(MemorySystemConstTest, ConstAccessorsWork) {
+  auto temp_dir = std::filesystem::temp_directory_path() / "agentos_const_test";
+  std::filesystem::remove_all(temp_dir);
+
+  const memory::MemorySystem mem(temp_dir);
+  // These should compile with const ref
+  EXPECT_EQ(mem.long_term().size(), 0);
+  EXPECT_EQ(mem.long_term().name(), "LongTermMemory");
+
+  std::filesystem::remove_all(temp_dir);
+}

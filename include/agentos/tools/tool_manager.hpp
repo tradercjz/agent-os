@@ -8,6 +8,7 @@
 #include <agentos/kernel/llm_kernel.hpp>
 #include <agentos/memory/memory.hpp>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -38,6 +39,9 @@ struct ToolSchema {
   std::vector<ParamDef> params;
   bool is_dangerous{false}; // 需要 RBAC 检查
   bool sandboxed{false};    // 在子进程中运行
+  uint32_t timeout_ms{30000}; // 执行超时（毫秒）, 0 = 无超时
+
+  // validate() defined below (after ParsedArgs declaration)
 
   // 生成 OpenAI function calling 格式的 JSON
   std::string to_function_json() const {
@@ -102,6 +106,20 @@ struct ParsedArgs {
     return it != values.end() ? it->second : std::string(default_val);
   }
 };
+
+/// Validate parsed args against schema (required params)
+inline Result<void> validate_tool_args(const ToolSchema &schema,
+                                        const ParsedArgs &args) {
+  for (const auto &p : schema.params) {
+    if (p.required && !args.values.contains(p.name) &&
+        !p.default_value.has_value()) {
+      return make_error(
+          ErrorCode::InvalidArgument,
+          fmt::format("Missing required parameter '{}'", p.name));
+    }
+  }
+  return {};
+}
 
 // 使用 nlohmann::json 解析参数
 inline ParsedArgs parse_args(const std::string &json_str) {
@@ -424,7 +442,26 @@ public:
 
     // 解析参数并执行
     auto args = parse_args(call.args_json);
+
+    // Validate required parameters
+    auto schema = tool->schema();
+    if (auto v = validate_tool_args(schema, args); !v)
+      return ToolResult::fail(v.error().message);
+
+    // Execute with timeout protection
     try {
+      if (schema.timeout_ms > 0) {
+        auto future = std::async(std::launch::async,
+                                  [&]() { return tool->execute(args); });
+        auto status = future.wait_for(
+            std::chrono::milliseconds(schema.timeout_ms));
+        if (status == std::future_status::timeout) {
+          return ToolResult::fail(
+              fmt::format("Tool '{}' timed out after {}ms",
+                          call.name, schema.timeout_ms));
+        }
+        return future.get();
+      }
       return tool->execute(args);
     } catch (const std::exception &e) {
       return ToolResult::fail(

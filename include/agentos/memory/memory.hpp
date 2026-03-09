@@ -289,6 +289,11 @@ public:
         hnsw_index_->markDelete(label_it->second);
         label_to_id_.erase(label_it->second);
         id_to_label_.erase(label_it);
+        ++deleted_label_count_;
+        // Compact HNSW when >50% labels are ghosts
+        if (deleted_label_count_ > id_to_label_.size()) {
+          compact_hnsw_locked();
+        }
       }
     }
 
@@ -412,8 +417,44 @@ private:
   std::unique_ptr<hnswlib::HierarchicalNSW<float>> hnsw_index_;
   size_t dim_{0};
   hnswlib::labeltype label_counter_{0};
+  size_t deleted_label_count_{0};
   std::unordered_map<std::string, hnswlib::labeltype> id_to_label_;
   std::unordered_map<hnswlib::labeltype, std::string> label_to_id_;
+
+  // Rebuild HNSW index with only live entries (caller must hold mu_)
+  void compact_hnsw_locked() {
+    if (!hnsw_index_ || id_to_label_.empty()) return;
+    try {
+      size_t live_count = id_to_label_.size();
+      auto new_space = std::make_unique<hnswlib::InnerProductSpace>(dim_);
+      auto new_index = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+          new_space.get(), std::max(live_count * 2, size_t(64)), 16, 200);
+
+      std::unordered_map<std::string, hnswlib::labeltype> new_id_to_label;
+      std::unordered_map<hnswlib::labeltype, std::string> new_label_to_id;
+      hnswlib::labeltype new_label = 0;
+
+      for (auto &[id, entry] : store_) {
+        if (entry.embedding.empty() || entry.embedding.size() != dim_)
+          continue;
+        new_index->addPoint(entry.embedding.data(), new_label);
+        new_id_to_label[id] = new_label;
+        new_label_to_id[new_label] = id;
+        ++new_label;
+      }
+
+      space_ = std::move(new_space);
+      hnsw_index_ = std::move(new_index);
+      id_to_label_ = std::move(new_id_to_label);
+      label_to_id_ = std::move(new_label_to_id);
+      label_counter_ = new_label;
+      deleted_label_count_ = 0;
+
+      LOG_INFO(fmt::format("ShortTermMemory: HNSW compacted to {} live entries", live_count));
+    } catch (const std::exception &e) {
+      LOG_WARN(std::string("ShortTermMemory: HNSW compaction failed: ") + e.what());
+    }
+  }
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -964,9 +1005,13 @@ public:
   }
 
   WorkingMemory &working() { return *working_; }
+  const WorkingMemory &working() const { return *working_; }
   ShortTermMemory &short_term() { return *short_term_; }
+  const ShortTermMemory &short_term() const { return *short_term_; }
   IMemoryStore &long_term() { return *long_term_; }
+  const IMemoryStore &long_term() const { return *long_term_; }
   IGraphMemory &graph() { return *graph_; }
+  const IGraphMemory &graph() const { return *graph_; }
 
 private:
   std::unique_ptr<WorkingMemory> working_;

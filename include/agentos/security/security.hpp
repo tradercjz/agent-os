@@ -231,10 +231,19 @@ public:
     };
 
     DetectionResult scan(std::string_view text) const {
+        // Normalize: lowercase + collapse whitespace (defeat spacing bypass)
         std::string lower;
         lower.reserve(text.size());
-        for (char c : text)
-          lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        bool last_space = false;
+        for (char c : text) {
+          char lc = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+          if (std::isspace(static_cast<unsigned char>(c))) {
+            if (!last_space) { lower += ' '; last_space = true; }
+          } else {
+            lower += lc;
+            last_space = false;
+          }
+        }
 
         std::lock_guard lk(mu_);
         for (const auto& pat : patterns_) {
