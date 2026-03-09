@@ -207,6 +207,7 @@ public:
     if (q_emb.empty() || !hnsw_index_ ||
         hnsw_index_->cur_element_count == 0) {
       // Fallback: linear scan via DuckDB
+      LOG_WARN("DuckDBLTM: HNSW unavailable, falling back to linear scan");
       return search_linear_locked(filter, top_k);
     }
 

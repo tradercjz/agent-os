@@ -314,6 +314,33 @@ public:
 
     DependencyGraph& dep_graph() { return dep_graph_; }
 
+    bool is_running() const { return running_.load(); }
+
+    /// Drain: wait for all pending/running tasks to finish (up to timeout)
+    bool drain(Duration timeout = Duration{10000}) {
+      std::unique_lock lk(mu_);
+      return done_cv_.wait_for(lk, timeout, [this] {
+        for (auto &[id, task] : all_tasks_) {
+          auto st = task->state.load();
+          if (st == TaskState::Pending || st == TaskState::Running)
+            return false;
+        }
+        return true;
+      });
+    }
+
+    /// Number of pending + running tasks
+    size_t active_task_count() const {
+      std::lock_guard lk(mu_);
+      size_t count = 0;
+      for (auto &[id, task] : all_tasks_) {
+        auto st = task->state.load();
+        if (st == TaskState::Pending || st == TaskState::Running)
+          ++count;
+      }
+      return count;
+    }
+
 private:
     // 内部就绪队列入口（需持有 mu_）
     void enqueue_ready_locked(TaskPtr task) {

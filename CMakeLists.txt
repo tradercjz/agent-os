@@ -147,6 +147,7 @@ add_executable(
   tests/test_knowledge_base.cpp
   tests/test_sqlite_store.cpp
   tests/test_duckdb_store.cpp
+  tests/test_sdk.cpp
   tests/test_integration.cpp
   tests/test_logger.cpp
 )

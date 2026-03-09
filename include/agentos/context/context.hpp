@@ -47,21 +47,28 @@ public:
     TokenCount cost = kernel::ILLMBackend::estimate_tokens(msg.content) + 4;
     while (!messages_.empty() && used_tokens_ + cost > max_tokens_) {
       // 找到最佳驱逐候选：非 system、importance 最低
+      // 优化：先快速扫描前半部分（老消息），因为 score = role_w + age*0.01
+      // 越老的非 system 消息得分越低，大多数情况下 victim 在前半段
       auto best = messages_.end();
       float best_score = std::numeric_limits<float>::max();
       float age_factor = 0.0f;
-      for (auto it = messages_.begin(); it != messages_.end(); ++it) {
-        if (it->role == kernel::Role::System)
+      size_t pos = 0;
+      for (auto it = messages_.begin(); it != messages_.end(); ++it, ++pos) {
+        if (it->role == kernel::Role::System) {
+          age_factor += 0.01f;
           continue;
-        // 得分 = 角色权重 + 位置权重（越老得分越低，越容易被驱逐）
+        }
         float role_w = (it->role == kernel::Role::Tool) ? 0.3f :
                        (it->role == kernel::Role::Assistant) ? 0.5f : 0.1f;
         float score = role_w + age_factor;
         if (score < best_score) {
           best_score = score;
           best = it;
+          // Early exit: User role at early position can't be beaten by later messages
+          if (it->role == kernel::Role::User && pos < messages_.size() / 2)
+            break;
         }
-        age_factor += 0.01f; // 越新的位置值越大
+        age_factor += 0.01f;
       }
       if (best == messages_.end())
         break; // 全是 system 消息
@@ -126,11 +133,13 @@ struct ContextSnapshot {
     out += fmt::format("SNAP:agent={},session={}\n", agent_id, session_id);
     for (auto &m : messages) {
       int role_id = static_cast<int>(m.role);
-      // 转义换行
+      // 转义换行和特殊字符
       std::string escaped;
       for (char c : m.content) {
         if (c == '\n')
           escaped += "\\n";
+        else if (c == '\r')
+          escaped += "\\r";
         else if (c == '\\')
           escaped += "\\\\";
         else
@@ -177,6 +186,8 @@ struct ContextSnapshot {
           if (escape) {
             if (c == 'n')
               content += '\n';
+            else if (c == 'r')
+              content += '\r';
             else
               content += c;
             escape = false;

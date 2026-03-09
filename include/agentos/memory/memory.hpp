@@ -245,14 +245,21 @@ public:
       }
 
       if (hnsw_index_ && entry.embedding.size() == dim_) {
-        // 容量不足时动态扩容（与 LTM 一致）
-        if (hnsw_index_->cur_element_count >= hnsw_index_->max_elements_) {
-          hnsw_index_->resizeIndex(hnsw_index_->max_elements_ * 2);
+        try {
+          // 容量不足时动态扩容（与 LTM 一致）
+          if (hnsw_index_->cur_element_count >= hnsw_index_->max_elements_) {
+            hnsw_index_->resizeIndex(hnsw_index_->max_elements_ * 2);
+          }
+          hnswlib::labeltype label = label_counter_++;
+          hnsw_index_->addPoint(entry.embedding.data(), label);
+          id_to_label_[id] = label;
+          label_to_id_[label] = id;
+        } catch (const std::exception &e) {
+          LOG_WARN(std::string("ShortTermMemory: HNSW indexing failed: ") + e.what());
         }
-        hnswlib::labeltype label = label_counter_++;
-        hnsw_index_->addPoint(entry.embedding.data(), label);
-        id_to_label_[id] = label;
-        label_to_id_[label] = id;
+      } else if (hnsw_index_ && !entry.embedding.empty() && entry.embedding.size() != dim_) {
+        LOG_WARN(fmt::format("ShortTermMemory: embedding dim {} != index dim {}, skipping HNSW",
+                             entry.embedding.size(), dim_));
       }
     }
 

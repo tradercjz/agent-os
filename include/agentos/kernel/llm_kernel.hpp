@@ -3,6 +3,7 @@
 // AgentOS :: Module 1 — LLM Kernel
 // LLM 内核抽象：请求/响应类型、后端接口、限流器、Mock/OpenAI 实现
 // ============================================================
+#include <agentos/core/logger.hpp>
 #include <agentos/core/task.hpp>
 #include <agentos/core/types.hpp>
 #include <atomic>
@@ -330,27 +331,28 @@ struct KernelMetrics {
   std::atomic<uint64_t> total_tokens{0};
   std::atomic<uint64_t> rate_limit_hits{0};
   std::atomic<uint64_t> errors{0};
+  std::atomic<uint64_t> retries{0};
 };
 
 class LLMKernel : private NonCopyable {
 public:
   explicit LLMKernel(std::unique_ptr<ILLMBackend> backend,
-                     uint32_t tpm_limit = 100000)
-      : backend_(std::move(backend)), rate_limiter_(tpm_limit) {}
+                     uint32_t tpm_limit = 100000,
+                     uint32_t max_retries = 3)
+      : backend_(std::move(backend)), rate_limiter_(tpm_limit),
+        max_retries_(max_retries) {}
 
-  // 主要入口：带限流的同步推理
+  // 主要入口：带限流 + 重试的同步推理
   Result<LLMResponse> infer(const LLMRequest &req) {
     TokenCount estimated = estimate_request_tokens(req);
     if (auto err = acquire_rate_limit(estimated))
       return make_unexpected(*err);
 
     metrics_.total_requests++;
-    auto result = backend_->complete(req);
-    track_result(result);
-    return result;
+    return with_retry([&]() { return backend_->complete(req); });
   }
 
-  // 流式推理：在推理过程中通过回调函数实时返回生成的 token
+  // 流式推理（不重试，因为 callback 有副作用）
   Result<LLMResponse> stream_infer(const LLMRequest &req,
                                    ILLMBackend::TokenCallback cb) {
     TokenCount estimated = estimate_request_tokens(req);
@@ -421,9 +423,56 @@ private:
     }
   }
 
+  // Check if an error is transient (worth retrying)
+  static bool is_transient_error(const Error &err) {
+    // Retry on backend errors (HTTP 5xx, timeouts, network failures)
+    // Don't retry on auth errors, validation, rate limits, etc.
+    if (err.code == ErrorCode::Timeout) return true;
+    if (err.code != ErrorCode::LLMBackendError) return false;
+    // Check for 5xx patterns in error message
+    auto &msg = err.message;
+    return msg.find("HTTP 5") != std::string::npos ||
+           msg.find("CURLE_") != std::string::npos ||
+           msg.find("HTTP request failed") != std::string::npos ||
+           msg.find("timed out") != std::string::npos;
+  }
+
+  // Retry with exponential backoff for transient errors
+  template <typename Fn>
+  auto with_retry(Fn &&fn) -> decltype(fn()) {
+    Result<LLMResponse> last_result = make_error(ErrorCode::Unknown, "no attempt");
+    for (uint32_t attempt = 0; attempt <= max_retries_; ++attempt) {
+      if (attempt > 0) {
+        // Exponential backoff: 200ms, 400ms, 800ms... + jitter
+        auto base_ms = 200 * (1u << (attempt - 1));
+        auto jitter = static_cast<uint32_t>(
+            std::hash<std::thread::id>{}(std::this_thread::get_id()) % 100);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(base_ms + jitter));
+        metrics_.retries++;
+      }
+      last_result = fn();
+      if (last_result) {
+        track_result(last_result);
+        return last_result;
+      }
+      // Don't retry non-transient errors
+      if (!is_transient_error(last_result.error())) {
+        track_result(last_result);
+        return last_result;
+      }
+      LOG_WARN(fmt::format("LLMKernel: transient error (attempt {}/{}): {}",
+                           attempt + 1, max_retries_ + 1,
+                           last_result.error().message));
+    }
+    track_result(last_result);
+    return last_result;
+  }
+
   std::unique_ptr<ILLMBackend> backend_;
   TokenBucketRateLimiter rate_limiter_;
   KernelMetrics metrics_;
+  uint32_t max_retries_;
 };
 
 } // namespace agentos::kernel

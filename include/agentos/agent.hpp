@@ -12,12 +12,34 @@
 #include <agentos/security/security.hpp>
 #include <agentos/tools/tool_manager.hpp>
 #include <atomic>
+#include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace agentos {
+
+// ─────────────────────────────────────────────────────────────
+// § A.0  Middleware — Pre/Post Hooks for Agent Operations
+// ─────────────────────────────────────────────────────────────
+
+/// Hook context passed to middleware callbacks
+struct HookContext {
+  AgentId agent_id;
+  std::string operation;      // "think", "act", "remember", "recall"
+  std::string input;          // operation input (user msg, tool name, etc.)
+  bool cancelled{false};      // set true in pre-hook to skip operation
+  std::string cancel_reason;
+};
+
+/// Middleware: pre/post callbacks around agent operations
+struct Middleware {
+  std::string name;
+  std::function<void(HookContext &)> before;  // called before operation
+  std::function<void(HookContext &)> after;   // called after operation
+};
 
 // ─────────────────────────────────────────────────────────────
 // § A.1  AgentConfig — Agent 构建配置
@@ -64,6 +86,19 @@ public:
   bool send(AgentId target, std::string topic, std::string payload);
   std::optional<bus::BusMessage> recv(Duration timeout = Duration{3000});
 
+  // ── 异步执行 ────────────────────────────────────────────────
+  /// Run agent asynchronously, returning a future for the result
+  std::future<Result<std::string>> run_async(std::string user_input) {
+    return std::async(std::launch::async,
+                      [this, input = std::move(user_input)]() mutable {
+                        return this->run(std::move(input));
+                      });
+  }
+
+  // ── Middleware ──────────────────────────────────────────────
+  /// Add a middleware (pre/post hooks for think/act/remember/recall)
+  void use(Middleware mw) { middleware_.push_back(std::move(mw)); }
+
   AgentId id() const { return id_; }
   const AgentConfig &config() const { return config_; }
 
@@ -72,6 +107,21 @@ protected:
   AgentConfig config_;
   AgentOS *os_; // 非拥有指针，指向父系统
   std::shared_ptr<bus::Channel> channel_;
+  std::vector<Middleware> middleware_;
+
+  // Run middleware hooks; returns true if operation should proceed
+  bool run_before_hooks(HookContext &ctx) {
+    for (auto &mw : middleware_) {
+      if (mw.before) mw.before(ctx);
+      if (ctx.cancelled) return false;
+    }
+    return true;
+  }
+  void run_after_hooks(HookContext &ctx) {
+    for (auto &mw : middleware_) {
+      if (mw.after) mw.after(ctx);
+    }
+  }
 
   friend class AgentOS;
 };
@@ -188,6 +238,26 @@ public:
   security::SecurityManager *security() { return security_.get(); }
   bus::AgentBus &bus() { return *bus_; }
 
+  // ── Agent 数量查询 ──────────────────────────────────────
+  size_t agent_count() const {
+    std::lock_guard lk(agents_mu_);
+    return agents_.size();
+  }
+
+  // ── 查找 Agent ────────────────────────────────────────────
+  std::shared_ptr<Agent> find_agent(AgentId id) const {
+    std::lock_guard lk(agents_mu_);
+    auto it = agents_.find(id);
+    return it != agents_.end() ? it->second : nullptr;
+  }
+
+  // ── 注册工具快捷方法 ──────────────────────────────────────
+  template <typename Fn>
+  void register_tool(tools::ToolSchema schema, Fn &&handler) {
+    tool_mgr_->registry().register_fn(std::move(schema),
+                                       std::forward<Fn>(handler));
+  }
+
   // ── 系统状态摘要 ────────────────────────────────────────
   std::string status() const {
     std::lock_guard lk(agents_mu_);
@@ -195,6 +265,53 @@ public:
         "AgentOS | agents={} | total_tokens={} | total_requests={}",
         agents_.size(), kernel_->metrics().total_tokens.load(),
         kernel_->metrics().total_requests.load());
+  }
+
+  // ── Health Check ──────────────────────────────────────────
+  struct HealthStatus {
+    bool healthy{true};
+    bool scheduler_running{false};
+    bool backend_available{false};
+    size_t active_agents{0};
+    uint64_t total_requests{0};
+    uint64_t total_errors{0};
+    std::string model;
+
+    std::string to_json() const {
+      nlohmann::json j;
+      j["healthy"] = healthy;
+      j["scheduler"] = scheduler_running;
+      j["backend"] = backend_available;
+      j["agents"] = active_agents;
+      j["requests"] = total_requests;
+      j["errors"] = total_errors;
+      j["model"] = model;
+      return j.dump();
+    }
+  };
+
+  HealthStatus health() const {
+    HealthStatus h;
+    h.scheduler_running = scheduler_->is_running();
+    h.backend_available = true; // backend is constructed if we reach here
+    h.model = kernel_->model_name();
+    h.total_requests = kernel_->metrics().total_requests.load();
+    h.total_errors = kernel_->metrics().errors.load();
+    {
+      std::lock_guard lk(agents_mu_);
+      h.active_agents = agents_.size();
+    }
+    h.healthy = h.scheduler_running && h.backend_available;
+    return h;
+  }
+
+  // ── Graceful shutdown with task draining ───────────────────
+  void graceful_shutdown(Duration timeout = Duration{10000}) {
+    // 1. Stop accepting new agents
+    // 2. Wait for pending tasks to complete
+    scheduler_->drain(timeout);
+    // 3. Shutdown scheduler threads
+    scheduler_->shutdown();
   }
 
 private:
@@ -218,6 +335,11 @@ private:
 
 inline Result<kernel::LLMResponse>
 Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
+  // Middleware: before think
+  HookContext hook_ctx{id_, "think", user_msg, false, {}};
+  if (!run_before_hooks(hook_ctx))
+    return make_error(ErrorCode::Cancelled, hook_ctx.cancel_reason);
+
   // 追加到上下文
   os_->ctx().append(id_, kernel::Message::user(user_msg));
 
@@ -252,11 +374,17 @@ Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
     }
     os_->ctx().append(id_, std::move(m));
   }
+  run_after_hooks(hook_ctx);
   return result;
 }
 
 inline Result<tools::ToolResult>
 Agent::act(const kernel::ToolCallRequest &call) {
+  // Middleware: before act
+  HookContext act_ctx{id_, "act", call.name, false, {}};
+  if (!run_before_hooks(act_ctx))
+    return make_error(ErrorCode::Cancelled, act_ctx.cancel_reason);
+
   // ECL 安全检查
   if (os_->security()) {
     auto check =
@@ -266,6 +394,7 @@ Agent::act(const kernel::ToolCallRequest &call) {
     }
   }
   auto result = os_->tools().dispatch(call);
+  run_after_hooks(act_ctx);
   return result;
 }
 

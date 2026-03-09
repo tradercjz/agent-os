@@ -182,7 +182,7 @@ public:
         for (const auto &[id, content] : chunk_content_) {
           auto doc_it = chunk_docs_.find(id);
           std::string doc_id = doc_it != chunk_docs_.end() ? doc_it->second : "";
-          appender.AppendRow(id, doc_id, content);
+          appender.AppendRow(duckdb::Value(id), duckdb::Value(doc_id), duckdb::Value(content));
         }
         appender.Close();
       }
@@ -191,7 +191,7 @@ public:
       {
         duckdb::Appender appender(con, "hnsw_map");
         for (const auto &[label, chunk_id] : hnsw_id_to_chunk_) {
-          appender.AppendRow(static_cast<uint64_t>(label), chunk_id);
+          appender.AppendRow(duckdb::Value::UBIGINT(static_cast<uint64_t>(label)), duckdb::Value(chunk_id));
         }
         appender.Close();
       }
