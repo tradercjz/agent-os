@@ -1,4 +1,5 @@
 #include <agentos/kernel/llm_kernel.hpp>
+#include <algorithm>
 #include <curl/curl.h>
 #include <stdexcept>
 #include <string>
