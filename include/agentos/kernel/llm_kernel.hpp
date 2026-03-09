@@ -104,8 +104,8 @@ struct EmbeddingResponse {
 class TokenBucketRateLimiter {
 public:
   explicit TokenBucketRateLimiter(uint32_t tpm_limit)
-      : tpm_limit_(tpm_limit), bucket_(tpm_limit),
-        refill_rate_(static_cast<double>(tpm_limit) / 60.0),
+      : tpm_limit_(std::max(tpm_limit, 1u)), bucket_(tpm_limit_),
+        refill_rate_(static_cast<double>(tpm_limit_) / 60.0),
         last_refill_(Clock::now()) {}
 
   // 尝试消耗 n 个 token；失败时返回需等待时长
@@ -121,9 +121,10 @@ public:
       bucket_ -= n;
       return {true, Duration{0}};
     }
-    // 计算需要等待多少毫秒
+    // 计算需要等待多少毫秒（clamp to sane range）
     double deficit = n - bucket_;
-    auto wait_ms = static_cast<int64_t>(deficit / refill_rate_ * 1000.0);
+    auto wait_ms = static_cast<int64_t>(
+        std::clamp(deficit / refill_rate_ * 1000.0, 0.0, 300000.0)); // max 5 min
     return {false, Duration{wait_ms}};
   }
 

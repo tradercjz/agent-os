@@ -56,6 +56,10 @@ public:
     // 添加依赖：task_id 依赖 dep_id（dep_id 必须先完成）
     Result<void> add_dependency(TaskId task_id, TaskId dep_id) {
         std::lock_guard lk(mu_);
+        // Cap DAG size to prevent memory exhaustion
+        if (nodes_.size() > 100000 && !nodes_.contains(task_id))
+          return make_error(ErrorCode::ResourceExhausted,
+                            "Dependency graph node limit exceeded (100000)");
         nodes_[task_id].deps.insert(dep_id);
         // 检测循环依赖
         if (has_cycle_locked()) {

@@ -335,6 +335,9 @@ private:
 
 inline Result<kernel::LLMResponse>
 Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
+  if (!os_)
+    return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
+
   // Middleware: before think
   HookContext hook_ctx{id_, "think", user_msg, false, {}};
   if (!run_before_hooks(hook_ctx))
@@ -380,6 +383,9 @@ Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
 
 inline Result<tools::ToolResult>
 Agent::act(const kernel::ToolCallRequest &call) {
+  if (!os_)
+    return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
+
   // Middleware: before act
   HookContext act_ctx{id_, "act", call.name, false, {}};
   if (!run_before_hooks(act_ctx))
@@ -400,6 +406,8 @@ Agent::act(const kernel::ToolCallRequest &call) {
 
 inline Result<std::string> Agent::remember(std::string content,
                                            float importance) {
+  if (!os_)
+    return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
   kernel::EmbeddingRequest req{{content}, ""};
   auto emb_res = os_->kernel().embed(req);
   memory::Embedding emb;
@@ -414,6 +422,8 @@ inline Result<std::string> Agent::remember(std::string content,
 
 inline Result<std::vector<memory::SearchResult>>
 Agent::recall(std::string_view query, size_t k) {
+  if (!os_)
+    return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
   if (query.empty())
     return make_error(ErrorCode::InvalidArgument, "recall: query must not be empty");
   kernel::EmbeddingRequest req{{std::string(query)}, ""};
@@ -431,6 +441,7 @@ Agent::recall(std::string_view query, size_t k) {
 
 inline bool Agent::send(AgentId target, std::string topic,
                         std::string payload) {
+  if (!os_) return false;
   return os_->bus().send(bus::BusMessage::make_request(id_, target, std::move(topic),
                                                        std::move(payload)));
 }

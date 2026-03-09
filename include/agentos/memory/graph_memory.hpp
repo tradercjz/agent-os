@@ -473,11 +473,22 @@ private:
       fs::remove(pending);
     }
 
+    constexpr size_t MAX_GRAPH_NODES = 500000;
+    constexpr size_t MAX_LINE_LENGTH = 1024 * 1024; // 1 MiB per WAL line
+
     std::ifstream ifs(wal_path_);
     std::string line;
     while (std::getline(ifs, line)) {
       if (line.empty())
         continue;
+      if (line.size() > MAX_LINE_LENGTH) {
+        LOG_WARN("GraphMemory: skipping oversized WAL line");
+        continue;
+      }
+      if (nodes_.size() >= MAX_GRAPH_NODES) {
+        LOG_WARN(fmt::format("GraphMemory: node limit ({}) reached, stopping WAL load", MAX_GRAPH_NODES));
+        break;
+      }
 
       // Verify CRC integrity
       std::string verified = verify_wal_line(line);

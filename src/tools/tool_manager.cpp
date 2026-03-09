@@ -9,9 +9,11 @@ namespace agentos::tools {
 // ---- ShellTool Implementation ----
 ToolResult ShellTool::execute(const ParsedArgs &args) {
   auto cmd = args.get("cmd");
+  if (cmd.empty())
+    return ToolResult::fail("Command must not be empty");
   // 提取第一个词（命令名）
   std::string cmd_name = cmd.substr(0, cmd.find(' '));
-  if (!allowed_cmds_.contains(cmd_name)) {
+  if (cmd_name.empty() || !allowed_cmds_.contains(cmd_name)) {
     return ToolResult::fail(
         fmt::format("Command '{}' not in allowlist", cmd_name));
   }

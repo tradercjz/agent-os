@@ -451,8 +451,9 @@ public:
     // Execute with timeout protection
     try {
       if (schema.timeout_ms > 0) {
+        // Capture by value to avoid dangling references in async context
         auto future = std::async(std::launch::async,
-                                  [&]() { return tool->execute(args); });
+                                  [tool, args]() { return tool->execute(args); });
         auto status = future.wait_for(
             std::chrono::milliseconds(schema.timeout_ms));
         if (status == std::future_status::timeout) {

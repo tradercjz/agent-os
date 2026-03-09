@@ -20,6 +20,8 @@ struct CurlHandle {
     if (handle) {
       curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, errbuf);
       curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L); // 多线程安全
+      curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L); // TLS peer verification
+      curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L); // hostname verification
     }
   }
   ~CurlHandle() {
@@ -163,6 +165,14 @@ size_t stream_write_callback(void *contents, size_t size, size_t nmemb,
   auto *ctx = static_cast<StreamContext *>(userp);
   size_t total = size * nmemb;
 
+  // Safety: cap line buffer at 1 MiB to prevent DoS via no-newline streams
+  constexpr size_t MAX_LINE_BUFFER = 1024 * 1024;
+  if (ctx->line_buffer.size() + total > MAX_LINE_BUFFER) {
+    ctx->response->content += "[stream error: line buffer overflow]";
+    ctx->done = true;
+    return 0; // Signal curl to abort
+  }
+
   ctx->line_buffer.append(static_cast<char *>(contents), total);
 
   // 处理所有完整行
@@ -249,8 +259,13 @@ std::string OpenAIBackend::build_request_json(const LLMRequest &req) const {
   root_obj["max_tokens"] = req.max_tokens;
 
   if (req.tools_json && !req.tools_json->empty()) {
-    root_obj["tools"] = Json::parse(*req.tools_json);
-    root_obj["tool_choice"] = "auto";
+    try {
+      root_obj["tools"] = Json::parse(*req.tools_json);
+      root_obj["tool_choice"] = "auto";
+    } catch (const std::exception &e) {
+      LOG_WARN(fmt::format("Failed to parse tools_json: {}", e.what()));
+      // Proceed without tools rather than crash
+    }
   }
 
   return root_obj.dump();

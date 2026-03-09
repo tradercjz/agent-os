@@ -33,7 +33,7 @@ public:
   bool try_add(const kernel::Message &msg) {
     TokenCount cost =
         kernel::ILLMBackend::estimate_tokens(msg.content) + 4; // 角色 overhead
-    if (used_tokens_ + cost > max_tokens_)
+    if (used_tokens_ + cost > max_tokens_ || messages_.size() >= kMaxMessages)
       return false;
     messages_.push_back(msg);
     used_tokens_ += cost;
@@ -110,6 +110,7 @@ public:
   }
 
 private:
+  static constexpr size_t kMaxMessages = 50000; // safety cap independent of token count
   TokenCount max_tokens_;
   TokenCount used_tokens_{0};
   std::deque<kernel::Message> messages_;

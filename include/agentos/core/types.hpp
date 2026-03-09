@@ -62,6 +62,7 @@ enum class ErrorCode : int {
   SandboxViolation,
   MemoryReadFailed,
   MemoryWriteFailed,
+  ResourceExhausted,
 };
 
 struct Error {
