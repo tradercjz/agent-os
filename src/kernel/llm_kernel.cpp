@@ -145,10 +145,10 @@ struct StreamContext {
         auto &usage = j["usage"];
         if (usage.contains("prompt_tokens") &&
             usage["prompt_tokens"].is_number_integer())
-          response->prompt_tokens = usage["prompt_tokens"].get<int>();
+          response->prompt_tokens = static_cast<uint32_t>(std::max(0, usage["prompt_tokens"].get<int>()));
         if (usage.contains("completion_tokens") &&
             usage["completion_tokens"].is_number_integer())
-          response->completion_tokens = usage["completion_tokens"].get<int>();
+          response->completion_tokens = static_cast<uint32_t>(std::max(0, usage["completion_tokens"].get<int>()));
       }
     } catch (const std::exception &) {
       // 忽略单个 SSE chunk 的解析错误，继续处理后续数据
@@ -297,10 +297,10 @@ OpenAIBackend::parse_response(const std::string &json_str) const {
       auto &usage = j["usage"];
       if (usage.contains("prompt_tokens") &&
           usage["prompt_tokens"].is_number_integer())
-        resp.prompt_tokens = usage["prompt_tokens"].get<int>();
+        resp.prompt_tokens = static_cast<uint32_t>(std::max(0, usage["prompt_tokens"].get<int>()));
       if (usage.contains("completion_tokens") &&
           usage["completion_tokens"].is_number_integer())
-        resp.completion_tokens = usage["completion_tokens"].get<int>();
+        resp.completion_tokens = static_cast<uint32_t>(std::max(0, usage["completion_tokens"].get<int>()));
     }
   } catch (const Json::exception &e) {
     return make_error(ErrorCode::LLMBackendError,
@@ -373,13 +373,16 @@ Result<LLMResponse> OpenAIBackend::complete(const LLMRequest &req) {
 
 Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
                                           TokenCallback cb) {
-  // 构建请求体，注入 stream 标志
-  std::string body = build_request_json(req);
-  auto obj_end = body.rfind('}');
-  if (obj_end != std::string::npos) {
-    body.insert(obj_end,
-                ",\"stream\":true"
-                ",\"stream_options\":{\"include_usage\":true}");
+  // 构建请求体，注入 stream 标志（通过 JSON 库安全修改）
+  std::string body;
+  try {
+    Json j = Json::parse(build_request_json(req));
+    j["stream"] = true;
+    j["stream_options"] = {{"include_usage", true}};
+    body = j.dump();
+  } catch (const std::exception &e) {
+    return make_error(ErrorCode::LLMBackendError,
+                      fmt::format("Failed to build stream request: {}", e.what()));
   }
 
   CurlHandle curl;
@@ -461,7 +464,7 @@ Result<EmbeddingResponse> OpenAIBackend::embed(const EmbeddingRequest &req) {
     Json j = Json::parse(json_str);
     if (j.contains("usage") && j["usage"].contains("total_tokens") &&
         j["usage"]["total_tokens"].is_number_integer()) {
-      resp.total_tokens = j["usage"]["total_tokens"].get<int>();
+      resp.total_tokens = static_cast<uint32_t>(std::max(0, j["usage"]["total_tokens"].get<int>()));
     }
     if (j.contains("data") && j["data"].is_array()) {
       for (auto &item : j["data"]) {

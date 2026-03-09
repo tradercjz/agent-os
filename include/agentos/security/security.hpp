@@ -407,8 +407,8 @@ private:
 
     void audit(std::string msg) {
         if (audit_log_.size() >= max_audit_log_size_) {
-            audit_log_.erase(audit_log_.begin(),
-                             audit_log_.begin() + static_cast<long>(max_audit_log_size_ / 2));
+            auto half = static_cast<std::ptrdiff_t>(max_audit_log_size_ / 2);
+            audit_log_.erase(audit_log_.begin(), audit_log_.begin() + half);
         }
         audit_log_.push_back(std::move(msg));
     }
