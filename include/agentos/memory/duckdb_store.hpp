@@ -3,7 +3,13 @@
 // AgentOS :: DuckDB-backed Long-Term Memory Store
 // 替代 SQLite 的高性能列存持久化方案
 // 支持向量存储 + 结构化 SQL 查询 + 分析聚合
+//
+// 通过 cmake -DAGENTOS_NO_DUCKDB=ON 禁用此模块
 // ============================================================
+
+#ifdef AGENTOS_NO_DUCKDB
+#error "duckdb_store.hpp included but AGENTOS_NO_DUCKDB is defined. Do not include this header when DuckDB is disabled."
+#endif
 
 #include "agentos/core/logger.hpp"
 #include "agentos/core/types.hpp"

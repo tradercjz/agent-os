@@ -95,15 +95,20 @@ find_package(CURL REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 
-# ---- DuckDB ----
-# macOS: brew install duckdb
-# Linux: see https://duckdb.org/docs/installation
-find_library(DUCKDB_LIBRARY duckdb HINTS /usr/local/lib /opt/homebrew/lib /usr/lib64 /usr/lib)
-find_path(DUCKDB_INCLUDE_DIR duckdb.hpp HINTS /usr/local/include /opt/homebrew/include /usr/include)
-if(NOT DUCKDB_LIBRARY OR NOT DUCKDB_INCLUDE_DIR)
-    message(FATAL_ERROR "DuckDB not found. Install via: brew install duckdb")
+# ---- DuckDB (optional) ----
+# Disable with -DAGENTOS_NO_DUCKDB=ON (e.g. for DolphinDB plugin builds)
+option(AGENTOS_NO_DUCKDB "Disable DuckDB backend (use FileBased/SQLite only)" OFF)
+if(NOT AGENTOS_NO_DUCKDB)
+    find_library(DUCKDB_LIBRARY duckdb HINTS /usr/local/lib /opt/homebrew/lib /usr/lib64 /usr/lib)
+    find_path(DUCKDB_INCLUDE_DIR duckdb.hpp HINTS /usr/local/include /opt/homebrew/include /usr/include)
+    if(NOT DUCKDB_LIBRARY OR NOT DUCKDB_INCLUDE_DIR)
+        message(FATAL_ERROR "DuckDB not found. Install via: brew install duckdb\n"
+                "Or disable with: cmake -DAGENTOS_NO_DUCKDB=ON")
+    endif()
+    message(STATUS "DuckDB: ${DUCKDB_LIBRARY}")
+else()
+    message(STATUS "DuckDB: DISABLED (AGENTOS_NO_DUCKDB=ON)")
 endif()
-message(STATUS "DuckDB: ${DUCKDB_LIBRARY}")
 
 # ---- GoogleTest ----
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
@@ -163,11 +168,16 @@ set(AGENTOS_SOURCES
 add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(agentos PUBLIC ${SQLITE3_INCLUDE_DIRS})
-target_include_directories(agentos PUBLIC ${DUCKDB_INCLUDE_DIR})
-target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_LIBRARIES} ${DUCKDB_LIBRARY})
+target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_LIBRARIES})
 
-# Treat DuckDB headers as SYSTEM includes to suppress third-party warnings
-target_include_directories(agentos SYSTEM PUBLIC ${DUCKDB_INCLUDE_DIR})
+if(NOT AGENTOS_NO_DUCKDB)
+    target_include_directories(agentos PUBLIC ${DUCKDB_INCLUDE_DIR})
+    target_link_libraries(agentos PUBLIC ${DUCKDB_LIBRARY})
+    # Treat DuckDB headers as SYSTEM includes to suppress third-party warnings
+    target_include_directories(agentos SYSTEM PUBLIC ${DUCKDB_INCLUDE_DIR})
+else()
+    target_compile_definitions(agentos PUBLIC AGENTOS_NO_DUCKDB=1)
+endif()
 
 # R6-2: Production-grade: treat warnings as errors
 target_compile_options(agentos PRIVATE
@@ -214,8 +224,7 @@ add_executable(benchmark_csr_graph tests/benchmark_csr_graph.cpp)
 target_link_libraries(benchmark_csr_graph PRIVATE agentos)
 
 enable_testing()
-add_executable(
-  test_agentos
+set(TEST_SOURCES
   tests/test_graph_memory.cpp
   tests/test_llm_kernel.cpp
   tests/test_memory_system.cpp
@@ -230,11 +239,14 @@ add_executable(
   tests/test_csr_graph.cpp
   tests/test_knowledge_base.cpp
   tests/test_sqlite_store.cpp
-  tests/test_duckdb_store.cpp
   tests/test_sdk.cpp
   tests/test_integration.cpp
   tests/test_logger.cpp
 )
+if(NOT AGENTOS_NO_DUCKDB)
+  list(APPEND TEST_SOURCES tests/test_duckdb_store.cpp)
+endif()
+add_executable(test_agentos ${TEST_SOURCES})
 target_link_libraries(test_agentos PRIVATE agentos GTest::gtest_main GTest::gtest)
 include(GoogleTest)
 gtest_discover_tests(test_agentos)
@@ -257,27 +269,34 @@ install(DIRECTORY include/agentos
 # ── DolphinDB Plugin (optional) ──
 option(AGENTOS_BUILD_DOLPHINDB_PLUGIN "Build DolphinDB plugin adapter" ON)
 if(AGENTOS_BUILD_DOLPHINDB_PLUGIN)
+    # 插件构建要求 AGENTOS_NO_DUCKDB=ON，否则 DolphinDB dlopen 时找不到 DuckDB 符号
+    if(NOT AGENTOS_NO_DUCKDB)
+        message(STATUS "DolphinDB plugin: auto-enabling AGENTOS_NO_DUCKDB (DuckDB not needed for plugin)")
+        # 注意：如果已经配置了 DuckDB，这里改不了。
+        # 建议直接用: cmake -DAGENTOS_BUILD_DOLPHINDB_PLUGIN=ON -DAGENTOS_NO_DUCKDB=ON
+    endif()
+
     # Check if DolphinDB SDK is available
-    set(DOLPHINDB_SDK_DIR "${CMAKE_SOURCE_DIR}/third_party/dolphindb_sdk/3.00.5")
-    set(DOLPHINDB_INCLUDE_DIR "${DOLPHINDB_SDK_DIR}/include")
-    set(DOLPHINDB_LIB_DIR "${DOLPHINDB_SDK_DIR}/lib")
-    
+    set(DOLPHINDB_SDK_DIR "${CMAKE_SOURCE_DIR}/third_party/dolphindb_sdk/3.00.5" CACHE PATH "DolphinDB SDK directory")
+    set(DOLPHINDB_INCLUDE_DIR "${DOLPHINDB_SDK_DIR}/include" CACHE PATH "DolphinDB include directory")
+    set(DOLPHINDB_LIB_DIR "${DOLPHINDB_SDK_DIR}/lib" CACHE PATH "DolphinDB lib directory")
+
     if(EXISTS "${DOLPHINDB_INCLUDE_DIR}/CoreConcept.h" AND EXISTS "${DOLPHINDB_LIB_DIR}/libDolphinDB.so")
         message(STATUS "DolphinDB SDK found: ${DOLPHINDB_SDK_DIR}")
         add_subdirectory(plugins/dolphindb)
-        
+
         # Set plugin output directory to build/plugins
         set_target_properties(PluginAgentOS PROPERTIES
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
         )
-        
+
         # Install plugin alongside agentos library
         install(TARGETS PluginAgentOS
             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/plugins
             RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/plugins
         )
-        
+
         message(STATUS "DolphinDB plugin will be built: ${CMAKE_BINARY_DIR}/plugins/libPluginAgentOS.so")
     else()
         message(WARNING "DolphinDB SDK not found. Plugin will not be built.")

@@ -17,10 +17,7 @@
 #include <Util.h>          // createVector, createTable, createResource, etc.
 #include <Exceptions.h>    // IllegalArgumentException
 
-// 临时禁用 DuckDB 包含
-#define DUCKDB_HPP_DISABLED
-
-// 包含必要的 AgentOS 头文件
+// AgentOS 头文件（通过 cmake -DAGENTOS_NO_DUCKDB=ON 排除 DuckDB 依赖）
 #include <agentos/agentos.hpp>
 
 using namespace ddb;

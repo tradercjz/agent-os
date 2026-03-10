@@ -119,18 +119,15 @@ else()
     find_package(CURL REQUIRED)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SQLITE3 REQUIRED sqlite3)
-    find_library(DUCKDB_LIBRARY duckdb HINTS /usr/local/lib /opt/homebrew/lib /usr/lib64 /usr/lib)
-    find_library(DUCKDB_LIBRARY_ALT duckdb HINTS /opt/homebrew/lib /usr/local/lib /usr/lib64 /usr/lib)
-    
+
     include(FetchContent)
-    
+
     # ---- hnswlib ----
     FetchContent_Declare(
       hnswlib
       URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.zip
     )
     FetchContent_MakeAvailable(hnswlib)
-    # Mark hnswlib includes as SYSTEM to suppress third-party warnings under -Werror
     get_target_property(_hnswlib_dirs hnswlib INTERFACE_INCLUDE_DIRECTORIES)
     if(_hnswlib_dirs)
         set_target_properties(hnswlib PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_hnswlib_dirs}")
@@ -149,21 +146,16 @@ else()
         hnswlib::hnswlib
         ${SQLITE3_LIBRARIES}
     )
-    
-    # 总是链接 DuckDB（如果找到的话）
-    if(DUCKDB_LIBRARY OR DUCKDB_LIBRARY_ALT)
-        set(DUCKDB_LIB_TO_LINK ${DUCKDB_LIBRARY})
-        if(NOT DUCKDB_LIB_TO_LINK AND DUCKDB_LIBRARY_ALT)
-            set(DUCKDB_LIB_TO_LINK ${DUCKDB_LIBRARY_ALT})
-        endif()
-        target_link_libraries(PluginAgentOS PRIVATE ${DUCKDB_LIB_TO_LINK})
-        message(STATUS "DuckDB library: ${DUCKDB_LIB_TO_LINK}")
-    else()
-        message(WARNING "DuckDB library not found - some features may not work")
-    endif()
     target_include_directories(PluginAgentOS PRIVATE
         ${SQLITE3_INCLUDE_DIRS}
     )
+
+    # DuckDB: 插件默认不需要 DuckDB（使用 FileBased/SQLite LTM）
+    # 如果确实需要 DuckDB 后端，取消下面的注释
+    # find_library(DUCKDB_LIBRARY duckdb HINTS /usr/local/lib /usr/lib64)
+    # if(DUCKDB_LIBRARY)
+    #     target_link_libraries(PluginAgentOS PRIVATE ${DUCKDB_LIBRARY})
+    # endif()
 endif()
 
 if(DOLPHINDB_LIBRARY)
