@@ -1,0 +1,92 @@
+// ============================================================
+// AgentOS DolphinDB Plugin — 使用示例
+// 在 DolphinDB 控制台或脚本中执行
+// ============================================================
+
+// ── 1. 加载插件 ──
+loadPlugin("/path/to/plugins/AgentOS/PluginAgentOS.txt")
+
+// ── 2. 初始化 AgentOS ──
+// Mock 模式（无需 API key，用于开发测试）
+agentOS_init("{}")
+
+// 或连接真实 LLM
+// agentOS_init('{"api_key":"sk-xxx","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini"}')
+
+// 或连接国内大模型（硅基流动/DeepSeek 等 OpenAI 兼容接口）
+// agentOS_init('{"api_key":"sk-xxx","base_url":"https://api.siliconflow.cn/v1","model":"deepseek-chat"}')
+
+// ── 3. 健康检查 ──
+agentOS_health()
+// 返回: {"healthy":true,"scheduler":true,"backend":true,...}
+
+agentOS_status()
+// 返回: "AgentOS | agents=0 | total_tokens=0 | total_requests=0"
+
+// ── 4. 单轮对话 ──
+agentOS_ask("什么是 DolphinDB？")
+// 返回: 自然语言回答
+
+// 带自定义 system prompt
+agentOS_ask("分析这段数据的趋势", "你是一个金融数据分析师，用中文回答")
+
+// ── 5. 流式对话（逐 token 打印到控制台）──
+agentOS_askStream("用三句话介绍时序数据库")
+
+// ── 6. 结构化对话（返回表格，含工具调用记录）──
+result = agentOS_askTable("查询最新的市场数据")
+select * from result
+// 输出: role | content | tool_name | tool_args | tool_result
+
+// ── 7. 记忆系统 ──
+// 存入记忆
+agentOS_remember("DolphinDB 是一款高性能时序数据库", 0.8)
+agentOS_remember("AgentOS 支持 ReAct 循环", 0.7)
+agentOS_remember("TSDB 适合处理金融 tick 数据", 0.9)
+
+// 从记忆中检索
+recallResult = agentOS_recall("时序数据库有什么特点", 3)
+select * from recallResult
+// 输出: content | score | source | timestamp
+
+// ── 8. 知识图谱 ──
+// 添加节点
+agentOS_graphAddNode('{"id":"DolphinDB","type":"database","properties":{"category":"TSDB","language":"C++"}}')
+agentOS_graphAddNode('{"id":"AgentOS","type":"framework","properties":{"category":"LLM Agent","language":"C++"}}')
+agentOS_graphAddNode('{"id":"时序数据","type":"concept","properties":{"domain":"数据库"}}')
+
+// 添加边
+agentOS_graphAddEdge('{"source":"DolphinDB","target":"时序数据","relation":"处理","weight":0.95}')
+agentOS_graphAddEdge('{"source":"AgentOS","target":"DolphinDB","relation":"集成","weight":0.8}')
+
+// 查询图谱
+graphResult = agentOS_graphQuery("DolphinDB", 10)
+select * from graphResult
+// 输出: source | relation | target | score
+
+// ── 9. 注册自定义工具（DolphinDB 函数作为 Agent 工具）──
+// 先定义 DolphinDB 函数
+def queryLatestPrice(params) {
+    ticker = params["ticker"]
+    return exec last price from loadTable("dfs://market", "trades") where symbol = ticker
+}
+
+// 注册为 AgentOS 工具
+agentOS_registerTool(
+    '{"id":"query_price","description":"查询最新股票价格","params":[{"name":"ticker","type":"string","description":"股票代码"}]}',
+    "queryLatestPrice"
+)
+
+// ── 10. 持久 Agent（多轮对话）──
+// 创建 Agent
+handle = agentOS_createAgent('{"name":"金融分析师","role_prompt":"你是一个专业的金融数据分析师","context_limit":16384}')
+
+// 使用 Agent 进行多轮对话
+result1 = agentOS_askTable("帮我分析今天的市场走势", '{"agent_handle":' + string(handle) + '}')
+result2 = agentOS_askTable("刚才的分析中，哪些因素最重要？", '{"agent_handle":' + string(handle) + '}')
+
+// 销毁 Agent
+agentOS_destroyAgent(handle)
+
+// ── 11. 关闭 ──
+agentOS_close()

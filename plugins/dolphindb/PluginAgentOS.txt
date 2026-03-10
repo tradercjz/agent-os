@@ -1,0 +1,15 @@
+agentOS_init,operator
+agentOS_close,operator
+agentOS_ask,operator
+agentOS_askStream,operator
+agentOS_askTable,operator
+agentOS_remember,operator
+agentOS_recall,operator
+agentOS_graphAddNode,operator
+agentOS_graphAddEdge,operator
+agentOS_graphQuery,operator
+agentOS_health,operator
+agentOS_status,operator
+agentOS_registerTool,operator
+agentOS_createAgent,operator
+agentOS_destroyAgent,operator

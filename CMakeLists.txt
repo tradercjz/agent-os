@@ -247,6 +247,12 @@ install(DIRECTORY include/agentos
     FILES_MATCHING PATTERN "*.hpp"
 )
 
+# ── DolphinDB Plugin (optional) ──
+option(AGENTOS_BUILD_DOLPHINDB_PLUGIN "Build DolphinDB plugin adapter" OFF)
+if(AGENTOS_BUILD_DOLPHINDB_PLUGIN)
+    add_subdirectory(plugins/dolphindb)
+endif()
+
 # ── Build info ──
 message(STATUS "AgentOS ${PROJECT_VERSION} | C++${CMAKE_CXX_STANDARD} | ${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "Targets: agentos_demo (Mock), openai_demo (Real LLM via curl)")
