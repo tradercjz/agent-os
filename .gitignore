@@ -72,3 +72,5 @@ build_release/*
 
 # Reference system (exploration, not part of core)
 refSys/
+
+build_plugin/*
