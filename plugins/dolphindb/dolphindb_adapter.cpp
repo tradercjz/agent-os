@@ -21,6 +21,17 @@ using std::vector;
 
 namespace agentos::dolphindb {
 
+// 统一异常转换宏：捕获所有非 DolphinDB 标准异常，转为 RuntimeException
+#define DDB_SAFE_BEGIN  try {
+#define DDB_SAFE_END(func_name) \
+    } catch (const IllegalArgumentException&) { throw; } \
+      catch (const RuntimeException&) { throw; } \
+      catch (const std::exception& e) { \
+          throw RuntimeException(std::string(func_name " error: ") + e.what()); \
+      } catch (...) { \
+          throw RuntimeException(func_name ": unknown internal error"); \
+      }
+
 // ─────────────────────────────────────────────────────────────
 // § D.1  PluginRuntime 实现
 // ─────────────────────────────────────────────────────────────
@@ -280,28 +291,41 @@ ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
         system_prompt = args[1]->getString();
     }
 
-    auto& os = PluginRuntime::instance().os();
+    DDB_SAFE_BEGIN
+        auto& os = PluginRuntime::instance().os();
 
-    AgentConfig cfg;
-    cfg.name = "ddb_ask_temp";
-    cfg.role_prompt = system_prompt.empty()
-        ? "You are a helpful AI assistant integrated with DolphinDB."
-        : system_prompt;
-    cfg.context_limit = 8192;
+        kernel::LLMRequest req;
+        req.messages.push_back(kernel::Message::system(
+            system_prompt.empty()
+                ? "You are a helpful AI assistant integrated with DolphinDB."
+                : system_prompt));
+        req.messages.push_back(kernel::Message::user(question));
 
-    auto agent = os.create_agent(cfg);
-    auto result = agent->run(question);
-    os.destroy_agent(agent->id());
+        // 用 stream_infer 减少首 token 延迟（内部 HTTP 分块读取）
+        std::string full_response;
+        auto result = os.kernel().stream_infer(req,
+            [&full_response](std::string_view token) {
+                full_response += std::string(token);
+            });
 
-    std::string answer = unwrap_or_throw("agentOS::ask", std::move(result));
-    return new String(answer);
+        auto resp = unwrap_or_throw("agentOS::ask", std::move(result));
+        std::string answer = full_response.empty() ? resp.content : full_response;
+
+        if (answer.empty()) {
+            LOG_WARN("agentOS::ask: LLM returned empty content");
+            return new String("[empty response from LLM]");
+        }
+        return new String(answer);
+    DDB_SAFE_END("agentOS::ask")
 }
 
-// ─── agentOS::askStream(question, [systemPrompt]) ────────────
+// ─── agentOS::askStream(question, [systemPrompt], [callback]) ─
 
 ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args) {
-    (void)heap;
-    const string usage = "Usage: agentOS::askStream(question, [systemPrompt])";
+    const string usage =
+        "Usage: agentOS::askStream(question, [systemPrompt], [callbackFunc])\n"
+        "  callbackFunc: a DolphinDB function(token) called for each token chunk.\n"
+        "  Example: agentOS::askStream(`What is DolphinDB?`, , print)";
     if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
         throw IllegalArgumentException("agentOS::askStream", usage);
 
@@ -310,29 +334,54 @@ ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args) {
         throw IllegalArgumentException("agentOS::askStream", usage);
 
     std::string system_prompt;
-    if (args.size() >= 2 && args[1]->getType() == DT_STRING) {
+    if (args.size() >= 2 && !args[1]->isNull() && args[1]->getType() == DT_STRING) {
         system_prompt = args[1]->getString();
     }
 
-    auto& os = PluginRuntime::instance().os();
+    // 第三个参数：回调函数（可选）
+    // DolphinDB 传函数时，ConstantSP 的 type 为 DT_FUNCTIONDEF
+    FunctionDefSP callback;
+    if (args.size() >= 3 && !args[2]->isNull() && args[2]->getType() == DT_FUNCTIONDEF) {
+        callback = args[2];
+    }
 
-    kernel::LLMRequest req;
-    req.messages.push_back(kernel::Message::system(
-        system_prompt.empty()
-            ? "You are a helpful AI assistant integrated with DolphinDB."
-            : system_prompt));
-    req.messages.push_back(kernel::Message::user(question));
+    DDB_SAFE_BEGIN
+        auto& os = PluginRuntime::instance().os();
 
-    std::string full_response;
-    auto result = os.kernel().stream_infer(req,
-        [&full_response](std::string_view token) {
-            std::cout << token << std::flush;
+        kernel::LLMRequest req;
+        req.messages.push_back(kernel::Message::system(
+            system_prompt.empty()
+                ? "You are a helpful AI assistant integrated with DolphinDB."
+                : system_prompt));
+        req.messages.push_back(kernel::Message::user(question));
+
+        std::string full_response;
+
+        // 如果有回调函数，每个 token 调用回调推给客户端
+        auto token_handler = [&](std::string_view token) {
             full_response += std::string(token);
-        });
-    std::cout << std::endl;
+            if (!callback.isNull()) {
+                try {
+                    vector<ConstantSP> cb_args{new String(std::string(token))};
+                    callback->call(heap, cb_args);
+                } catch (const std::exception& e) {
+                    LOG_WARN("agentOS::askStream callback error: " +
+                             std::string(e.what()));
+                }
+            }
+        };
 
-    auto resp = unwrap_or_throw("agentOS::askStream", std::move(result));
-    return new String(full_response.empty() ? resp.content : full_response);
+        auto result = os.kernel().stream_infer(req, token_handler);
+
+        auto resp = unwrap_or_throw("agentOS::askStream", std::move(result));
+        std::string answer = full_response.empty() ? resp.content : full_response;
+
+        if (answer.empty()) {
+            LOG_WARN("agentOS::askStream: LLM returned empty content");
+            return new String("[empty response from LLM]");
+        }
+        return new String(answer);
+    DDB_SAFE_END("agentOS::askStream")
 }
 
 // ─── agentOS::askTable(question, [configJson], [agentHandle]) ─
@@ -348,6 +397,7 @@ ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args) {
     if (question.empty())
         throw IllegalArgumentException("agentOS::askTable", usage);
 
+  DDB_SAFE_BEGIN
     // 解析可选配置
     std::string system_prompt = "You are a helpful AI assistant integrated with DolphinDB.";
     int max_steps = 10;
@@ -468,6 +518,7 @@ ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args) {
     table->append(cols, insertedRows, errMsg);
 
     return table;
+    DDB_SAFE_END("agentOS::askTable")
 }
 
 // ─── agentOS::remember(content, [importance], [source]) ──────
@@ -494,6 +545,7 @@ ConstantSP agentOSRemember(Heap* heap, vector<ConstantSP>& args) {
         source = args[2]->getString();
     }
 
+    DDB_SAFE_BEGIN
     auto& os = PluginRuntime::instance().os();
 
     // 生成 embedding
@@ -510,6 +562,7 @@ ConstantSP agentOSRemember(Heap* heap, vector<ConstantSP>& args) {
         std::move(content), emb, source, importance);
     std::string id = unwrap_or_throw("agentOS::remember", std::move(result));
     return new String(id);
+    DDB_SAFE_END("agentOS::remember")
 }
 
 // ─── agentOS::recall(query, [topK]) ─────────────────────────
@@ -530,6 +583,7 @@ ConstantSP agentOSRecall(Heap* heap, vector<ConstantSP>& args) {
         if (top_k <= 0) top_k = 5;
     }
 
+    DDB_SAFE_BEGIN
     auto& os = PluginRuntime::instance().os();
 
     kernel::EmbeddingRequest emb_req;
@@ -544,6 +598,7 @@ ConstantSP agentOSRecall(Heap* heap, vector<ConstantSP>& args) {
     auto results = unwrap_or_throw("agentOS::recall",
         os.memory().recall(emb, {}, static_cast<size_t>(top_k)));
     return search_results_to_table(results);
+    DDB_SAFE_END("agentOS::recall")
 }
 
 // ─── agentOS::graphAddNode(nodeJson) ─────────────────────────
@@ -570,6 +625,7 @@ ConstantSP agentOSGraphAddNode(Heap* heap, vector<ConstantSP>& args) {
         content_str = j.value("content", "");
     }
 
+    DDB_SAFE_BEGIN
     auto& os = PluginRuntime::instance().os();
     auto& graph = os.memory().graph();
 
@@ -582,6 +638,7 @@ ConstantSP agentOSGraphAddNode(Heap* heap, vector<ConstantSP>& args) {
     unwrap_or_throw("agentOS::graphAddNode", std::move(result));
 
     return new String(node_id);
+    DDB_SAFE_END("agentOS::graphAddNode")
 }
 
 // ─── agentOS::graphAddEdge(edgeJson) ─────────────────────────
@@ -602,6 +659,7 @@ ConstantSP agentOSGraphAddEdge(Heap* heap, vector<ConstantSP>& args) {
         throw IllegalArgumentException("agentOS::graphAddEdge",
             "'source' and 'target' are required");
 
+    DDB_SAFE_BEGIN
     auto& os = PluginRuntime::instance().os();
     auto& graph = os.memory().graph();
 
@@ -615,6 +673,7 @@ ConstantSP agentOSGraphAddEdge(Heap* heap, vector<ConstantSP>& args) {
     unwrap_or_throw("agentOS::graphAddEdge", std::move(result));
 
     return new Bool(true);
+    DDB_SAFE_END("agentOS::graphAddEdge")
 }
 
 // ─── agentOS::graphQuery(nodeIdOrQuery, [maxResults]) ────────
@@ -635,6 +694,7 @@ ConstantSP agentOSGraphQuery(Heap* heap, vector<ConstantSP>& args) {
         if (max_results <= 0) max_results = 10;
     }
 
+    DDB_SAFE_BEGIN
     auto& os = PluginRuntime::instance().os();
     auto& graph = os.memory().graph();
 
@@ -678,6 +738,7 @@ ConstantSP agentOSGraphQuery(Heap* heap, vector<ConstantSP>& args) {
     table->append(cols, insertedRows, errMsg);
 
     return table;
+    DDB_SAFE_END("agentOS::graphQuery")
 }
 
 // ─── agentOS::health() ──────────────────────────────────────
@@ -690,9 +751,11 @@ ConstantSP agentOSHealth(Heap* heap, vector<ConstantSP>& args) {
         return new String("{\"healthy\":false,\"error\":\"not initialized\"}");
     }
 
+    DDB_SAFE_BEGIN
     auto& os = PluginRuntime::instance().os();
     auto status = os.health();
     return new String(status.to_json());
+    DDB_SAFE_END("agentOS::health")
 }
 
 // ─── agentOS::status() ──────────────────────────────────────
@@ -705,8 +768,10 @@ ConstantSP agentOSStatus(Heap* heap, vector<ConstantSP>& args) {
         return new String("AgentOS: not initialized");
     }
 
+    DDB_SAFE_BEGIN
     auto& os = PluginRuntime::instance().os();
     return new String(os.status());
+    DDB_SAFE_END("agentOS::status")
 }
 
 // ─── agentOS::registerTool(schemaJson, callbackName) ─────────
@@ -757,6 +822,7 @@ ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args) {
     schema.timeout_ms = schema_json.value("timeout_ms", 30000u);
     schema.is_dangerous = schema_json.value("is_dangerous", false);
 
+    DDB_SAFE_BEGIN
     auto& os = PluginRuntime::instance().os();
 
     // 捕获 heap 和 callback_name，通过 Session 执行 DolphinDB 函数
@@ -772,7 +838,7 @@ ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args) {
                 for (const auto& [key, value] : args.values) {
                     args_json[key] = value;
                 }
-                
+
                 // 通过 Session 解析并调用 DolphinDB 端定义的函数
                 FunctionDefSP func = session->getFunctionDef(callback_name);
                 if (func.isNull()) {
@@ -803,6 +869,7 @@ ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args) {
         });
 
     return new Bool(true);
+    DDB_SAFE_END("agentOS::registerTool")
 }
 
 // ─── agentOS::createAgent(configJson) ────────────────────────
@@ -829,8 +896,10 @@ ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args) {
         }
     }
 
+    DDB_SAFE_BEGIN
     long long handle = PluginRuntime::instance().create_agent(cfg);
     return new Long(handle);
+    DDB_SAFE_END("agentOS::createAgent")
 }
 
 // ─── agentOS::destroyAgent(handle) ───────────────────────────
@@ -841,9 +910,159 @@ ConstantSP agentOSDestroyAgent(Heap* heap, vector<ConstantSP>& args) {
     if (args.empty())
         throw IllegalArgumentException("agentOS::destroyAgent", usage);
 
+    DDB_SAFE_BEGIN
     long long handle = args[0]->getLong();
     bool ok = PluginRuntime::instance().destroy_agent(handle);
     return new Bool(ok);
+    DDB_SAFE_END("agentOS::destroyAgent")
+}
+
+// ─── agentOS::askAsync(question, [systemPrompt]) ─────────────
+//
+// 异步发起 LLM 流式请求，立即返回 requestId。
+// 后台线程通过 stream_infer 逐 token 写入 AsyncRequest。
+// 前端轮询 agentOS::poll(requestId) 获取增量内容。
+
+ConstantSP agentOSAskAsync(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::askAsync(question, [systemPrompt])";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::askAsync", usage);
+
+    std::string question = args[0]->getString();
+    if (question.empty())
+        throw IllegalArgumentException("agentOS::askAsync", usage);
+
+    std::string system_prompt;
+    if (args.size() >= 2 && !args[1]->isNull() && args[1]->getType() == DT_STRING) {
+        system_prompt = args[1]->getString();
+    }
+
+    // 确保 AgentOS 已初始化
+    auto& os = PluginRuntime::instance().os();
+    (void)os;
+
+    // 创建异步请求
+    auto& mgr = AsyncRequestManager::instance();
+    std::string rid = mgr.create();
+    auto req_ptr = mgr.find(rid);
+
+    // 捕获值到后台线程（不捕获引用，线程生命周期独立）
+    std::string sys_prompt = system_prompt.empty()
+        ? "You are a helpful AI assistant integrated with DolphinDB."
+        : system_prompt;
+
+    req_ptr->worker = std::thread([req_ptr, question, sys_prompt]() {
+        try {
+            auto& os = PluginRuntime::instance().os();
+
+            kernel::LLMRequest llm_req;
+            llm_req.messages.push_back(kernel::Message::system(sys_prompt));
+            llm_req.messages.push_back(kernel::Message::user(question));
+
+            auto result = os.kernel().stream_infer(llm_req,
+                [&req_ptr](std::string_view token) {
+                    req_ptr->append_token(token);
+                });
+
+            if (result.has_value()) {
+                // 如果 stream_infer 返回了内容但 token handler 没收到
+                // （某些后端可能不走 streaming），补充到 content
+                auto& resp = result.value();
+                std::lock_guard lk(req_ptr->mu);
+                if (req_ptr->content.empty() && !resp.content.empty()) {
+                    req_ptr->content = resp.content;
+                    req_ptr->delta = resp.content;
+                }
+            } else {
+                auto& err = result.error();
+                req_ptr->mark_error(
+                    "AgentOS error [" +
+                    std::to_string(static_cast<int>(err.code)) +
+                    "]: " + err.message);
+                return;
+            }
+            req_ptr->mark_done();
+        } catch (const std::exception& e) {
+            req_ptr->mark_error(std::string("Internal error: ") + e.what());
+        } catch (...) {
+            req_ptr->mark_error("Unknown internal error");
+        }
+    });
+
+    return new String(rid);
+}
+
+// ─── agentOS::poll(requestId) ────────────────────────────────
+//
+// 返回 DolphinDB Dictionary:
+//   status : STRING  ("streaming" | "done" | "error")
+//   delta  : STRING  (本次 poll 新增的 tokens)
+//   content: STRING  (到目前为止的完整内容)
+//   done   : BOOL    (是否已完成)
+//   error  : STRING  (错误信息，无错误时为空)
+
+ConstantSP agentOSPoll(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::poll(requestId)";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::poll", usage);
+
+    std::string rid = args[0]->getString();
+    if (rid.empty())
+        throw IllegalArgumentException("agentOS::poll", usage);
+
+    auto req = AsyncRequestManager::instance().find(rid);
+    if (!req) {
+        throw IllegalArgumentException("agentOS::poll",
+            "Unknown requestId: " + rid + ". Call agentOS::askAsync first.");
+    }
+
+    auto [status, delta, content, error] = req->poll();
+
+    DictionarySP dict = Util::createDictionary(DT_STRING, nullptr, DT_ANY, nullptr);
+
+    std::string status_str;
+    bool done = false;
+    switch (status) {
+        case AsyncRequest::Status::Running:
+            status_str = "streaming";
+            break;
+        case AsyncRequest::Status::Done:
+            status_str = "done";
+            done = true;
+            break;
+        case AsyncRequest::Status::Error:
+            status_str = "error";
+            done = true;
+            break;
+    }
+
+    dict->set(new String("status"),  new String(status_str));
+    dict->set(new String("delta"),   new String(delta));
+    dict->set(new String("content"), new String(content));
+    dict->set(new String("done"),    new Bool(done));
+    dict->set(new String("error"),   new String(error));
+
+    // 完成后自动清理（join worker thread）
+    if (done && req->worker.joinable()) {
+        req->worker.join();
+    }
+
+    return dict;
+}
+
+// ─── agentOS::cancelAsync(requestId) ─────────────────────────
+
+ConstantSP agentOSCancelAsync(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::cancelAsync(requestId)";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::cancelAsync", usage);
+
+    std::string rid = args[0]->getString();
+    AsyncRequestManager::instance().remove(rid);
+    return new Bool(true);
 }
 
 } // extern "C"

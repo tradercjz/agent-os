@@ -30,8 +30,49 @@ agentOS::ask("什么是 DolphinDB？")
 // 带自定义 system prompt
 agentOS::ask("分析这段数据的趋势", "你是一个金融数据分析师，用中文回答")
 
-// ── 5. 流式对话（逐 token 打印到控制台）──
+// ── 5. 流式对话（逐 token 实时输出）──
+// 方式 A：传入回调函数，每个 token 实时 print 到客户端
+agentOS::askStream("用三句话介绍时序数据库", , print)
+
+// 方式 B：用自定义回调做更多处理
+def onToken(token) {
+    writeConsole(token)   // 实时输出到控制台
+}
+agentOS::askStream("什么是 DolphinDB？", , onToken)
+
+// 方式 C：带 system prompt + 回调
+agentOS::askStream("分析数据趋势", "你是金融分析师", print)
+
+// 不传回调也可以，等全部生成完返回完整字符串（等同于 ask）
 agentOS::askStream("用三句话介绍时序数据库")
+
+// ── 5b. Web 流式输出（异步请求 + 轮询）──
+// 适用于 DolphinDB Web UI / API 客户端
+// 步骤 1: 发起异步请求，立即返回 requestId
+rid = agentOS::askAsync("什么是 DolphinDB？")
+// rid = "req_1"
+
+// 步骤 2: 轮询获取增量内容（前端用 setInterval 每 100ms 调用一次）
+result = agentOS::poll(rid)
+// result 是 dict:
+//   status  → "streaming" | "done" | "error"
+//   delta   → 本次 poll 新增的 token（取走后清空）
+//   content → 已生成的全部内容
+//   done    → true/false
+//   error   → 错误信息（无错时为空）
+
+// 完整轮询示例：
+rid = agentOS::askAsync("用三句话介绍时序数据库", "你是一个技术专家")
+do {
+    result = agentOS::poll(rid)
+    if (result["delta"].size() > 0) {
+        writeConsole(result["delta"])    // 追加显示
+    }
+    sleep(100)                           // 100ms 间隔
+} while (!result["done"])
+
+// 步骤 3（可选）: 取消或清理请求
+agentOS::cancelAsync(rid)
 
 // ── 6. 结构化对话（返回表格，含工具调用记录）──
 result = agentOS::askTable("查询最新的市场数据")

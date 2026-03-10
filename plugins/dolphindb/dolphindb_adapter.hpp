@@ -20,6 +20,11 @@
 // AgentOS 头文件（通过 cmake -DAGENTOS_NO_DUCKDB=ON 排除 DuckDB 依赖）
 #include <agentos/agentos.hpp>
 
+#include <atomic>
+#include <thread>
+#include <deque>
+#include <condition_variable>
+
 using namespace ddb;
 using std::vector;
 
@@ -73,6 +78,114 @@ private:
     // Agent handle 映射
     std::unordered_map<long long, std::shared_ptr<Agent>> agents_;
     long long next_handle_{1};
+};
+
+// ─────────────────────────────────────────────────────────────
+// § D.1b 异步请求管理器 — 支持 web 流式输出
+// ─────────────────────────────────────────────────────────────
+
+/// 单个异步请求的状态
+struct AsyncRequest {
+    enum class Status { Running, Done, Error };
+
+    mutable std::mutex mu;
+    Status status{Status::Running};
+
+    // 已生成的全部内容
+    std::string content;
+    // 上次 poll 以来新增的 delta（poll 后清空）
+    std::string delta;
+    // 错误信息（status==Error 时有效）
+    std::string error;
+
+    std::thread worker;
+
+    /// 追加一个 token（由后台线程调用）
+    void append_token(std::string_view token) {
+        std::lock_guard lk(mu);
+        content += std::string(token);
+        delta += std::string(token);
+    }
+
+    /// 标记完成
+    void mark_done() {
+        std::lock_guard lk(mu);
+        status = Status::Done;
+    }
+
+    /// 标记失败
+    void mark_error(const std::string& msg) {
+        std::lock_guard lk(mu);
+        status = Status::Error;
+        error = msg;
+    }
+
+    /// poll: 取出 delta，返回 {status, delta, content, error}
+    std::tuple<Status, std::string, std::string, std::string> poll() {
+        std::lock_guard lk(mu);
+        std::string d = std::move(delta);
+        delta.clear();
+        return {status, std::move(d), content, error};
+    }
+};
+
+/// 管理所有异步请求（进程级单例）
+class AsyncRequestManager {
+public:
+    static AsyncRequestManager& instance() {
+        static AsyncRequestManager inst;
+        return inst;
+    }
+
+    /// 创建新请求，返回 requestId
+    std::string create() {
+        std::lock_guard lk(mu_);
+        std::string rid = "req_" + std::to_string(next_id_++);
+        requests_[rid] = std::make_shared<AsyncRequest>();
+        return rid;
+    }
+
+    /// 查找请求
+    std::shared_ptr<AsyncRequest> find(const std::string& rid) {
+        std::lock_guard lk(mu_);
+        auto it = requests_.find(rid);
+        return (it != requests_.end()) ? it->second : nullptr;
+    }
+
+    /// 移除已完成的请求（释放资源）
+    void remove(const std::string& rid) {
+        std::lock_guard lk(mu_);
+        auto it = requests_.find(rid);
+        if (it != requests_.end()) {
+            // detach worker thread if joinable
+            if (it->second->worker.joinable()) {
+                it->second->worker.detach();
+            }
+            requests_.erase(it);
+        }
+    }
+
+    /// 清理所有已完成的请求
+    void cleanup_done() {
+        std::lock_guard lk(mu_);
+        for (auto it = requests_.begin(); it != requests_.end(); ) {
+            std::lock_guard rlk(it->second->mu);
+            if (it->second->status != AsyncRequest::Status::Running) {
+                if (it->second->worker.joinable()) {
+                    it->second->worker.detach();
+                }
+                it = requests_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+private:
+    AsyncRequestManager() = default;
+    std::mutex mu_;
+    std::unordered_map<std::string, std::shared_ptr<AsyncRequest>> requests_;
+    long long next_id_{1};
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -156,8 +269,9 @@ void agentOSClose(Heap* heap, vector<ConstantSP>& args);
 /// @return STRING — LLM 回答
 ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS::askStream(question, [systemPrompt])
-/// 流式对话（逐 token 打印到控制台，最终返回完整回答）
+/// agentOS::askStream(question, [systemPrompt], [callbackFunc])
+/// 流式对话 — callbackFunc 每收到一个 token 被调用一次
+/// 例: agentOS::askStream("问题", , print)
 /// @return STRING — 完整回答
 ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args);
 
@@ -207,6 +321,22 @@ ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args);
 /// agentOS::destroyAgent(handle)
 /// @return BOOL — success
 ConstantSP agentOSDestroyAgent(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::askAsync(question, [systemPrompt])
+/// 异步发起 LLM 请求，立即返回 requestId
+/// 配合 agentOS::poll(requestId) 实现 web 端流式输出
+/// @return STRING — requestId
+ConstantSP agentOSAskAsync(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::poll(requestId)
+/// 轮询异步请求的增量内容
+/// @return DICTIONARY — {status, delta, content, done, error}
+ConstantSP agentOSPoll(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::cancelAsync(requestId)
+/// 取消/清理异步请求
+/// @return BOOL
+ConstantSP agentOSCancelAsync(Heap* heap, vector<ConstantSP>& args);
 
 } // extern "C"
 
