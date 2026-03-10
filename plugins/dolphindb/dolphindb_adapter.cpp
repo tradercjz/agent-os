@@ -995,10 +995,12 @@ ConstantSP agentOSAskAsync(Heap* heap, vector<ConstantSP>& args) {
 
 // ─── agentOS::poll(requestId) ────────────────────────────────
 //
+// 纯增量返回：streaming 期间只传 delta，完成时才带 content
+//
 // 返回 DolphinDB Dictionary:
 //   status : STRING  ("streaming" | "done" | "error")
-//   delta  : STRING  (本次 poll 新增的 tokens)
-//   content: STRING  (到目前为止的完整内容)
+//   delta  : STRING  (本次 poll 新增的 tokens，增量)
+//   content: STRING  (仅 done/error 时返回完整内容，streaming 时为空)
 //   done   : BOOL    (是否已完成)
 //   error  : STRING  (错误信息，无错误时为空)
 
@@ -1040,7 +1042,8 @@ ConstantSP agentOSPoll(Heap* heap, vector<ConstantSP>& args) {
 
     dict->set(new String("status"),  new String(status_str));
     dict->set(new String("delta"),   new String(delta));
-    dict->set(new String("content"), new String(content));
+    // streaming 期间不传 content（省带宽），完成/出错时才带全量
+    dict->set(new String("content"), new String(done ? content : ""));
     dict->set(new String("done"),    new Bool(done));
     dict->set(new String("error"),   new String(error));
 
