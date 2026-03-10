@@ -1,5 +1,13 @@
 // ============================================================
 // AgentOS :: DolphinDB Plugin Adapter — Implementation
+//
+// 遵循 DolphinDB 插件开发规范：
+//   - extern "C" 导出所有符号
+//   - system 函数签名: ConstantSP(Heap*, vector<ConstantSP>&)
+//   - command 函数签名: void(Heap*, vector<ConstantSP>&)
+//   - 用 IllegalArgumentException 报告参数错误
+//   - 用 RuntimeException 报告运行时错误
+//   - 所有子线程内 try/catch，不能抛到线程外
 // ============================================================
 #include "dolphindb_adapter.hpp"
 
@@ -17,48 +25,40 @@ namespace agentos::dolphindb {
 bool PluginRuntime::init(const std::string& config_json) {
     std::lock_guard lk(mu_);
     if (os_) {
-        LOG_INFO("AgentOS DolphinDB plugin: already initialized, skipping");
-        return false;
+        return false;  // 幂等
     }
 
-    // 解析配置
     nlohmann::json cfg;
     try {
-        cfg = nlohmann::json::parse(config_json);
+        cfg = config_json.empty()
+            ? nlohmann::json::object()
+            : nlohmann::json::parse(config_json);
     } catch (const std::exception& e) {
-        throw RuntimeException(
-            std::string("agentOS_init: invalid JSON config: ") + e.what());
+        throw IllegalArgumentException("agentOS::init",
+            std::string("Invalid JSON config: ") + e.what());
     }
 
-    // 提取 LLM 配置
     std::string api_key = cfg.value("api_key", "");
     std::string base_url = cfg.value("base_url", "https://api.openai.com/v1");
     std::string model = cfg.value("model", "gpt-4o-mini");
 
-    // 选择后端
     if (api_key.empty()) {
-        // Mock 模式（无 API key 时降级为 Mock）
-        LOG_WARN("AgentOS DolphinDB plugin: no api_key provided, using MockBackend");
         backend_ = std::make_unique<kernel::MockLLMBackend>("dolphindb-mock");
     } else {
         backend_ = std::make_unique<kernel::OpenAIBackend>(
             std::move(api_key), std::move(base_url), std::move(model));
     }
 
-    // AgentOS 配置
     AgentOS::Config os_cfg;
     os_cfg.scheduler_threads = cfg.value("scheduler_threads", 4u);
     os_cfg.tpm_limit = cfg.value("tpm_limit", 100000u);
 
-    // DolphinDB 环境下使用确定性目录
     std::string data_dir = cfg.value("data_dir", "/tmp/agentos_dolphindb");
     os_cfg.snapshot_dir = data_dir + "/snapshots";
     os_cfg.ltm_dir = data_dir + "/ltm";
     os_cfg.enable_security = cfg.value("enable_security", true);
 
     os_ = std::make_unique<AgentOS>(std::move(backend_), os_cfg);
-
-    LOG_INFO("AgentOS DolphinDB plugin: initialized successfully");
     return true;
 }
 
@@ -66,7 +66,6 @@ void PluginRuntime::close() {
     std::lock_guard lk(mu_);
     if (!os_) return;
 
-    // 先销毁所有 Agent
     for (auto& [handle, agent] : agents_) {
         os_->destroy_agent(agent->id());
     }
@@ -74,13 +73,12 @@ void PluginRuntime::close() {
 
     os_->graceful_shutdown();
     os_.reset();
-    LOG_INFO("AgentOS DolphinDB plugin: closed");
 }
 
 AgentOS& PluginRuntime::os() {
     std::lock_guard lk(mu_);
     if (!os_) {
-        throw RuntimeException("AgentOS not initialized. Call agentOS_init() first.");
+        throw RuntimeException("AgentOS not initialized. Call agentOS::init() first.");
     }
     return *os_;
 }
@@ -90,25 +88,25 @@ bool PluginRuntime::is_initialized() const noexcept {
     return os_ != nullptr;
 }
 
-std::shared_ptr<Agent> PluginRuntime::find_agent(int handle) const {
+std::shared_ptr<Agent> PluginRuntime::find_agent(long long handle) const {
     std::lock_guard lk(mu_);
     auto it = agents_.find(handle);
     if (it == agents_.end()) return nullptr;
     return it->second;
 }
 
-int PluginRuntime::create_agent(const AgentConfig& cfg) {
+long long PluginRuntime::create_agent(const AgentConfig& cfg) {
     std::lock_guard lk(mu_);
     if (!os_) {
         throw RuntimeException("AgentOS not initialized");
     }
     auto agent = os_->create_agent(cfg);
-    int handle = next_handle_++;
+    long long handle = next_handle_++;
     agents_[handle] = agent;
     return handle;
 }
 
-bool PluginRuntime::destroy_agent(int handle) {
+bool PluginRuntime::destroy_agent(long long handle) {
     std::lock_guard lk(mu_);
     auto it = agents_.find(handle);
     if (it == agents_.end()) return false;
@@ -123,98 +121,78 @@ bool PluginRuntime::destroy_agent(int handle) {
 // § D.2  类型转换工具实现
 // ─────────────────────────────────────────────────────────────
 
-std::string to_string(const ConstantSP& val) {
+std::string extract_string(const ConstantSP& val) {
     if (val.isNull() || val->isNull() || val->getType() == DT_VOID) {
         return "";
     }
     return val->getString();
 }
 
-int to_int(const ConstantSP& val) {
+int extract_int(const ConstantSP& val) {
     if (val.isNull() || val->isNull() || val->getType() == DT_VOID) {
         return 0;
     }
     return val->getInt();
 }
 
-float to_float(const ConstantSP& val) {
+float extract_float(const ConstantSP& val) {
     if (val.isNull() || val->isNull() || val->getType() == DT_VOID) {
         return 0.0f;
     }
     return val->getFloat();
 }
 
-nlohmann::json to_json(const ConstantSP& val) {
-    std::string s = to_string(val);
+long long extract_long(const ConstantSP& val) {
+    if (val.isNull() || val->isNull() || val->getType() == DT_VOID) {
+        return 0;
+    }
+    return val->getLong();
+}
+
+nlohmann::json parse_json(const std::string& s) {
     if (s.empty()) return nlohmann::json::object();
     try {
         return nlohmann::json::parse(s);
-    } catch (...) {
-        throw RuntimeException("Invalid JSON: " + s);
+    } catch (const std::exception& e) {
+        throw IllegalArgumentException("JSON parse",
+            std::string("Invalid JSON: ") + e.what());
     }
-}
-
-ConstantSP make_string(const std::string& s) {
-    return Util::createString(s);
-}
-
-ConstantSP make_int(int v) {
-    return Util::createInt(v);
-}
-
-ConstantSP make_bool(bool v) {
-    return Util::createBool(v);
-}
-
-ConstantSP make_float(float v) {
-    return Util::createFloat(v);
 }
 
 TableSP search_results_to_table(
     const std::vector<memory::SearchResult>& results) {
-    // 构建列
-    size_t n = results.size();
-    ConstantSP col_content = Util::createVector(DT_STRING, static_cast<int>(n));
-    ConstantSP col_score = Util::createVector(DT_FLOAT, static_cast<int>(n));
-    ConstantSP col_source = Util::createVector(DT_STRING, static_cast<int>(n));
-    ConstantSP col_timestamp = Util::createVector(DT_LONG, static_cast<int>(n));
+    int n = static_cast<int>(results.size());
 
-    for (size_t i = 0; i < n; ++i) {
-        auto idx = static_cast<int>(i);
-        col_content->setString(idx, results[i].entry.content);
-        col_score->setFloat(idx, results[i].score);
-        col_source->setString(idx, results[i].entry.source);
-        col_timestamp->setLong(idx, static_cast<long long>(
+    // 创建列
+    vector<string> colNames{"content", "score", "source", "created_at"};
+    vector<DATA_TYPE> colTypes{DT_STRING, DT_DOUBLE, DT_STRING, DT_LONG};
+    TableSP table = Util::createTable(colNames, colTypes, 0, n);
+
+    if (n == 0) return table;
+
+    // 构建各列 vector
+    VectorSP colContent = Util::createVector(DT_STRING, n);
+    VectorSP colScore = Util::createVector(DT_DOUBLE, n);
+    VectorSP colSource = Util::createVector(DT_STRING, n);
+    VectorSP colCreatedAt = Util::createVector(DT_LONG, n);
+
+    for (int i = 0; i < n; ++i) {
+        auto idx = static_cast<size_t>(i);
+        colContent->setString(i, results[idx].entry.content);
+        colScore->setDouble(i, static_cast<double>(results[idx].score));
+        colSource->setString(i, results[idx].entry.source);
+        colCreatedAt->setLong(i, static_cast<long long>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
-                results[i].entry.created_at.time_since_epoch()).count()));
+                results[idx].entry.created_at.time_since_epoch()).count()));
     }
 
-    std::vector<std::string> col_names = {"content", "score", "source", "timestamp"};
-    std::vector<ConstantSP> cols = {col_content, col_score, col_source, col_timestamp};
-    return Util::createTable(col_names, cols);
-}
+    // 用 append 写入表
+    vector<ConstantSP> cols{colContent, colScore, colSource, colCreatedAt};
+    INDEX insertedRows;
+    string errMsg;
+    table->append(cols, insertedRows, errMsg);
 
-ConstantSP llm_response_to_dict(const kernel::LLMResponse& resp) {
-    // 用 JSON 字符串返回（Dict 在 DolphinDB 中不太好用，STRING JSON 更通用）
-    nlohmann::json j;
-    j["content"] = resp.content;
-    j["finish_reason"] = resp.finish_reason;
-    j["prompt_tokens"] = resp.prompt_tokens;
-    j["completion_tokens"] = resp.completion_tokens;
-
-    if (!resp.tool_calls.empty()) {
-        nlohmann::json tc_arr = nlohmann::json::array();
-        for (const auto& tc : resp.tool_calls) {
-            tc_arr.push_back({
-                {"id", tc.id},
-                {"name", tc.name},
-                {"args", tc.args_json}
-            });
-        }
-        j["tool_calls"] = tc_arr;
-    }
-
-    return make_string(j.dump());
+    return table;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -223,35 +201,82 @@ ConstantSP llm_response_to_dict(const kernel::LLMResponse& resp) {
 
 extern "C" {
 
-ConstantSP agentOS_init(const ConstantSP& lhs, const ConstantSP& rhs) {
-    (void)rhs;
-    std::string config = to_string(lhs);
-    if (config.empty()) {
-        config = "{}";  // 使用默认配置 (Mock 模式)
-    }
+// ─── 特殊入口 ────────────────────────────────────────────────
 
-    bool is_new = PluginRuntime::instance().init(config);
-    return make_string(is_new ? "OK: AgentOS initialized" : "OK: AgentOS already running");
+ConstantSP initialize(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    (void)args;
+    // loadPlugin 后自动调用
+    // 这里不做 AgentOS 初始化（需要用户显式调用 init 传配置）
+    LOG_INFO("AgentOS DolphinDB plugin loaded.");
+    return new Void();
 }
 
-ConstantSP agentOS_close(const ConstantSP& lhs, const ConstantSP& rhs) {
-    (void)lhs;
-    (void)rhs;
+ConstantSP version(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    (void)args;
+    return new String("1.0.0");
+}
+
+ConstantSP pluginInfo(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    (void)args;
+    DictionarySP info = Util::createDictionary(DT_STRING, nullptr, DT_ANY, nullptr);
+    info->set(new String("isFree"), new Bool(true));
+    info->set(new String("pluginName"), new String("agentOS"));
+    info->set(new String("description"),
+              new String("LLM Agent Operating System for DolphinDB"));
+    info->set(new String("version"), new String("1.0.0"));
+    return info;
+}
+
+// ─── agentOS::init([configJson]) ─────────────────────────────
+
+ConstantSP agentOSInit(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    std::string config_json;
+    if (!args.empty()) {
+        if (!args[0]->isScalar() || args[0]->getType() != DT_STRING)
+            throw IllegalArgumentException("agentOS::init",
+                "Usage: agentOS::init([configJson]). configJson must be a string.");
+        config_json = args[0]->getString();
+    }
+
+    bool is_new = PluginRuntime::instance().init(config_json);
+    if (is_new) {
+        LOG_INFO("AgentOS initialized via DolphinDB plugin.");
+    }
+    return new Bool(true);
+}
+
+// ─── agentOS::close() ────────────────────────────────────────
+
+void agentOSClose(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    (void)args;
     PluginRuntime::instance().close();
-    return make_string("OK: AgentOS closed");
+    LOG_INFO("AgentOS closed via DolphinDB plugin.");
 }
 
-ConstantSP agentOS_ask(const ConstantSP& lhs, const ConstantSP& rhs) {
-    std::string question = to_string(lhs);
-    if (question.empty()) {
-        throw RuntimeException("agentOS_ask: question must not be empty");
-    }
+// ─── agentOS::ask(question, [systemPrompt]) ──────────────────
 
-    std::string system_prompt = to_string(rhs);
+ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::ask(question, [systemPrompt])";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::ask", usage);
+
+    std::string question = args[0]->getString();
+    if (question.empty())
+        throw IllegalArgumentException("agentOS::ask", usage + " question must not be empty.");
+
+    std::string system_prompt;
+    if (args.size() >= 2 && args[1]->getType() == DT_STRING) {
+        system_prompt = args[1]->getString();
+    }
 
     auto& os = PluginRuntime::instance().os();
 
-    // 创建临时 Agent
     AgentConfig cfg;
     cfg.name = "ddb_ask_temp";
     cfg.role_prompt = system_prompt.empty()
@@ -260,97 +285,99 @@ ConstantSP agentOS_ask(const ConstantSP& lhs, const ConstantSP& rhs) {
     cfg.context_limit = 8192;
 
     auto agent = os.create_agent(cfg);
-
-    // 执行问答
     auto result = agent->run(question);
-
-    // 清理临时 Agent
     os.destroy_agent(agent->id());
 
-    std::string answer = unwrap_or_throw(std::move(result));
-    return make_string(answer);
+    std::string answer = unwrap_or_throw("agentOS::ask", std::move(result));
+    return new String(answer);
 }
 
-ConstantSP agentOS_askStream(const ConstantSP& lhs, const ConstantSP& rhs) {
-    std::string question = to_string(lhs);
-    if (question.empty()) {
-        throw RuntimeException("agentOS_askStream: question must not be empty");
-    }
+// ─── agentOS::askStream(question, [systemPrompt]) ────────────
 
-    std::string system_prompt = to_string(rhs);
+ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::askStream(question, [systemPrompt])";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::askStream", usage);
+
+    std::string question = args[0]->getString();
+    if (question.empty())
+        throw IllegalArgumentException("agentOS::askStream", usage);
+
+    std::string system_prompt;
+    if (args.size() >= 2 && args[1]->getType() == DT_STRING) {
+        system_prompt = args[1]->getString();
+    }
 
     auto& os = PluginRuntime::instance().os();
 
-    // 使用 LLMKernel 的流式接口
     kernel::LLMRequest req;
-    if (!system_prompt.empty()) {
-        req.messages.push_back(kernel::Message::system(system_prompt));
-    } else {
-        req.messages.push_back(kernel::Message::system(
-            "You are a helpful AI assistant integrated with DolphinDB."));
-    }
+    req.messages.push_back(kernel::Message::system(
+        system_prompt.empty()
+            ? "You are a helpful AI assistant integrated with DolphinDB."
+            : system_prompt));
     req.messages.push_back(kernel::Message::user(question));
 
     std::string full_response;
     auto result = os.kernel().stream_infer(req,
         [&full_response](std::string_view token) {
-            // 流式输出到 DolphinDB 控制台
             std::cout << token << std::flush;
             full_response += std::string(token);
         });
-    std::cout << std::endl;  // 结束行
+    std::cout << std::endl;
 
-    auto resp = unwrap_or_throw(std::move(result));
-    return make_string(full_response.empty() ? resp.content : full_response);
+    auto resp = unwrap_or_throw("agentOS::askStream", std::move(result));
+    return new String(full_response.empty() ? resp.content : full_response);
 }
 
-ConstantSP agentOS_askTable(const ConstantSP& lhs, const ConstantSP& rhs) {
-    std::string question = to_string(lhs);
-    if (question.empty()) {
-        throw RuntimeException("agentOS_askTable: question must not be empty");
-    }
+// ─── agentOS::askTable(question, [configJson], [agentHandle]) ─
+
+ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage =
+        "Usage: agentOS::askTable(question, [configJson], [agentHandle])";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::askTable", usage);
+
+    std::string question = args[0]->getString();
+    if (question.empty())
+        throw IllegalArgumentException("agentOS::askTable", usage);
 
     // 解析可选配置
-    nlohmann::json opts;
-    std::string rhs_str = to_string(rhs);
-    if (!rhs_str.empty()) {
-        try {
-            opts = nlohmann::json::parse(rhs_str);
-        } catch (...) {
-            // 当作 system_prompt
-            opts["system_prompt"] = rhs_str;
+    std::string system_prompt = "You are a helpful AI assistant integrated with DolphinDB.";
+    int max_steps = 10;
+    long long agent_handle = 0;
+
+    if (args.size() >= 2 && args[1]->getType() == DT_STRING) {
+        std::string cfg_str = args[1]->getString();
+        if (!cfg_str.empty()) {
+            auto opts = parse_json(cfg_str);
+            system_prompt = opts.value("system_prompt", system_prompt);
+            max_steps = opts.value("max_steps", max_steps);
         }
     }
-
-    std::string system_prompt = opts.value("system_prompt",
-        "You are a helpful AI assistant integrated with DolphinDB.");
-    int max_steps = opts.value("max_steps", 10);
-    int agent_handle = opts.value("agent_handle", 0);
+    if (args.size() >= 3 && args[2]->getType() != DT_VOID) {
+        agent_handle = args[2]->getLong();
+    }
 
     auto& os = PluginRuntime::instance().os();
     auto& runtime = PluginRuntime::instance();
 
-    // 收集对话交互记录
-    struct InteractionRow {
-        std::string role;
-        std::string content;
-        std::string tool_name;
-        std::string tool_args;
-        std::string tool_result;
+    // 交互记录
+    struct Row {
+        std::string role, content, tool_name, tool_args, tool_result;
     };
-    std::vector<InteractionRow> rows;
+    std::vector<Row> rows;
 
     std::shared_ptr<Agent> agent;
     bool temp_agent = false;
 
     if (agent_handle > 0) {
         agent = runtime.find_agent(agent_handle);
-        if (!agent) {
-            throw RuntimeException("agentOS_askTable: invalid agent handle " +
-                                   std::to_string(agent_handle));
-        }
+        if (!agent)
+            throw IllegalArgumentException("agentOS::askTable",
+                "Invalid agent handle " + std::to_string(agent_handle));
     } else {
-        // 创建临时 Agent
         AgentConfig cfg;
         cfg.name = "ddb_table_temp";
         cfg.role_prompt = system_prompt;
@@ -359,13 +386,11 @@ ConstantSP agentOS_askTable(const ConstantSP& lhs, const ConstantSP& rhs) {
         temp_agent = true;
     }
 
-    // 使用 LLMKernel 直接进行 ReAct 循环并记录每步
     auto& ctx_win = os.ctx().get_window(agent->id(), agent->config().context_limit);
     ctx_win.try_add(kernel::Message::user(question));
     rows.push_back({"user", question, "", "", ""});
 
     for (int step = 0; step < max_steps; ++step) {
-        // Think
         kernel::LLMRequest req;
         req.agent_id = agent->id();
         req.priority = agent->config().priority;
@@ -373,22 +398,19 @@ ConstantSP agentOS_askTable(const ConstantSP& lhs, const ConstantSP& rhs) {
             req.messages.push_back(m);
         }
 
-        // 注入工具
         std::string tj = os.tools().tools_json({});
         if (!tj.empty() && tj != "[]") {
             req.tools_json = tj;
         }
 
-        auto resp = unwrap_or_throw(os.kernel().infer(req));
+        auto resp = unwrap_or_throw("agentOS::askTable", os.kernel().infer(req));
 
         if (!resp.wants_tool_call()) {
-            // 最终回答
             rows.push_back({"assistant", resp.content, "", "", ""});
             ctx_win.try_add(kernel::Message::assistant(resp.content));
             break;
         }
 
-        // 有工具调用
         rows.push_back({"assistant", resp.content, "", "", ""});
         auto msg = kernel::Message::assistant(resp.content);
         msg.tool_calls = resp.tool_calls;
@@ -414,46 +436,61 @@ ConstantSP agentOS_askTable(const ConstantSP& lhs, const ConstantSP& rhs) {
         }
     }
 
-    // 清理临时 Agent
     if (temp_agent) {
         os.destroy_agent(agent->id());
     }
 
     // 构建结果表
-    size_t n = rows.size();
-    auto nint = static_cast<int>(n);
-    ConstantSP col_role = Util::createVector(DT_STRING, nint);
-    ConstantSP col_content = Util::createVector(DT_STRING, nint);
-    ConstantSP col_tool_name = Util::createVector(DT_STRING, nint);
-    ConstantSP col_tool_args = Util::createVector(DT_STRING, nint);
-    ConstantSP col_tool_result = Util::createVector(DT_STRING, nint);
+    int n = static_cast<int>(rows.size());
+    vector<string> colNames{"role", "content", "tool_name", "tool_args", "tool_result"};
+    vector<DATA_TYPE> colTypes{DT_STRING, DT_STRING, DT_STRING, DT_STRING, DT_STRING};
+    TableSP table = Util::createTable(colNames, colTypes, 0, n);
 
-    for (size_t i = 0; i < n; ++i) {
-        auto idx = static_cast<int>(i);
-        col_role->setString(idx, rows[i].role);
-        col_content->setString(idx, rows[i].content);
-        col_tool_name->setString(idx, rows[i].tool_name);
-        col_tool_args->setString(idx, rows[i].tool_args);
-        col_tool_result->setString(idx, rows[i].tool_result);
+    VectorSP cRole = Util::createVector(DT_STRING, n);
+    VectorSP cContent = Util::createVector(DT_STRING, n);
+    VectorSP cToolName = Util::createVector(DT_STRING, n);
+    VectorSP cToolArgs = Util::createVector(DT_STRING, n);
+    VectorSP cToolResult = Util::createVector(DT_STRING, n);
+
+    for (int i = 0; i < n; ++i) {
+        auto idx = static_cast<size_t>(i);
+        cRole->setString(i, rows[idx].role);
+        cContent->setString(i, rows[idx].content);
+        cToolName->setString(i, rows[idx].tool_name);
+        cToolArgs->setString(i, rows[idx].tool_args);
+        cToolResult->setString(i, rows[idx].tool_result);
     }
 
-    std::vector<std::string> names = {"role", "content", "tool_name", "tool_args", "tool_result"};
-    std::vector<ConstantSP> cols = {col_role, col_content, col_tool_name, col_tool_args, col_tool_result};
-    return Util::createTable(names, cols);
+    vector<ConstantSP> cols{cRole, cContent, cToolName, cToolArgs, cToolResult};
+    INDEX insertedRows;
+    string errMsg;
+    table->append(cols, insertedRows, errMsg);
+
+    return table;
 }
 
-ConstantSP agentOS_remember(const ConstantSP& lhs, const ConstantSP& rhs) {
-    std::string content = to_string(lhs);
-    if (content.empty()) {
-        throw RuntimeException("agentOS_remember: content must not be empty");
-    }
+// ─── agentOS::remember(content, [importance], [source]) ──────
+
+ConstantSP agentOSRemember(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::remember(content, [importance], [source])";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::remember", usage);
+
+    std::string content = args[0]->getString();
+    if (content.empty())
+        throw IllegalArgumentException("agentOS::remember", usage + " content must not be empty.");
 
     float importance = 0.5f;
-    if (!rhs.isNull() && rhs->getType() != DT_VOID) {
-        importance = to_float(rhs);
-        // Clamp to [0, 1]
+    if (args.size() >= 2 && args[1]->getType() != DT_VOID) {
+        importance = args[1]->getFloat();
         if (importance < 0.0f) importance = 0.0f;
         if (importance > 1.0f) importance = 1.0f;
+    }
+
+    std::string source = "dolphindb";
+    if (args.size() >= 3 && args[2]->getType() == DT_STRING) {
+        source = args[2]->getString();
     }
 
     auto& os = PluginRuntime::instance().os();
@@ -469,26 +506,31 @@ ConstantSP agentOS_remember(const ConstantSP& lhs, const ConstantSP& rhs) {
     }
 
     auto result = os.memory().remember(
-        std::move(content), emb, "dolphindb", importance);
-    std::string id = unwrap_or_throw(std::move(result));
-    return make_string(id);
+        std::move(content), emb, source, importance);
+    std::string id = unwrap_or_throw("agentOS::remember", std::move(result));
+    return new String(id);
 }
 
-ConstantSP agentOS_recall(const ConstantSP& lhs, const ConstantSP& rhs) {
-    std::string query = to_string(lhs);
-    if (query.empty()) {
-        throw RuntimeException("agentOS_recall: query must not be empty");
-    }
+// ─── agentOS::recall(query, [topK]) ─────────────────────────
+
+ConstantSP agentOSRecall(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::recall(query, [topK])";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::recall", usage);
+
+    std::string query = args[0]->getString();
+    if (query.empty())
+        throw IllegalArgumentException("agentOS::recall", usage);
 
     int top_k = 5;
-    if (!rhs.isNull() && rhs->getType() != DT_VOID) {
-        top_k = to_int(rhs);
+    if (args.size() >= 2 && args[1]->getType() != DT_VOID) {
+        top_k = args[1]->getInt();
         if (top_k <= 0) top_k = 5;
     }
 
     auto& os = PluginRuntime::instance().os();
 
-    // 生成查询 embedding
     kernel::EmbeddingRequest emb_req;
     emb_req.inputs.push_back(query);
     auto emb_res = os.kernel().embed(emb_req);
@@ -498,26 +540,33 @@ ConstantSP agentOS_recall(const ConstantSP& lhs, const ConstantSP& rhs) {
         emb = std::move(emb_res->embeddings[0]);
     }
 
-    auto results = unwrap_or_throw(
+    auto results = unwrap_or_throw("agentOS::recall",
         os.memory().recall(emb, {}, static_cast<size_t>(top_k)));
     return search_results_to_table(results);
 }
 
-ConstantSP agentOS_graphAddNode(const ConstantSP& lhs, const ConstantSP& rhs) {
-    (void)rhs;
-    auto j = to_json(lhs);
+// ─── agentOS::graphAddNode(nodeJson) ─────────────────────────
+
+ConstantSP agentOSGraphAddNode(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::graphAddNode(nodeJson)";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::graphAddNode", usage);
+
+    auto j = parse_json(args[0]->getString());
 
     std::string node_id = j.value("id", "");
-    if (node_id.empty()) {
-        throw RuntimeException("agentOS_graphAddNode: 'id' is required");
-    }
+    if (node_id.empty())
+        throw IllegalArgumentException("agentOS::graphAddNode", "'id' is required");
 
     std::string node_type = j.value("type", "entity");
 
-    // 将 properties 序列化为 JSON 存入 content 字段
+    // properties → content (JSON 序列化)
     std::string content_str;
     if (j.contains("properties") && j["properties"].is_object()) {
         content_str = j["properties"].dump();
+    } else {
+        content_str = j.value("content", "");
     }
 
     auto& os = PluginRuntime::instance().os();
@@ -529,22 +578,28 @@ ConstantSP agentOS_graphAddNode(const ConstantSP& lhs, const ConstantSP& rhs) {
     node.content = std::move(content_str);
 
     auto result = graph.add_node(std::move(node));
-    unwrap_or_throw(std::move(result));
+    unwrap_or_throw("agentOS::graphAddNode", std::move(result));
 
-    return make_string(node_id);
+    return new String(node_id);
 }
 
-ConstantSP agentOS_graphAddEdge(const ConstantSP& lhs, const ConstantSP& rhs) {
-    (void)rhs;
-    auto j = to_json(lhs);
+// ─── agentOS::graphAddEdge(edgeJson) ─────────────────────────
+
+ConstantSP agentOSGraphAddEdge(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::graphAddEdge(edgeJson)";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::graphAddEdge", usage);
+
+    auto j = parse_json(args[0]->getString());
 
     std::string source = j.value("source", "");
     std::string target = j.value("target", "");
     std::string relation = j.value("relation", "related_to");
 
-    if (source.empty() || target.empty()) {
-        throw RuntimeException("agentOS_graphAddEdge: 'source' and 'target' are required");
-    }
+    if (source.empty() || target.empty())
+        throw IllegalArgumentException("agentOS::graphAddEdge",
+            "'source' and 'target' are required");
 
     auto& os = PluginRuntime::instance().os();
     auto& graph = os.memory().graph();
@@ -556,27 +611,32 @@ ConstantSP agentOS_graphAddEdge(const ConstantSP& lhs, const ConstantSP& rhs) {
     edge.weight = j.value("weight", 1.0f);
 
     auto result = graph.add_edge(std::move(edge));
-    unwrap_or_throw(std::move(result));
+    unwrap_or_throw("agentOS::graphAddEdge", std::move(result));
 
-    return make_string("OK");
+    return new Bool(true);
 }
 
-ConstantSP agentOS_graphQuery(const ConstantSP& lhs, const ConstantSP& rhs) {
-    std::string query = to_string(lhs);
-    if (query.empty()) {
-        throw RuntimeException("agentOS_graphQuery: query must not be empty");
-    }
+// ─── agentOS::graphQuery(nodeIdOrQuery, [maxResults]) ────────
+
+ConstantSP agentOSGraphQuery(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::graphQuery(nodeId, [maxResults])";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::graphQuery", usage);
+
+    std::string query = args[0]->getString();
+    if (query.empty())
+        throw IllegalArgumentException("agentOS::graphQuery", usage);
 
     int max_results = 10;
-    if (!rhs.isNull() && rhs->getType() != DT_VOID) {
-        max_results = to_int(rhs);
+    if (args.size() >= 2 && args[1]->getType() != DT_VOID) {
+        max_results = args[1]->getInt();
         if (max_results <= 0) max_results = 10;
     }
 
     auto& os = PluginRuntime::instance().os();
     auto& graph = os.memory().graph();
 
-    // 查询节点的所有边
     // 先尝试直接按节点 ID 查邻接边
     auto edges_result = graph.get_edges(query);
     if (!edges_result.has_value()) {
@@ -584,80 +644,94 @@ ConstantSP agentOS_graphQuery(const ConstantSP& lhs, const ConstantSP& rhs) {
         auto subgraph_result = graph.k_hop_search(query, 1);
         if (!subgraph_result.has_value() || subgraph_result->edges.empty()) {
             // 返回空表
-            auto col_src = Util::createVector(DT_STRING, 0);
-            auto col_rel = Util::createVector(DT_STRING, 0);
-            auto col_tgt = Util::createVector(DT_STRING, 0);
-            auto col_score = Util::createVector(DT_FLOAT, 0);
-            std::vector<std::string> names = {"source", "relation", "target", "score"};
-            std::vector<ConstantSP> cols = {col_src, col_rel, col_tgt, col_score};
-            return Util::createTable(names, cols);
+            vector<string> colNames{"source", "relation", "target", "weight"};
+            vector<DATA_TYPE> colTypes{DT_STRING, DT_STRING, DT_STRING, DT_DOUBLE};
+            return Util::createTable(colNames, colTypes, 0, 0);
         }
         edges_result = std::move(subgraph_result->edges);
     }
 
     auto& edges = *edges_result;
-    auto n = static_cast<int>(std::min(edges.size(), static_cast<size_t>(max_results)));
+    int n = static_cast<int>(std::min(edges.size(), static_cast<size_t>(max_results)));
 
-    auto col_src = Util::createVector(DT_STRING, n);
-    auto col_rel = Util::createVector(DT_STRING, n);
-    auto col_tgt = Util::createVector(DT_STRING, n);
-    auto col_score = Util::createVector(DT_FLOAT, n);
+    vector<string> colNames{"source", "relation", "target", "weight"};
+    vector<DATA_TYPE> colTypes{DT_STRING, DT_STRING, DT_STRING, DT_DOUBLE};
+    TableSP table = Util::createTable(colNames, colTypes, 0, n);
+
+    VectorSP cSrc = Util::createVector(DT_STRING, n);
+    VectorSP cRel = Util::createVector(DT_STRING, n);
+    VectorSP cTgt = Util::createVector(DT_STRING, n);
+    VectorSP cWeight = Util::createVector(DT_DOUBLE, n);
 
     for (int i = 0; i < n; ++i) {
-        col_src->setString(i, edges[static_cast<size_t>(i)].source_id);
-        col_rel->setString(i, edges[static_cast<size_t>(i)].relation);
-        col_tgt->setString(i, edges[static_cast<size_t>(i)].target_id);
-        col_score->setFloat(i, edges[static_cast<size_t>(i)].weight);
+        auto idx = static_cast<size_t>(i);
+        cSrc->setString(i, edges[idx].source_id);
+        cRel->setString(i, edges[idx].relation);
+        cTgt->setString(i, edges[idx].target_id);
+        cWeight->setDouble(i, static_cast<double>(edges[idx].weight));
     }
 
-    std::vector<std::string> names = {"source", "relation", "target", "score"};
-    std::vector<ConstantSP> cols = {col_src, col_rel, col_tgt, col_score};
-    return Util::createTable(names, cols);
+    vector<ConstantSP> cols{cSrc, cRel, cTgt, cWeight};
+    INDEX insertedRows;
+    string errMsg;
+    table->append(cols, insertedRows, errMsg);
+
+    return table;
 }
 
-ConstantSP agentOS_health(const ConstantSP& lhs, const ConstantSP& rhs) {
-    (void)lhs;
-    (void)rhs;
+// ─── agentOS::health() ──────────────────────────────────────
+
+ConstantSP agentOSHealth(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    (void)args;
 
     if (!PluginRuntime::instance().is_initialized()) {
-        return make_string("{\"healthy\":false,\"error\":\"not initialized\"}");
+        return new String("{\"healthy\":false,\"error\":\"not initialized\"}");
     }
 
     auto& os = PluginRuntime::instance().os();
     auto status = os.health();
-    return make_string(status.to_json());
+    return new String(status.to_json());
 }
 
-ConstantSP agentOS_status(const ConstantSP& lhs, const ConstantSP& rhs) {
-    (void)lhs;
-    (void)rhs;
+// ─── agentOS::status() ──────────────────────────────────────
+
+ConstantSP agentOSStatus(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    (void)args;
 
     if (!PluginRuntime::instance().is_initialized()) {
-        return make_string("AgentOS: not initialized");
+        return new String("AgentOS: not initialized");
     }
 
     auto& os = PluginRuntime::instance().os();
-    return make_string(os.status());
+    return new String(os.status());
 }
 
-ConstantSP agentOS_registerTool(const ConstantSP& lhs, const ConstantSP& rhs) {
-    auto schema_json = to_json(lhs);
-    std::string callback_name = to_string(rhs);
+// ─── agentOS::registerTool(schemaJson, callbackName) ─────────
 
-    if (callback_name.empty()) {
-        throw RuntimeException("agentOS_registerTool: callback function name is required");
-    }
+ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args) {
+    const string usage = "Usage: agentOS::registerTool(schemaJson, callbackFuncName)";
+    if (args.size() < 2)
+        throw IllegalArgumentException("agentOS::registerTool", usage);
+    if (!args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::registerTool", usage + " schemaJson must be a string.");
+    if (!args[1]->isScalar() || args[1]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::registerTool", usage + " callbackFuncName must be a string.");
 
-    // 解析 ToolSchema
+    auto schema_json = parse_json(args[0]->getString());
+    std::string callback_name = args[1]->getString();
+
+    if (callback_name.empty())
+        throw IllegalArgumentException("agentOS::registerTool", "callbackFuncName must not be empty.");
+
     tools::ToolSchema schema;
     schema.id = schema_json.value("id", "");
     schema.description = schema_json.value("description", "");
 
-    if (schema.id.empty()) {
-        throw RuntimeException("agentOS_registerTool: 'id' is required in schema");
-    }
+    if (schema.id.empty())
+        throw IllegalArgumentException("agentOS::registerTool", "'id' is required in schema.");
 
-    // 解析参数定义
     if (schema_json.contains("params") && schema_json["params"].is_array()) {
         for (const auto& p : schema_json["params"]) {
             tools::ParamDef param;
@@ -675,7 +749,6 @@ ConstantSP agentOS_registerTool(const ConstantSP& lhs, const ConstantSP& rhs) {
             } else {
                 param.type = tools::ParamType::String;
             }
-
             schema.params.push_back(std::move(param));
         }
     }
@@ -685,27 +758,55 @@ ConstantSP agentOS_registerTool(const ConstantSP& lhs, const ConstantSP& rhs) {
 
     auto& os = PluginRuntime::instance().os();
 
-    // 注册工具：handler 通过 DolphinDB 回调函数名执行
-    // NOTE: 实际回调需要通过 DolphinDB Heap 执行脚本
-    // 这里提供一个占位 handler，实际集成时需要调用 DolphinDB 内部 API
+    // 捕获 heap 和 callback_name，通过 Session 执行 DolphinDB 函数
+    // NOTE: heap 指针在当前调用栈有效；长期使用需 copy Session
+    SessionSP session = heap->currentSession()->copy();
+    session->setUser(heap->currentSession()->getUser());
+
     os.register_tool(std::move(schema),
-        [callback_name](const nlohmann::json& args) -> tools::ToolResult {
-            // TODO: 通过 DolphinDB Heap::currentHeap() 执行回调
-            // 当前为占位实现：返回回调名和参数
-            return tools::ToolResult{
-                .success = true,
-                .output = fmt::format("DolphinDB callback '{}' called with args: {}",
-                                      callback_name, args.dump()),
-                .error = ""
-            };
+        [callback_name, session](const nlohmann::json& args_json) -> tools::ToolResult {
+            try {
+                // 通过 Session 解析并调用 DolphinDB 端定义的函数
+                FunctionDefSP func = session->getFunctionDef(callback_name);
+                if (func.isNull()) {
+                    return tools::ToolResult{
+                        .success = false,
+                        .output = "",
+                        .error = "DolphinDB function '" + callback_name + "' not found"
+                    };
+                }
+
+                // 将 JSON args 转换为 DolphinDB String 参数
+                vector<ConstantSP> ddb_args;
+                ddb_args.push_back(new String(args_json.dump()));
+
+                ConstantSP result = func->call(session->getHeap().get(), ddb_args);
+                return tools::ToolResult{
+                    .success = true,
+                    .output = result->getString(),
+                    .error = ""
+                };
+            } catch (const std::exception& e) {
+                return tools::ToolResult{
+                    .success = false,
+                    .output = "",
+                    .error = std::string("DolphinDB callback error: ") + e.what()
+                };
+            }
         });
 
-    return make_string("OK: tool '" + schema_json.value("id", "") + "' registered");
+    return new Bool(true);
 }
 
-ConstantSP agentOS_createAgent(const ConstantSP& lhs, const ConstantSP& rhs) {
-    (void)rhs;
-    auto cfg_json = to_json(lhs);
+// ─── agentOS::createAgent(configJson) ────────────────────────
+
+ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::createAgent(configJson)";
+    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+        throw IllegalArgumentException("agentOS::createAgent", usage);
+
+    auto cfg_json = parse_json(args[0]->getString());
 
     AgentConfig cfg;
     cfg.name = cfg_json.value("name", "ddb_agent");
@@ -721,15 +822,21 @@ ConstantSP agentOS_createAgent(const ConstantSP& lhs, const ConstantSP& rhs) {
         }
     }
 
-    int handle = PluginRuntime::instance().create_agent(cfg);
-    return make_int(handle);
+    long long handle = PluginRuntime::instance().create_agent(cfg);
+    return new Long(handle);
 }
 
-ConstantSP agentOS_destroyAgent(const ConstantSP& lhs, const ConstantSP& rhs) {
-    (void)rhs;
-    int handle = to_int(lhs);
+// ─── agentOS::destroyAgent(handle) ───────────────────────────
+
+ConstantSP agentOSDestroyAgent(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::destroyAgent(handle)";
+    if (args.empty())
+        throw IllegalArgumentException("agentOS::destroyAgent", usage);
+
+    long long handle = args[0]->getLong();
     bool ok = PluginRuntime::instance().destroy_agent(handle);
-    return make_bool(ok);
+    return new Bool(ok);
 }
 
 } // extern "C"

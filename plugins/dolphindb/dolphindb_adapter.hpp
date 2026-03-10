@@ -4,24 +4,27 @@
 // 将 AgentOS 核心能力封装为 DolphinDB 插件函数
 //
 // DolphinDB 插件约束：
-//   1. operator 函数：最多 2 个参数（ConstantSP lhs, ConstantSP rhs）
-//   2. system 函数：Heap* + vector<ConstantSP>
-//   3. 所有函数在 DolphinDB 工作线程上调用
-//   4. 仅插件线程可以 throw（不得在回调中抛出）
-//   5. 同进程模型 — 崩溃即全局崩溃
+//   1. operator 函数：(Heap*, const ConstantSP&, const ConstantSP&)
+//   2. system 函数：  (Heap*, vector<ConstantSP>&)
+//   3. command 函数： void(Heap*, vector<ConstantSP>&)
+//   4. 所有导出必须 extern "C"
+//   5. 同进程模型 — 崩溃即全局崩溃，子线程必须 catch 所有异常
+//   6. 后台线程需用 DolphinDB Thread 类，且 copy Session
 // ============================================================
 
-#include <CoreConcept.h>      // DolphinDB SDK: ConstantSP, TableSP, etc.
-#include <ScalarImp.h>        // String, Int, Float, Bool scalars
-#include <Util.h>             // createString, createTable, etc.
+#include <CoreConcept.h>   // ConstantSP, TableSP, Heap, Session, etc.
+#include <ScalarImp.h>     // String, Int, Float, Bool scalars
+#include <Util.h>          // createVector, createTable, createResource, etc.
+#include <Exceptions.h>    // IllegalArgumentException
 
-#include <agentos/agent.hpp>  // 完整 AgentOS API
+#include <agentos/agent.hpp>
 #include <agentos/agentos.hpp>
 
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace agentos::dolphindb {
 
@@ -31,7 +34,6 @@ namespace agentos::dolphindb {
 
 /// 全局 AgentOS 实例管理器（进程级单例）
 /// DolphinDB 同进程加载 .so，插件生命周期 = DolphinDB 进程生命周期
-/// 用 shared_ptr + mutex 保证线程安全初始化/销毁
 class PluginRuntime {
 public:
     static PluginRuntime& instance() {
@@ -40,27 +42,25 @@ public:
     }
 
     /// 初始化 AgentOS。幂等：重复调用返回已有实例。
-    /// @param config_json JSON 格式的配置
-    /// @return true if newly initialized, false if already running
     bool init(const std::string& config_json);
 
     /// 关闭 AgentOS，释放所有资源
     void close();
 
-    /// 获取 AgentOS 实例（未初始化时 throw）
+    /// 获取 AgentOS 实例（未初始化时 throw IllegalArgumentException）
     AgentOS& os();
 
     /// 是否已初始化
     bool is_initialized() const noexcept;
 
-    /// 按 DolphinDB 端 agent handle (int) 查找 Agent
-    std::shared_ptr<Agent> find_agent(int handle) const;
+    /// 按 DolphinDB 端 agent handle (long long) 查找 Agent
+    std::shared_ptr<Agent> find_agent(long long handle) const;
 
     /// 创建 Agent，返回 handle
-    int create_agent(const AgentConfig& cfg);
+    long long create_agent(const AgentConfig& cfg);
 
     /// 销毁 Agent
-    bool destroy_agent(int handle);
+    bool destroy_agent(long long handle);
 
 private:
     PluginRuntime() = default;
@@ -73,181 +73,139 @@ private:
     std::unique_ptr<AgentOS> os_;
     std::unique_ptr<kernel::ILLMBackend> backend_;
 
-    // Agent handle 映射（DolphinDB 端用 int handle 引用 Agent）
-    std::unordered_map<int, std::shared_ptr<Agent>> agents_;
-    int next_handle_{1};
+    // Agent handle 映射
+    std::unordered_map<long long, std::shared_ptr<Agent>> agents_;
+    long long next_handle_{1};
 };
 
 // ─────────────────────────────────────────────────────────────
 // § D.2  类型转换工具
 // ─────────────────────────────────────────────────────────────
 
-/// 从 ConstantSP 提取 string（支持 STRING / CHAR[]）
-std::string to_string(const ConstantSP& val);
+/// 安全提取 string（VOID / null → ""）
+std::string extract_string(const ConstantSP& val);
 
-/// 从 ConstantSP 提取 int
-int to_int(const ConstantSP& val);
+/// 安全提取 int（VOID / null → 0）
+int extract_int(const ConstantSP& val);
 
-/// 从 ConstantSP 提取 float
-float to_float(const ConstantSP& val);
+/// 安全提取 float（VOID / null → 0.0f）
+float extract_float(const ConstantSP& val);
 
-/// 从 ConstantSP 提取 JSON 对象
-nlohmann::json to_json(const ConstantSP& val);
+/// 安全提取 long long（VOID / null → 0）
+long long extract_long(const ConstantSP& val);
 
-/// AgentOS Result<T> → ConstantSP（错误时 throw DolphinDB 异常）
+/// 字符串转 JSON（空 → {}）
+nlohmann::json parse_json(const std::string& s);
+
+/// AgentOS Result<T> → T（错误时 throw IllegalArgumentException）
 template<typename T>
-T unwrap_or_throw(Result<T>&& result) {
+T unwrap_or_throw(const std::string& func_name, Result<T>&& result) {
     if (result.has_value()) {
         return std::move(result).value();
     }
-    throw RuntimeException(
+    throw IllegalArgumentException(func_name,
         "AgentOS error [" + std::to_string(static_cast<int>(result.error().code)) +
         "]: " + result.error().message);
 }
 
 /// void 特化
-inline void unwrap_or_throw(Result<void>&& result) {
+inline void unwrap_void_or_throw(const std::string& func_name, Result<void>&& result) {
     if (!result.has_value()) {
-        throw RuntimeException(
+        throw IllegalArgumentException(func_name,
             "AgentOS error [" + std::to_string(static_cast<int>(result.error().code)) +
             "]: " + result.error().message);
     }
 }
 
-/// 创建 DolphinDB 字符串标量
-ConstantSP make_string(const std::string& s);
-
-/// 创建 DolphinDB int 标量
-ConstantSP make_int(int v);
-
-/// 创建 DolphinDB bool 标量
-ConstantSP make_bool(bool v);
-
-/// 创建 DolphinDB float 标量
-ConstantSP make_float(float v);
-
 /// SearchResult 列表 → DolphinDB Table
-/// 列: content(STRING), score(FLOAT), source(STRING), timestamp(LONG)
+/// 列: content(STRING), score(DOUBLE), source(STRING), created_at(LONG)
 TableSP search_results_to_table(
     const std::vector<memory::SearchResult>& results);
 
-/// LLMResponse → DolphinDB Dict
-/// keys: content, finish_reason, prompt_tokens, completion_tokens, tool_calls_json
-ConstantSP llm_response_to_dict(const kernel::LLMResponse& resp);
-
 // ─────────────────────────────────────────────────────────────
 // § D.3  DolphinDB 导出函数声明
-// 所有 extern "C" 函数遵循 DolphinDB operator 签名：
-//   ConstantSP func(const ConstantSP& lhs, const ConstantSP& rhs)
-// lhs / rhs 可为 Void 表示未提供
+// 全部使用 system 函数签名：(Heap*, vector<ConstantSP>&)
+// close 使用 command 签名：void(Heap*, vector<ConstantSP>&)
 // ─────────────────────────────────────────────────────────────
 
 extern "C" {
 
-/// agentOS_init(configJson)
+/// 特殊入口 —— loadPlugin 后自动调用
+/// args[0] = 模块名 (String), args[1] = libHandle (Long)
+ConstantSP initialize(Heap* heap, vector<ConstantSP>& args);
+
+/// 特殊入口 —— 版本查询
+ConstantSP version(Heap* heap, vector<ConstantSP>& args);
+
+/// 特殊入口 —— 权限 / 插件信息
+ConstantSP pluginInfo(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::init([configJson])
 /// 初始化 AgentOS 运行时
-/// @param lhs: STRING — JSON 配置，包含:
-///   - api_key: LLM API key
-///   - base_url: API endpoint (可选, 默认 OpenAI)
-///   - model: 模型名 (可选, 默认 gpt-4o-mini)
-///   - scheduler_threads: 调度器线程数 (可选, 默认 4)
-///   - tpm_limit: token/min 限流 (可选, 默认 100000)
-/// @param rhs: VOID (未使用)
-/// @return STRING "OK" or throws
-ConstantSP agentOS_init(const ConstantSP& lhs, const ConstantSP& rhs);
+/// @param args[0]: STRING — JSON 配置（可选），默认空 = Mock 模式
+/// @return BOOL true
+ConstantSP agentOSInit(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_close()
-/// 关闭 AgentOS，释放所有资源
-/// @return STRING "OK"
-ConstantSP agentOS_close(const ConstantSP& lhs, const ConstantSP& rhs);
+/// agentOS::close()
+/// 关闭 AgentOS，释放所有资源 (command: void 返回)
+void agentOSClose(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_ask(question)
-/// 单轮对话：创建临时 ReActAgent，执行 question，返回回答
-/// @param lhs: STRING — 用户问题
-/// @param rhs: VOID 或 STRING — 可选的 system prompt
+/// agentOS::ask(question, [systemPrompt])
+/// 单轮对话
 /// @return STRING — LLM 回答
-ConstantSP agentOS_ask(const ConstantSP& lhs, const ConstantSP& rhs);
+ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_askStream(question)
-/// 流式对话：逐 token 打印到 DolphinDB 控制台
-/// @param lhs: STRING — 用户问题
-/// @param rhs: VOID 或 STRING — 可选的 system prompt
+/// agentOS::askStream(question, [systemPrompt])
+/// 流式对话（逐 token 打印到控制台，最终返回完整回答）
 /// @return STRING — 完整回答
-ConstantSP agentOS_askStream(const ConstantSP& lhs, const ConstantSP& rhs);
+ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_askTable(question)
-/// 对话并返回结构化结果（含 tool_calls 等元数据）
-/// @param lhs: STRING — 用户问题
-/// @param rhs: VOID 或 STRING — JSON config: {system_prompt, max_steps, agent_handle}
+/// agentOS::askTable(question, [configJson], [agentHandle])
+/// 对话并返回结构化结果
 /// @return TABLE — columns: role, content, tool_name, tool_args, tool_result
-ConstantSP agentOS_askTable(const ConstantSP& lhs, const ConstantSP& rhs);
+ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_remember(content, importance)
-/// 将内容存入长期记忆
-/// @param lhs: STRING — 要记忆的内容
-/// @param rhs: FLOAT — 重要度 [0.0, 1.0]，默认 0.5
+/// agentOS::remember(content, [importance], [source])
+/// 存入长期记忆
 /// @return STRING — memory entry ID
-ConstantSP agentOS_remember(const ConstantSP& lhs, const ConstantSP& rhs);
+ConstantSP agentOSRemember(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_recall(query, topK)
-/// 从记忆中检索相关内容
-/// @param lhs: STRING — 查询文本
-/// @param rhs: INT — 返回 top-K 条结果，默认 5
-/// @return TABLE — columns: content, score, source, timestamp
-ConstantSP agentOS_recall(const ConstantSP& lhs, const ConstantSP& rhs);
+/// agentOS::recall(query, [topK])
+/// 从记忆中检索
+/// @return TABLE — columns: content, score, source, created_at
+ConstantSP agentOSRecall(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_graphAddNode(nodeJson)
-/// 向知识图谱添加节点
-/// @param lhs: STRING — JSON: {id, type, properties: {...}}
-///   properties 将被序列化为 JSON 存入 content 字段
-/// @param rhs: VOID
+/// agentOS::graphAddNode(nodeJson)
 /// @return STRING — node ID
-ConstantSP agentOS_graphAddNode(const ConstantSP& lhs, const ConstantSP& rhs);
+ConstantSP agentOSGraphAddNode(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_graphAddEdge(edgeJson)
-/// 向知识图谱添加边
-/// @param lhs: STRING — JSON: {source, target, relation, properties: {...}}
-/// @param rhs: VOID
-/// @return STRING — "OK"
-ConstantSP agentOS_graphAddEdge(const ConstantSP& lhs, const ConstantSP& rhs);
+/// agentOS::graphAddEdge(edgeJson)
+/// @return BOOL true
+ConstantSP agentOSGraphAddEdge(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_graphQuery(query)
-/// 图谱查询
-/// @param lhs: STRING — 查询文本或 JSON query spec
-/// @param rhs: INT — max results, 默认 10
-/// @return TABLE — columns: source, relation, target, score
-ConstantSP agentOS_graphQuery(const ConstantSP& lhs, const ConstantSP& rhs);
+/// agentOS::graphQuery(nodeId, [maxResults])
+/// @return TABLE — columns: source, relation, target, weight
+ConstantSP agentOSGraphQuery(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_health()
-/// 返回健康检查结果
+/// agentOS::health()
 /// @return STRING — JSON health status
-ConstantSP agentOS_health(const ConstantSP& lhs, const ConstantSP& rhs);
+ConstantSP agentOSHealth(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_status()
-/// 返回系统运行状态摘要
-/// @return STRING — status string
-ConstantSP agentOS_status(const ConstantSP& lhs, const ConstantSP& rhs);
+/// agentOS::status()
+/// @return STRING — 系统状态摘要
+ConstantSP agentOSStatus(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_registerTool(schemaJson)
-/// 注册自定义工具（DolphinDB 函数作为工具）
-/// @param lhs: STRING — JSON schema: {id, description, params: [...]}
-/// @param rhs: STRING — DolphinDB 回调函数名（在 DolphinDB 端定义的函数）
-/// @return STRING — "OK"
-ConstantSP agentOS_registerTool(const ConstantSP& lhs, const ConstantSP& rhs);
+/// agentOS::registerTool(schemaJson, callbackFuncName)
+/// @return BOOL true
+ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_createAgent(configJson)
-/// 创建持久 Agent（可多轮对话）
-/// @param lhs: STRING — JSON config: {name, role_prompt, context_limit, ...}
-/// @param rhs: VOID
-/// @return INT — agent handle
-ConstantSP agentOS_createAgent(const ConstantSP& lhs, const ConstantSP& rhs);
+/// agentOS::createAgent(configJson)
+/// @return LONG — agent handle（可作为 resource 管理）
+ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS_destroyAgent(handle)
-/// 销毁 Agent
-/// @param lhs: INT — agent handle
-/// @param rhs: VOID
+/// agentOS::destroyAgent(handle)
 /// @return BOOL — success
-ConstantSP agentOS_destroyAgent(const ConstantSP& lhs, const ConstantSP& rhs);
+ConstantSP agentOSDestroyAgent(Heap* heap, vector<ConstantSP>& args);
 
 } // extern "C"
 
