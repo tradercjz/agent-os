@@ -16,6 +16,9 @@
 #include <iostream>
 #include <sstream>
 
+using namespace ddb;
+using std::vector;
+
 namespace agentos::dolphindb {
 
 // ─────────────────────────────────────────────────────────────
@@ -157,6 +160,8 @@ nlohmann::json parse_json(const std::string& s) {
         throw IllegalArgumentException("JSON parse",
             std::string("Invalid JSON: ") + e.what());
     }
+    // This line will never be reached due to the throw above
+    __builtin_unreachable();
 }
 
 TableSP search_results_to_table(
@@ -419,11 +424,7 @@ ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args) {
         for (const auto& tc : resp.tool_calls) {
             auto tool_result = os.tools().dispatch(tc);
             std::string obs;
-            if (tool_result.has_value()) {
-                obs = tool_result->success ? tool_result->output : tool_result->error;
-            } else {
-                obs = "Error: " + tool_result.error().message;
-            }
+            obs = tool_result.success ? tool_result.output : tool_result.error;
 
             rows.push_back({"tool", obs, tc.name, tc.args_json, obs});
 
@@ -764,8 +765,14 @@ ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args) {
     session->setUser(heap->currentSession()->getUser());
 
     os.register_tool(std::move(schema),
-        [callback_name, session](const nlohmann::json& args_json) -> tools::ToolResult {
+        [callback_name, session](const tools::ParsedArgs& args) -> tools::ToolResult {
             try {
+                // 解析参数为 JSON
+                nlohmann::json args_json;
+                for (const auto& [key, value] : args.values) {
+                    args_json[key] = value;
+                }
+                
                 // 通过 Session 解析并调用 DolphinDB 端定义的函数
                 FunctionDefSP func = session->getFunctionDef(callback_name);
                 if (func.isNull()) {

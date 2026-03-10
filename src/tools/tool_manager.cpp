@@ -20,7 +20,7 @@ ToolResult ShellTool::execute(const ParsedArgs &args) {
   // Check command length before proceeding
   if (cmd.size() > kMaxCommandLength) {
     LOG_WARN(fmt::format("ShellTool: command too long ({} > {} bytes)", cmd.size(), kMaxCommandLength));
-    return ToolResult{.output = "error: command too long", .success = false};
+    return ToolResult{.success = false, .output = "error: command too long", .error = ""};
   }
 
   // 提取第一个词（命令名）

@@ -1,0 +1,584 @@
+/*
+ * Types.h
+ *
+ *  Created on: Jul 24, 2012
+ *      Author: dzhou
+ */
+
+
+#ifndef TYPES_H_
+#define TYPES_H_
+
+#define DYAD_PRIORITY 10
+#define MONAD_PRIORITY 0
+#define RELATIONAL_PRIORITY 3
+#define LOGIC_AND_PRIORITY 2
+
+#define DELIMITOR_LINE 101
+#define DELIMITOR_SEMI_COMMA 102
+#define DELIMITOR_COMMENT 103
+
+#define OPEN_DOUBLE_QUOTE 110
+#define OPEN_SINGLE_QUOTE 111
+
+#define VAR_REGULAR 120
+#define VAR_COLUMN 121
+
+#define MACRO_FUNCTION 130
+#define MACRO_COLUMN 131
+#define MACRO_COLUMNS 132
+#define MACRO_TUPLE 133
+
+#define BRACKET_LEFT_ROUND 201
+#define BRACKET_RIGHT_ROUND 202
+#define BRACKET_LEFT_SQUARE 203
+#define BRACKET_RIGHT_SQUARE 204
+#define BRACKET_LEFT_CURLY 205
+#define BRACKET_RIGHT_CURLY 206
+
+#define OPERATOR_MAP 301
+
+#define CONSTANT_VOID 0
+#define CONSTANT_BOOL 1
+#define CONSTANT_CHAR 2
+#define CONSTANT_SHORT 3
+#define CONSTANT_INT 4
+#define CONSTANT_LONG 5
+
+#define CONSTANT_DATE 6
+#define CONSTANT_MONTH 7
+#define CONSTANT_TIME 8
+#define CONSTANT_MINUTE 9
+#define CONSTANT_SECOND 10
+#define CONSTANT_DATETIME 11
+#define CONSTANT_TIMESTAMP 12
+#define CONSTANT_NANOTIME 13
+#define CONSTANT_NANOTIMESTAMP 14
+
+#define CONSTANT_FLOAT 15
+#define CONSTANT_DOUBLE 16
+
+#define CONSTANT_SYMBOL 17
+#define CONSTANT_STRING 18
+#define CONSTANT_UUID 19
+#define CONSTANT_DOUBLE_ENUM 20
+
+#define CONSTANT_DATEHOUR 28
+#define CONSTANT_DATEMINUTE 29
+#define CONSTANT_IP 30
+#define CONSTANT_INT128 31
+#define CONSTANT_DURATION 36
+
+#include <cfloat>
+#include <string>
+#include <climits>
+#include <cstdint>
+#include <iostream>
+namespace ddb {
+
+#if defined(_WIN32) && defined(BUILD_EMBEDDED_OLTP)
+#if defined(SWORDFISH_LIB)
+#define SWORDFISH_API __declspec(dllexport)
+#else
+#define SWORDFISH_API __declspec(dllimport)
+#endif
+#else
+#define SWORDFISH_API
+#endif
+
+inline constexpr double MC_PI = 3.1415926535897932384626433832795028841971693994L;
+inline constexpr double MC_PI_2 = 1.57079632679489661923; /* pi/2 */
+inline constexpr double MC_2_PI = 0.63661977236758134308; /* 2/pi */
+inline constexpr double MC_E = 2.7182818284590452353602874713526624977572470937L;
+inline constexpr double MC_SQRT2 = 1.41421356237309504880;
+inline constexpr double MC_SQRTPI = 1.77245385090551602729816748334;
+inline constexpr float FLT_ONE_LIMIT=0.9999999;
+inline constexpr double DBL_ONE_LIMIT=0.9999999999999;
+inline constexpr float FLT_NMIN=-FLT_MAX;
+inline constexpr double DBL_NMIN=-DBL_MAX;
+inline constexpr int MAX_SHARED_OBJ_INDEX = 65536;
+inline constexpr int MAX_FREEABLE_OBJ_COUNT = 8192;
+inline constexpr size_t MAX_ARRAY_BUFFER = 134217728;
+inline constexpr int MAX_PEICE_FOR_PEICEWISE = 16;
+inline constexpr int MAX_POLYNOMIAL_ORDER = 128;
+inline constexpr int MAX_ROWS_FOR_MATRIX_COMPUTING = 8192;
+inline const std::string functionKeyword = "def";
+inline const std::string aggregationKeyword = "defg";
+inline const std::string mapreduceKeyword = "mapr";
+inline const std::string classKeyword = "class";
+inline constexpr int ARRAY_TYPE_BASE = 64;
+inline constexpr int TYPE_COUNT = 45;
+
+enum DATA_TYPE {DT_VOID,DT_BOOL,DT_CHAR,DT_SHORT,DT_INT,DT_LONG,DT_DATE,DT_MONTH,DT_TIME,DT_MINUTE,DT_SECOND,DT_DATETIME,DT_TIMESTAMP,DT_NANOTIME,DT_NANOTIMESTAMP,
+        DT_FLOAT,DT_DOUBLE,DT_SYMBOL,DT_STRING,DT_UUID,DT_FUNCTIONDEF,DT_HANDLE,DT_CODE,DT_DATASOURCE,DT_RESOURCE,DT_ANY,DT_COMPRESS,DT_DICTIONARY,DT_DATEHOUR,DT_DATEMINUTE,
+        DT_IP,DT_INT128,DT_BLOB,DT_DECIMAL,DT_COMPLEX,DT_POINT,DT_DURATION,DT_DECIMAL32,DT_DECIMAL64,DT_DECIMAL128,DT_OBJECT, DT_IOTANY, DT_INSTRUMENT, DT_MKTDATA, DT_MKTDATAROW,
+        DT_INT_ARRAY = ARRAY_TYPE_BASE + DT_INT,
+};
+
+
+enum DATA_CATEGORY {NOTHING,LOGICAL,INTEGRAL,FLOATING,TEMPORAL,LITERAL,SYSTEM,MIXED,BINARY,COMPLEX,ARRAY,DENARY};
+
+/**
+ * The order of the enumerated DATA_FORM items matters. In Constant class, we use 4 bits rather than a enum variable to
+ * indicate the data form of the constant object. In other words, the value of each DATA_FORM instance is hard coded, i.e.
+ * DF_SCALAR = 0
+ * DF_VECTOR = 1
+ * DF_PAIR = 2
+ * DF_MATRIX = 3
+ * DF_SET = 4
+ * DF_DICTIONARY = 5
+ * DF_TABLE = 6
+ * DF_CHART = 7
+ * DF_CHUNK = 8
+ * DF_SYSOBJ = 9
+ * DF_TENSOR = 10
+ * DF_EXTOBJ = 11
+ *
+ * In case we have to change the value, please review the constructor of Constant, Vector, Set, Dictionary, and Table.
+ */
+enum DATA_FORM {DF_SCALAR,DF_VECTOR,DF_PAIR,DF_MATRIX,DF_SET,DF_DICTIONARY,DF_TABLE,DF_CHART,DF_CHUNK,DF_SYSOBJ,DF_TENSOR,DF_EXTOBJ,MAX_DATA_FORMS};
+
+enum WORD_TYPE {KEYWORD,ENUM,CONSTANT,VARIABLE,FUNCNAME,GLOBALVARIABLE,OPERATOR,FUNCPATTERN,ASSIGNMENT,REFERENCE,BRACKET,DELIMITOR,COMMA,NAMESPACE,MACRO,ELLIPSIS,QUESTIONMARK,UNKNOWN};
+
+enum TABLE_TYPE {BASICTBL,REALTIMETBL,SNAPTBL,FILETBL,CHUNKTBL,JOINTBL,SEGTBL,ALIASTBL,COMPRESSTBL,LOGROWTBL,MVCCTBL,WIDETBL,DIMTBL,SNAPDIMTBL,CUSTOMIZEDTBL,CACHEDTBL,RESPOOLTBL,SUBTBL,IOTABLET,STREAMENGINE,IPCTBL,SEG_PERSISTENT_TBL,SQLTBL,MULTIJOINTBL,UNIVERSAL_TBL_JOIN,IMOLTPTABLET,TABLEJOINERTBL,PKTABLET,ORCASTREAMTBL,EXTERNALTBL,MAX_TABLE_TYPES};
+
+enum IO_ERR {OK,DISCONNECTED,NODATA,NOSPACE,TOO_LARGE_DATA,INPROGRESS,INVALIDDATA,END_OF_STREAM,READONLY,WRITEONLY,NOTEXIST,CORRUPT,NOT_LEADER,OTHERERR};
+
+enum CONSOLE_TYPE {STD,HTTP,TERMINAL,API,API2,JSON,BATCHJOB,WEBSOCKET, WEBSOCKETSUBSCRIBE, SUBSCRIBE, WEBSOCKETDEBUG, SCRIPTDEBUG, UNSUPPORTED};
+
+enum HANDLE_TYPE {FILE_HANDLE,SOCKET_HANDLE,REMOTE_HANDLE,DB_HANDLE};
+
+enum FUNCTIONDEF_TYPE {SYSFUNC, SYSPROC, OPTRFUNC, USERDEFFUNC, PARTIALFUNC, DYNAMICFUNC, PIECEWISEFUNC, JITFUNC, JITPARTIALFUNC, CLASSMETHOD, OPTFUNC, PYTHON_CLOSURE, COMPOSITEFUNC};
+
+enum FUNCTIONCALL_TYPE {THREADCALL, REGULARCALL, TEMPLATECALL};
+
+enum CHART_TYPE {CT_AREA, CT_BAR, CT_COLUMN, CT_HISTOGRAM, CT_LINE, CT_PIE, CT_SCATTER, CT_TREND, CT_KLINE, CT_SURFACE};
+
+enum OUTPUT_TYPE {STDOUT, HTTPOUT, APIOUT, LOGOUT, JOBOUT, WEBSOCKETOUT, DEBUGOUT};
+
+enum PARTITION_TYPE {SEQ, VALUE, RANGE, LIST, HIER, HASH};
+
+enum SERVER_TYPE {DATANODE, AGENT, CONTROLLER, SINGLE, COMPUTENODE};
+
+enum TranCmdType{NEW_FILE, REPLACE_FILE, UPDATE_HEADER_APPEND, APPEND_FILE, UPDATE_FILE_HEADER, RENAME_FILEDIR, INMEMORY_CHANGE};
+
+enum CHUNK_TYPE{FILE_CHUNK, TABLET_CHUNK, SPLIT_TABLET_CHUNK, SMALLFILE_CHUNK, ADDITIONAL_CHUNK};
+
+enum DURATION_UNIT {DU_NANOSECOND,DU_MICROSECOND,DU_MILLISECOND,DU_SECOND,DU_MINUTE,DU_HOUR,DU_DAY,DU_WEEK,DU_MONTH,DU_YEAR};
+
+enum STREAM_TYPE {ARRAY_STREAM, SOCKET_STREAM, FILE_STREAM, BIGARRAY_STREAM, FILEBLOCK_STREAM, OBJECT_STREAM, S3_STREAM};
+
+enum ACL_ACCESS_TYPE: short {
+	TABLE_READ, TABLE_WRITE,
+	DBOBJ_CREATE, DBOBJ_DELETE,
+	DB_MANAGE,
+	VIEW_EXEC, SCRIPT_EXEC, TEST_EXEC,
+	MAX_PRIORITY_ACCESS, MAX_PARALLELISM_ACCESS,
+	DB_OWNER,
+	QUERY_RESULT_MEM_LIMIT,
+	TASK_GROUP_MEM_LIMIT,
+	TABLE_INSERT, TABLE_UPDATE, TABLE_DELETE, 
+	DB_READ, DB_WRITE, DB_INSERT, DB_UPDATE, DB_DELETE,
+	DB_OWNER_V2, DB_MANAGE_V2, VIEW_OWNER,
+	// Catalog ddl
+	CATALOG_MANAGE,
+	// Catalog dml
+	CATALOG_READ,CATALOG_WRITE,
+	CATALOG_INSERT,CATALOG_UPDATE,
+	CATALOG_DELETE,
+	// Schema
+	SCHEMA_MANAGE,
+	SCHEMAOBJ_CREATE,
+	SCHEMAOBJ_DELETE,
+	SCHEMA_READ,
+	SCHEMA_WRITE,
+	SCHEMA_INSERT,
+	SCHEMA_UPDATE,
+	SCHEMA_DELETE,
+	COMPUTE_GROUP_EXEC,
+	// SENSITIVE_VIEW
+	TABLE_SENSITIVE_VIEW,
+	DB_SENSITIVE_VIEW,
+    MAX_PARTITION_NUM_PER_QUERY,
+    // MCP
+    MCP_MANAGE,
+    MCP_DEVELOP,
+    MCP_EXEC,
+    CREATE_SHARED_VARS,
+    // ORCA (Stream Graph, Stream Table, Stream Engine)
+    ORCA_GRAPH_CREATE,      // Create stream graph in catalog
+    ORCA_GRAPH_DROP,        // Drop stream graph from catalog
+    ORCA_GRAPH_CONTROL,     // Control stream graph: start/stop/resubmit (catalog + graph level)
+    ORCA_TABLE_CREATE,      // Create orca stream table in catalog
+    ORCA_TABLE_DROP,        // Drop orca stream table from catalog
+    ORCA_TABLE_READ,        // Read orca stream table (catalog + table level)
+    ORCA_TABLE_WRITE,       // Write to orca stream table (catalog + table level)
+    ORCA_MANAGE,            // Manage orca objects in catalog (owner-like permission)
+    ORCA_ENGINE_MANAGE      // Manage orca stream engine (catalog + engine level)
+};
+
+enum class ColumnFilterType { BloomFilter, ZoneMap, VectorIndex, TextIndex, UnknownIndex };
+
+enum class DURATION {NS, US, MS, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR, BDAY, TDAY};
+
+enum class FREQUENCY {
+	NOFREQ = -1,           // null frequency
+	ONCE = 0,  			   // only once, e.g., a zero-coupon
+    ANNUAL = 1,            // once a year
+    SEMIANNUAL = 2,        // twice a year
+    EVERYFOUTHMONTH = 3,   // every fourth month
+    QUARTERLY = 4,         // every third month
+    BIMONTHLY = 6,         // every second month
+    MONTHLY = 12,          // once a month
+    EVERYFOURTHWEEK = 13,  // every fourth week
+    BIWEEKLY = 26,         // every second week
+    WEEKLY = 52,           // once a week
+    DAILY = 365,           // once a day
+    OTHER = 999            // some other unknown frequency
+};
+
+enum class WEEKDAY {SUNDAY=0, MONDAY=1, TUESDAY=2, WEDNESDAY=3, THURSDAY=4, FRIDAY=5, SATURDAY = 6,
+    SUN=0, MON=1, TUE=2, WED=3, THU=4, FRI=5, SAT=6};
+
+enum class DUPLICATE_POLICY {KEEP_ALL, KEEP_FIRST, KEEP_LAST};
+
+enum class VECTOR_TYPE {ARRAY, BIGARRAY, SUBVECTOR, SLICEDVECTOR, REPVECTOR, IOTVECTOR, ARRAYVECTOR, IOTLAZYVECTOR, PKVECTOR, PKLAZYVECTOR, IOT_ANYVECTOR, OTHER};
+
+enum class ATOMIC {TRANS, CHUNK};
+
+enum class SYSOBJ_TYPE {CONSTITER, RANGEITER, DICTITER, DICTVALUEITER, DICTKEYITER, BUILTIN_INSTANCE, DDB_CLASS, DDB_INSTANCE, PY_CLASS, PY_INSTANCE, PY_MODULE, PY_OBJWRAPPER, KWARGS, JIT_DDB_INSTANCE, MAX_SYSOBJ_TYPES};
+
+enum class PARSER_TYPE {DDB, PYTHON, KDB, EXTRA_PARSER, MAX_PARSER_TYPES};
+
+enum class OO_ACCESS { PUBLIC, PRIVATE, PROTECTED};
+
+enum class TensorType : unsigned char { Basic = 0 };
+
+enum class DeviceType : unsigned char { CPU, CUDA, ASCEND, HYBRID};
+
+typedef __int128 int128;
+typedef unsigned __int128 uint128;
+
+constexpr int128 bitCastToSigned(uint128 v) {
+    return v & (static_cast<uint128>(1) << 127) ? ~static_cast<int128>(~v) : static_cast<int128>(v);
+}
+
+constexpr uint128 makeUint128(unsigned long long high, unsigned long long low) {
+    return uint128((static_cast<uint128>(high) << 64) | low);
+}
+
+constexpr int128 makeInt128(long long high, unsigned long long low) {
+    return int128(bitCastToSigned(static_cast<uint128>(high) << 64) | low);
+}
+
+constexpr uint128 uint128MaxValue() {
+    return makeUint128(ULLONG_MAX, ULLONG_MAX);
+}
+
+constexpr uint128 uint128MinValue() {
+    return uint128(0);
+}
+
+constexpr int128 int128MaxValue() {
+    return makeInt128(LLONG_MAX, ULLONG_MAX);
+}
+
+constexpr int128 int128MinValue() {
+    return makeInt128(LLONG_MIN, 0);
+}
+
+constexpr int128 INT128_MIN = int128MinValue();
+constexpr int128 INT128_MAX = int128MaxValue();
+constexpr uint128 UINT128_MIN = uint128MinValue();
+constexpr uint128 UINT128_MAX = uint128MaxValue();
+
+static_assert(int128MinValue() == (-int128MaxValue() - 1), "");
+static_assert(uint128(int128MinValue() | int128MaxValue()) == uint128MaxValue(), "");
+
+#ifdef INDEX64
+	typedef long long INDEX;
+	typedef unsigned long long UINDEX;
+	#define DT_INDEX DT_LONG
+	#define INDEX_MIN LLONG_MIN
+	#define INDEX_MAX LLONG_MAX
+#else
+	typedef int INDEX;
+	typedef unsigned int UINDEX;
+	#define DT_INDEX DT_INT
+	#define INDEX_MIN INT_MIN
+	#define INDEX_MAX INT_MAX
+#endif
+
+typedef union {
+	int128 int128Val;
+	long long longVal;
+	int intVal;
+	short shortVal;
+	char charVal;
+	long double longdoubleVal;
+	double doubleVal;
+	float floatVal;
+	char* pointer;
+	long longArray[2];
+	int intArray[4];
+	double doubleArray[2];
+	float floatArray[4];
+	short shortArray[8];
+	char charArray[16];
+} U16;
+
+typedef union {
+	long long longVal;
+	int intVal;
+	short shortVal;
+	char charVal;
+	double doubleVal;
+	float floatVal;
+	char* pointer;
+	int intArray[2];
+	float floatArray[2];
+	short shortArray[4];
+	char charArray[8];
+} U8;
+
+typedef union {
+	float floatVal;
+	int intVal;
+#ifdef BIT32
+	char* pointer;
+#endif
+	short shortVal;
+	char charVal;
+	short shortArray[2];
+	char charArray[4];
+} U4;
+
+enum CIPHER_MODE : int{
+    PLAIN_TEXT = 0,
+    AES_128_CTR = 1,
+    AES_128_ECB = 2,
+    AES_128_CBC = 3,
+    AES_192_CTR = 4,
+    AES_192_ECB = 5,
+    AES_192_CBC = 6,
+    AES_256_CTR = 7,
+    AES_256_ECB = 8,
+    AES_256_CBC = 9,
+    SM4_128_CTR,
+    SM4_128_ECB,
+    SM4_128_CBC,
+    UNKNOWN_MODE,
+};
+
+struct CipherMeta {
+    CIPHER_MODE mode;
+    std::string tableKey;
+};
+
+class DOLPHIN_ENUM_TYPE {
+  protected:
+    int32_t value;
+
+  public:
+    using RawType = int32_t;
+
+    constexpr DOLPHIN_ENUM_TYPE() : value(0) {
+    }
+    constexpr DOLPHIN_ENUM_TYPE(int32_t v) : value(v) {
+    }
+
+    constexpr DOLPHIN_ENUM_TYPE &operator=(int32_t v) {
+        value = v;
+        return *this;
+    }
+
+    constexpr operator int32_t() const {
+        return value;
+    }
+
+    constexpr bool operator==(const DOLPHIN_ENUM_TYPE &other) const {
+        return value == other.value;
+    }
+    constexpr bool operator==(int32_t other) const {
+        return value == other;
+    }
+    friend constexpr bool operator==(int32_t lhs, const DOLPHIN_ENUM_TYPE &rhs) {
+        return lhs == rhs.value;
+    }
+
+    constexpr bool operator!=(const DOLPHIN_ENUM_TYPE &other) const {
+        return value != other.value;
+    }
+    constexpr bool operator<(const DOLPHIN_ENUM_TYPE &other) const {
+        return value < other.value;
+    }
+    constexpr bool operator<=(const DOLPHIN_ENUM_TYPE &other) const {
+        return value <= other.value;
+    }
+    constexpr bool operator>(const DOLPHIN_ENUM_TYPE &other) const {
+        return value > other.value;
+    }
+    constexpr bool operator>=(const DOLPHIN_ENUM_TYPE &other) const {
+        return value >= other.value;
+    }
+
+    constexpr bool operator!=(const RawType &other) const {
+        return value != other;
+    }
+    constexpr bool operator<(const RawType &other) const {
+        return value < other;
+    }
+    constexpr bool operator<=(const RawType &other) const {
+        return value <= other;
+    }
+    constexpr bool operator>(const RawType &other) const {
+        return value > other;
+    }
+    constexpr bool operator>=(const RawType &other) const {
+        return value >= other;
+    }
+
+    friend std::ostream &operator<<(std::ostream &os, const DOLPHIN_ENUM_TYPE &obj) {
+        os << obj.value;
+        return os;
+    }
+};
+
+/**
+ * DBENGINE_TYPE is not intended to be used in a switch statement.
+ */
+class DBENGINE_TYPE : public DOLPHIN_ENUM_TYPE {
+public:
+    static const RawType OLAP = 0;
+    static const RawType OLTP = 1;
+    static const RawType IOT = 2;
+    static const RawType IMOLTP = 3;
+    static const RawType PKEY = 4;
+    static const RawType IOTDB = 5;
+    static const RawType RESERVED_DBENGINE_TYPES = 64;
+    static const RawType MAX_DBENGINE_TYPES = 128;
+
+    constexpr DBENGINE_TYPE() : DOLPHIN_ENUM_TYPE(MAX_DBENGINE_TYPES) {
+    }
+    constexpr DBENGINE_TYPE(RawType v) : DOLPHIN_ENUM_TYPE(v) {
+    }
+};
+
+class OBJECT_TYPE : public DOLPHIN_ENUM_TYPE {
+public:
+	constexpr OBJECT_TYPE() : DOLPHIN_ENUM_TYPE() {}
+
+    constexpr OBJECT_TYPE(int32_t v) : DOLPHIN_ENUM_TYPE(v) {}
+
+	static const RawType CONSTOBJ = 0;
+	static const RawType VAR = 1;
+	static const RawType GLOBAL = 2;
+	static const RawType ATTR = 3;
+	static const RawType DIM = 4;
+	static const RawType TUPLE = 5;
+	static const RawType FUNCTION = 6;
+	static const RawType EXPRESSION = 7;
+	static const RawType COLUMN = 8;
+	static const RawType COLUMNDEF = 9;
+	static const RawType SQLQUERY = 10;
+	static const RawType TABLEJOINER = 11;
+	static const RawType VIRTUALCONST = 12;
+	static const RawType MAPPEDCOL = 13;
+	static const RawType GLOBALTABLE = 14;
+	static const RawType GROUPTASK = 15;
+	static const RawType DIMTABLE = 16;
+	static const RawType METHODCALL = 17;
+	static const RawType SQLUPDATE = 18;
+	static const RawType SQLDELETE = 19;
+	static const RawType COLSELECTOR = 20;
+	static const RawType CASEWHEN = 21;
+	static const RawType SQLEXISTS = 22;
+	static const RawType OUTERCOLUMN = 23;
+	static const RawType SQLWITHQUERY = 24;
+	static const RawType OPTOBJ = 25;
+	static const RawType MULTITABLEJOINER = 26;
+	static const RawType ANALYTICALFUNC = 27;
+	static const RawType CONFIGVAR = 28;
+	static const RawType MACROVAR = 29;
+	static const RawType SELF = 30;
+	static const RawType CATALOGTABLE = 31;
+	static const RawType PYIFEXPR = 32;
+	static const RawType PYGETATTR = 33;
+	static const RawType PYCALL = 34;
+	static const RawType PYDYNDICT = 35;
+	static const RawType PYGETITER = 36;
+	static const RawType PYDYNLIST = 37;
+	static const RawType PYLISTCOMP = 38;
+	static const RawType PY_GLOBAL_VAR = 39;
+	static const RawType TERNARY = 40;
+	static const RawType SORTATTRIBUTE = 41;
+	static const RawType JSONOBJ = 42;
+	static const RawType KEYARG = 43;
+    static const RawType SQL_FRAGMENT_INSTANCE_GROUP = 44;
+    static const RawType EXTRA_OBJECT_START = 64;
+    static const RawType MAX_OBJECT_TYPES = 127;
+};
+
+/*
+* The statement is a node in the AST of the Dolphindb scripting.
+* The STATEMENT_TYPE from 0 to 47 is provided for dolphin parser,
+* 48 to 79 is provided for python parser,
+* 80 to 126 is provided for extra parser,
+* and MAX_STMT_TYPES is 127.
+*/
+class STATEMENT_TYPE : public DOLPHIN_ENUM_TYPE {
+  public:
+    constexpr STATEMENT_TYPE() : DOLPHIN_ENUM_TYPE(0) {
+    }
+    constexpr STATEMENT_TYPE(int32_t v) : DOLPHIN_ENUM_TYPE(v) {
+    }
+    static const STATEMENT_TYPE IF;
+    static const STATEMENT_TYPE DO;
+    static const STATEMENT_TYPE FOR;
+    static const STATEMENT_TYPE ASSIGN;
+    static const STATEMENT_TYPE ATTRASSIGN;
+    static const STATEMENT_TYPE MULTIASSIGN;
+    static const STATEMENT_TYPE GLOBALASSIGN;
+    static const STATEMENT_TYPE PROCEDURE;
+    static const STATEMENT_TYPE RETURN;
+    static const STATEMENT_TYPE CONTINUE;
+    static const STATEMENT_TYPE BREAK;
+    static const STATEMENT_TYPE EMPTY;
+    static const STATEMENT_TYPE ADHOC;
+    static const STATEMENT_TYPE SHOWTIME;
+    static const STATEMENT_TYPE INSERT;
+    static const STATEMENT_TYPE UPDATE;
+    static const STATEMENT_TYPE DEL;
+    static const STATEMENT_TYPE ASSERT;
+    static const STATEMENT_TYPE ANNOTATE;
+    static const STATEMENT_TYPE TRYCATCH;
+    static const STATEMENT_TYPE THROW;
+    static const STATEMENT_TYPE MODULE;
+    static const STATEMENT_TYPE USE;
+    static const STATEMENT_TYPE SHARE;
+    static const STATEMENT_TYPE INCLUDE;
+    static const STATEMENT_TYPE JITHEADER;
+    static const STATEMENT_TYPE CREATE;
+    static const STATEMENT_TYPE ALTER;
+    static const STATEMENT_TYPE TRANSACTION;
+    static const STATEMENT_TYPE DROP;
+    static const STATEMENT_TYPE TRACE;
+    static const STATEMENT_TYPE COMMIT;
+    static const STATEMENT_TYPE ROLLBACK;
+
+    static const STATEMENT_TYPE PYHON_STMT_START;
+    static const STATEMENT_TYPE EXTAR_STMT_START;
+    static const STATEMENT_TYPE MAX_STMT_TYPES;
+};
+} // namespace ddb
+
+namespace std {
+template <>
+struct hash<ddb::DBENGINE_TYPE> {
+    std::size_t operator()(const ddb::DBENGINE_TYPE &obj) const {
+        return std::hash<int32_t>()(static_cast<int32_t>(obj));
+    }
+};
+} // namespace std
+
+#endif /* TYPES_H_ */

@@ -1,4 +1,4 @@
-agentOS,libPluginAgentOS.so,2.00.15.0
+agentOS,libPluginAgentOS.so,3.00.5.0
 agentOSInit,init,system,0,1,0
 agentOSClose,close,command,0,0,0
 agentOSAsk,ask,system,1,2,0

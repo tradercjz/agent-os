@@ -1,16 +1,14 @@
 cmake_minimum_required(VERSION 3.13)
 project(PluginAgentOS VERSION 1.0.0 LANGUAGES CXX)
 
-# DolphinDB 插件要求 C++17（与 server ABI 保持一致）
-set(CMAKE_CXX_STANDARD 17)
+# DolphinDB 插件要求 C++20（与 AgentOS 保持一致）
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ── DolphinDB SDK 头文件 ──
-# 用户需设置 DOLPHINDB_INCLUDE_DIR 指向 DolphinDBPlugin/include
-# 例如: cmake -DDOLPHINDB_INCLUDE_DIR=/path/to/DolphinDBPlugin/include
-set(DOLPHINDB_INCLUDE_DIR "" CACHE PATH "Path to DolphinDB SDK include directory (contains CoreConcept.h)")
+# 使用主 CMakeLists.txt 传递的路径，如果未设置则查找默认路径
 if(NOT DOLPHINDB_INCLUDE_DIR)
     find_path(DOLPHINDB_INCLUDE_DIR
         NAMES CoreConcept.h
@@ -30,16 +28,23 @@ endif()
 message(STATUS "DolphinDB SDK include: ${DOLPHINDB_INCLUDE_DIR}")
 
 # ── DolphinDB 共享库（libDolphinDB.so）──
-set(DOLPHINDB_LIB_DIR "" CACHE PATH "Path to libDolphinDB.so directory")
-find_library(DOLPHINDB_LIBRARY
-    NAMES DolphinDB
-    HINTS
-        ${DOLPHINDB_LIB_DIR}
-        /opt/dolphindb/server
-        /usr/local/dolphindb/lib
-        $ENV{DOLPHINDB_HOME}/lib
-        $ENV{DOLPHINDB_HOME}
-)
+# 使用主 CMakeLists.txt 传递的路径，如果未设置则查找默认路径
+if(NOT DOLPHINDB_LIB_DIR)
+    find_library(DOLPHINDB_LIBRARY
+        NAMES DolphinDB
+        HINTS
+            /opt/dolphindb/server
+            /usr/local/dolphindb/lib
+            $ENV{DOLPHINDB_HOME}/lib
+            $ENV{DOLPHINDB_HOME}
+    )
+else()
+    find_library(DOLPHINDB_LIBRARY
+        NAMES DolphinDB
+        HINTS ${DOLPHINDB_LIB_DIR}
+        NO_DEFAULT_PATH
+    )
+endif()
 
 # ── AgentOS 库 ──
 # 方式一：作为父项目的子目录（TARGET agentos 已存在）
@@ -96,22 +101,40 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_definitions(PluginAgentOS PRIVATE
         _GLIBCXX_USE_CXX11_ABI=0
     )
+    target_compile_options(PluginAgentOS PRIVATE -fcoroutines)
+    # 使用与 AgentOS 主库兼容的 C++ 标准库设置
+    target_compile_options(PluginAgentOS PRIVATE -D_GLIBCXX_USE_CXX11_ABI=0)
 endif()
 
 # Link libraries
 if(TARGET agentos)
     target_link_libraries(PluginAgentOS PRIVATE agentos)
+    message(STATUS "PluginAgentOS: linking to AgentOS target")
 else()
     target_link_libraries(PluginAgentOS PRIVATE ${AGENTOS_LIBRARY})
+    message(STATUS "PluginAgentOS: linking to AgentOS library: ${AGENTOS_LIBRARY}")
 
     # 独立构建时需要手动链接 AgentOS 的依赖
     find_package(Threads REQUIRED)
     find_package(CURL REQUIRED)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SQLITE3 REQUIRED sqlite3)
-    find_library(DUCKDB_LIBRARY duckdb HINTS /opt/homebrew/lib /usr/local/lib)
-
+    find_library(DUCKDB_LIBRARY duckdb HINTS /usr/local/lib /opt/homebrew/lib /usr/lib64 /usr/lib)
+    find_library(DUCKDB_LIBRARY_ALT duckdb HINTS /opt/homebrew/lib /usr/local/lib /usr/lib64 /usr/lib)
+    
     include(FetchContent)
+    
+    # ---- hnswlib ----
+    FetchContent_Declare(
+      hnswlib
+      URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.zip
+    )
+    FetchContent_MakeAvailable(hnswlib)
+    # Mark hnswlib includes as SYSTEM to suppress third-party warnings under -Werror
+    get_target_property(_hnswlib_dirs hnswlib INTERFACE_INCLUDE_DIRECTORIES)
+    if(_hnswlib_dirs)
+        set_target_properties(hnswlib PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_hnswlib_dirs}")
+    endif()
     FetchContent_Declare(
         nlohmann_json
         GIT_REPOSITORY https://github.com/nlohmann/json.git
@@ -123,10 +146,20 @@ else()
         Threads::Threads
         CURL::libcurl
         nlohmann_json::nlohmann_json
+        hnswlib::hnswlib
         ${SQLITE3_LIBRARIES}
     )
-    if(DUCKDB_LIBRARY)
-        target_link_libraries(PluginAgentOS PRIVATE ${DUCKDB_LIBRARY})
+    
+    # 总是链接 DuckDB（如果找到的话）
+    if(DUCKDB_LIBRARY OR DUCKDB_LIBRARY_ALT)
+        set(DUCKDB_LIB_TO_LINK ${DUCKDB_LIBRARY})
+        if(NOT DUCKDB_LIB_TO_LINK AND DUCKDB_LIBRARY_ALT)
+            set(DUCKDB_LIB_TO_LINK ${DUCKDB_LIBRARY_ALT})
+        endif()
+        target_link_libraries(PluginAgentOS PRIVATE ${DUCKDB_LIB_TO_LINK})
+        message(STATUS "DuckDB library: ${DUCKDB_LIB_TO_LINK}")
+    else()
+        message(WARNING "DuckDB library not found - some features may not work")
     endif()
     target_include_directories(PluginAgentOS PRIVATE
         ${SQLITE3_INCLUDE_DIRS}

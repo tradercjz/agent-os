@@ -17,14 +17,14 @@
 #include <Util.h>          // createVector, createTable, createResource, etc.
 #include <Exceptions.h>    // IllegalArgumentException
 
-#include <agentos/agent.hpp>
+// 临时禁用 DuckDB 包含
+#define DUCKDB_HPP_DISABLED
+
+// 包含必要的 AgentOS 头文件
 #include <agentos/agentos.hpp>
 
-#include <memory>
-#include <mutex>
-#include <string>
-#include <unordered_map>
-#include <vector>
+using namespace ddb;
+using std::vector;
 
 namespace agentos::dolphindb {
 
@@ -103,17 +103,21 @@ T unwrap_or_throw(const std::string& func_name, Result<T>&& result) {
     if (result.has_value()) {
         return std::move(result).value();
     }
+    const auto& err = result.error();
     throw IllegalArgumentException(func_name,
-        "AgentOS error [" + std::to_string(static_cast<int>(result.error().code)) +
-        "]: " + result.error().message);
+        "AgentOS error [" + std::to_string(static_cast<int>(err.code)) +
+        "]: " + err.message);
+    // This line will never be reached due to the throw above
+    __builtin_unreachable();
 }
 
 /// void 特化
 inline void unwrap_void_or_throw(const std::string& func_name, Result<void>&& result) {
     if (!result.has_value()) {
+        const auto& err = result.error();
         throw IllegalArgumentException(func_name,
-            "AgentOS error [" + std::to_string(static_cast<int>(result.error().code)) +
-            "]: " + result.error().message);
+            "AgentOS error [" + std::to_string(static_cast<int>(err.code)) +
+            "]: " + err.message);
     }
 }
 

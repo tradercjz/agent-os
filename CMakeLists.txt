@@ -98,8 +98,8 @@ pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 # ---- DuckDB ----
 # macOS: brew install duckdb
 # Linux: see https://duckdb.org/docs/installation
-find_library(DUCKDB_LIBRARY duckdb HINTS /opt/homebrew/lib /usr/local/lib)
-find_path(DUCKDB_INCLUDE_DIR duckdb.hpp HINTS /opt/homebrew/include /usr/local/include)
+find_library(DUCKDB_LIBRARY duckdb HINTS /usr/local/lib /opt/homebrew/lib /usr/lib64 /usr/lib)
+find_path(DUCKDB_INCLUDE_DIR duckdb.hpp HINTS /usr/local/include /opt/homebrew/include /usr/include)
 if(NOT DUCKDB_LIBRARY OR NOT DUCKDB_INCLUDE_DIR)
     message(FATAL_ERROR "DuckDB not found. Install via: brew install duckdb")
 endif()
@@ -176,6 +176,13 @@ target_compile_options(agentos PRIVATE
     -Wno-error=unused-function    # Allow in header-only templates
 )
 
+# GCC ABI compatibility for DolphinDB plugin compatibility
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_definitions(agentos PUBLIC
+        _GLIBCXX_USE_CXX11_ABI=0
+    )
+endif()
+
 if(AGENTOS_ENABLE_JIEBA)
     target_link_libraries(agentos PUBLIC cppjieba::cppjieba)
     target_compile_definitions(agentos PUBLIC
@@ -248,9 +255,37 @@ install(DIRECTORY include/agentos
 )
 
 # ── DolphinDB Plugin (optional) ──
-option(AGENTOS_BUILD_DOLPHINDB_PLUGIN "Build DolphinDB plugin adapter" OFF)
+option(AGENTOS_BUILD_DOLPHINDB_PLUGIN "Build DolphinDB plugin adapter" ON)
 if(AGENTOS_BUILD_DOLPHINDB_PLUGIN)
-    add_subdirectory(plugins/dolphindb)
+    # Check if DolphinDB SDK is available
+    set(DOLPHINDB_SDK_DIR "${CMAKE_SOURCE_DIR}/third_party/dolphindb_sdk/3.00.5")
+    set(DOLPHINDB_INCLUDE_DIR "${DOLPHINDB_SDK_DIR}/include")
+    set(DOLPHINDB_LIB_DIR "${DOLPHINDB_SDK_DIR}/lib")
+    
+    if(EXISTS "${DOLPHINDB_INCLUDE_DIR}/CoreConcept.h" AND EXISTS "${DOLPHINDB_LIB_DIR}/libDolphinDB.so")
+        message(STATUS "DolphinDB SDK found: ${DOLPHINDB_SDK_DIR}")
+        add_subdirectory(plugins/dolphindb)
+        
+        # Set plugin output directory to build/plugins
+        set_target_properties(PluginAgentOS PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
+        )
+        
+        # Install plugin alongside agentos library
+        install(TARGETS PluginAgentOS
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/plugins
+            RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/plugins
+        )
+        
+        message(STATUS "DolphinDB plugin will be built: ${CMAKE_BINARY_DIR}/plugins/libPluginAgentOS.so")
+    else()
+        message(WARNING "DolphinDB SDK not found. Plugin will not be built.")
+        message(STATUS "Expected DolphinDB SDK at: ${DOLPHINDB_SDK_DIR}")
+        message(STATUS "To build plugin, ensure:")
+        message(STATUS "  - ${DOLPHINDB_INCLUDE_DIR}/CoreConcept.h exists")
+        message(STATUS "  - ${DOLPHINDB_LIB_DIR}/libDolphinDB.so exists")
+    endif()
 endif()
 
 # ── Build info ──

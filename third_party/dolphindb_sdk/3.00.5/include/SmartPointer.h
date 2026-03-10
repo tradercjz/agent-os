@@ -1,0 +1,326 @@
+/*
+ * SmartPointer.h
+ *
+ *  Created on: Jun 24, 2012
+ *      Author: dzhou
+ */
+
+#ifndef SMARTPOINTER_H_
+#define SMARTPOINTER_H_
+
+#include <atomic>
+#include <cassert>
+#include <memory>
+#include <type_traits>
+#include <typeinfo>
+#include <utility>
+
+#include "Exceptions.h"
+#include "Types.h"
+
+#if defined(__GNUC__) && __GNUC__ >= 4
+#define LIKELY(x) (__builtin_expect((x), 1))
+#define UNLIKELY(x) (__builtin_expect((x), 0))
+#else
+#define LIKELY(x) (x)
+#define UNLIKELY(x) (x)
+#endif
+
+namespace ddb {
+class SWORDFISH_API Counter {
+public:
+	constexpr Counter(void* p ,int count = 0) noexcept: p_(p), obj_(nullptr), count_(count){}
+	// reference: https://github.com/llvm/llvm-project/blob/release/15.x/libcxx/include/__memory/shared_ptr.h#L105
+	int addRef() noexcept{ return atomic_fetch_add_explicit(&count_,1,std::memory_order_relaxed)+1;} //atomic operation
+	int release() noexcept{return atomic_fetch_sub_explicit(&count_,1,std::memory_order_acq_rel)-1;} //atomic operation
+	int getCount() const noexcept{return count_.load();}
+	void* p_;
+	void* obj_;
+
+private:
+	std::atomic<int> count_;
+};
+
+class RefCountHelper {
+public:
+	virtual ~RefCountHelper() {}
+	virtual void incRef(void* counter, void* pyObj) = 0;
+	virtual void decRef(void* counter, void* pyObj) = 0;
+	virtual void zeroHandler(void* counter) = 0;
+public:
+	static RefCountHelper* inst_;
+};
+
+template <class T>
+using UniquePointer = std::unique_ptr<T>;
+
+namespace Detail {
+template<class>
+struct IsUnboundedArray : std::false_type {};
+template<class T>
+struct IsUnboundedArray<T[]> : std::true_type {};
+
+template<class>
+struct IsBoundedArray : std::false_type {};
+template<class T, std::size_t N>
+struct IsBoundedArray<T[N]> : std::true_type {};
+}  // namespace Detail
+ 
+template<class T, class... Args>
+typename std::enable_if<!std::is_array<T>::value, UniquePointer<T>>::type makeUnique(Args&&... args) {
+    return UniquePointer<T>(new T(std::forward<Args>(args)...));
+}
+ 
+template<class T>
+typename std::enable_if<Detail::IsUnboundedArray<T>::value, UniquePointer<T>>::type makeUnique(std::size_t n) {
+    return UniquePointer<T>(new typename std::remove_extent<T>::type[n]());
+}
+ 
+template<class T, class... Args>
+typename std::enable_if<Detail::IsBoundedArray<T>::value>::type makeUnique(Args&&...) = delete;
+
+template <class T>
+class SWORDFISH_API SmartPointer {
+public:
+	SmartPointer(UniquePointer<T> ptr) : SmartPointer(ptr.release()) {}
+
+	SmartPointer(T* p=0): counterP_(nullptr){
+		if (UNLIKELY(p == nullptr)) return;
+		counterP_ = new Counter(p, 1);
+	}
+
+	SmartPointer(T* p, Counter* counter): counterP_(counter){
+		if (UNLIKELY(counterP_ == nullptr)) {
+			counterP_ = new Counter(p);
+		}
+		counterP_->addRef();
+	}
+
+	Counter* getCounter() {
+		if (UNLIKELY(counterP_ == nullptr)) {
+			counterP_ = new Counter(nullptr, 1);
+		}
+		return counterP_;
+	}
+
+	Counter* getCounter() const noexcept{return counterP_;}
+
+	SmartPointer(const SmartPointer& sp) noexcept{
+		counterP_=sp.counterP_;
+		if (UNLIKELY(counterP_ == nullptr)) return;
+		counterP_->addRef();
+	}
+
+	template <class U, class = typename std::enable_if<std::is_convertible<U*, T*>::value || std::is_base_of<U, T>::value>::type>
+	SmartPointer(const SmartPointer<U>& sp) noexcept{
+		counterP_=sp.counterP_;
+		if (UNLIKELY(counterP_ == nullptr)) return;
+		// multi-inheritance is not supported in SmartPointer
+		assert(static_cast<T*>((U*)(counterP_->p_)) == (T*)(counterP_->p_));
+		counterP_->addRef();
+	}
+
+	template <class U, class = typename std::enable_if<std::is_convertible<U*, T*>::value || std::is_base_of<U, T>::value>::type>
+	SmartPointer(SmartPointer<U> &&sp) noexcept {
+		counterP_=sp.counterP_;
+		sp.counterP_=nullptr;
+		if (UNLIKELY(counterP_ == nullptr)) return;
+		// multi-inheritance is not supported in SmartPointer
+		assert(static_cast<T *>((U *)(counterP_->p_)) == (T *)(counterP_->p_));
+	}
+
+	T& operator *() const noexcept{
+        assert(counterP_ != nullptr);
+		return *((T*)counterP_->p_);
+	}
+
+	T* operator ->() const noexcept{
+		if (UNLIKELY(counterP_ == nullptr)) return nullptr;
+		return (T*)counterP_->p_;
+	}
+
+	void swap(SmartPointer& sp) noexcept{std::swap(counterP_, sp.counterP_);}
+
+	SmartPointer& operator =(SmartPointer sp) noexcept{
+		// copy and swap idiom
+		swap(sp);
+		return *this;
+	}
+
+	bool operator ==(const SmartPointer<T>& sp) const noexcept{
+		return counterP_ == sp.counterP_;
+	}
+
+	bool operator !=(const SmartPointer<T>& sp) const noexcept{
+		return !(*this == sp);
+	}
+
+	void clear(){*this = SmartPointer();}
+
+	bool isNull() const noexcept{
+		return counterP_ == nullptr || counterP_->p_ == nullptr;
+	}
+
+	int count() const noexcept{
+		if (counterP_ == nullptr) return 0;
+		return counterP_->getCount();
+	}
+
+	T* get() const noexcept{
+		if (UNLIKELY(counterP_ == nullptr)) return nullptr;
+		return (T*)counterP_->p_;
+	}
+
+	template<typename Type>
+	Type* getAs() const{
+		Type* p = dynamic_cast<Type*>((T*)counterP_->p_);
+		if (UNLIKELY(!p)){
+			throw RuntimeException("cast from type<" + string(typeid(T).name()) + "> to type<" + string(typeid(Type).name()) + "> is not allowed");
+		} 
+		return p;
+	}
+
+    ~SmartPointer(){
+		if(LIKELY(counterP_ != nullptr) && counterP_->release()==0){
+			if (counterP_->obj_) {
+                RefCountHelper::inst_->zeroHandler((void*)counterP_);
+            }
+			delete static_cast<T*>(counterP_->p_);
+			delete counterP_;
+			counterP_=0;
+		}
+    }
+
+private:
+	template<class U> friend class SmartPointer;
+	Counter* counterP_;
+};
+
+template<typename T>
+class ObjectPtr {
+public:
+
+    ObjectPtr(T* ptr = nullptr) : ptr_(ptr) {
+        if (ptr_ )
+            ptr_->addRef();
+    }
+
+    ObjectPtr(const ObjectPtr& other) noexcept : ptr_(other.ptr_) {
+        if (ptr_) ptr_->addRef();
+    }
+
+    ObjectPtr(ObjectPtr&& other) noexcept : ptr_(other.ptr_) {
+        other.ptr_ = nullptr;
+    }
+
+    ObjectPtr& operator=(const ObjectPtr& other) noexcept {
+        if (LIKELY(this != &other)) {
+            T* old = ptr_;
+            ptr_ = other.ptr_;
+            if (LIKELY(ptr_ != 0)) ptr_->addRef();
+            if (LIKELY(old != 0)) old->releaseRef();
+        }
+        return *this;
+    }
+
+    template <class U>
+    ObjectPtr(const ObjectPtr<U>& sp) noexcept {
+        static_assert(std::is_convertible<U*, T*>::value || std::is_base_of<U, T>::value,
+                      "U must be implicitly convertible to T or T must be a subclass of U");
+
+        ptr_ = static_cast<T*>(sp.get());
+        if (ptr_) {
+            ptr_->addRef();
+        }
+    }
+
+    template <class U>
+    ObjectPtr(ObjectPtr<U>&& sp) noexcept {
+        static_assert(std::is_convertible<U*, T*>::value || std::is_base_of<U, T>::value,
+                      "U must be implicitly convertible to T or T must be a subclass of U");
+
+        ptr_ = static_cast<T*>(sp.get());
+        sp.setPtr(nullptr);
+        if (UNLIKELY(ptr_ == nullptr)) return;
+        // multi-inheritance is not supported in SmartPointerIntrusive
+        assert(static_cast<T*>(static_cast<U*>(ptr_)) == static_cast<T*>(ptr_));
+    }
+
+    ObjectPtr& operator=(ObjectPtr&& other) noexcept {
+        if (this != &other) {
+            if (ptr_) ptr_->releaseRef();
+            ptr_ = other.ptr_;
+            other.setPtr(nullptr);
+        }
+        return *this;
+    }
+
+    template<typename Type>
+    Type* getAs() const {
+        Type* p = dynamic_cast<Type*>(ptr_);
+        if (UNLIKELY(!p)) {
+            throw RuntimeException("cast from type<" + std::string(typeid(T).name()) + "> to type<" + std::string(typeid(Type).name()) + "> is not allowed");
+        }
+        return p;
+    }
+
+
+    ~ObjectPtr() {
+        if (ptr_) ptr_->releaseRef();
+    }
+    void clear() noexcept {
+        *this = ObjectPtr();
+    }
+    T* get() const noexcept { return ptr_; }
+    T& operator*() const { return *ptr_; }
+    T* operator->() const noexcept { return ptr_; }
+    explicit operator bool() const noexcept { return ptr_ != nullptr; }
+    bool isNull() const noexcept {return ptr_ == nullptr;}
+    int count() const noexcept {
+        if (ptr_ == nullptr) return 0;
+        return ptr_->getCount();
+    }
+    bool operator==(const ObjectPtr<T>& sp) const noexcept { return ptr_ == sp.ptr_;}
+    bool operator!=(const ObjectPtr<T>& sp) const noexcept { return !(*this == sp);}
+    void setPtr(T* p){ ptr_ = p;}
+
+
+    /**
+     * @brief Replace the current object by *borrowing* the pointer from another ObjectPtr<U>, without increasing reference count.
+     *
+     * This templated version allows borrowing from an ObjectPtr<U> where U may be a derived type of T.
+     * The function performs a `static_cast<T*>` on the internal pointer, so:
+     *
+     * - The caller **must ensure that `U*` is safely convertible to `T*`** (i.e., upcasting or same type).
+     * - Incorrect use, such as downcasting (base-to-derived), leads to undefined behavior, including possible crashes.
+     * - No runtime type checks (`dynamic_cast`) are performed; this is a purely compile-time cast.
+     *
+     * The previously held object (if any) will be released (via `releaseRef()`).
+     * The new pointer is assigned directly without calling `addRef()`.
+     *
+     * Use with caution: misuse may cause serious memory safety issues.
+     * Use this function only when you are certain of the object types and their lifetimes.
+     */
+    void resetToBorrowed(T* p) noexcept {
+        if (ptr_ != p) {
+            if (ptr_) ptr_->releaseRef();
+            ptr_ = p;
+        }
+    }
+
+    void resetToBorrowed(const ObjectPtr<T>& other) noexcept {
+        resetToBorrowed(other.ptr_);
+    }
+
+    template <class U>
+    void resetToBorrowed(const ObjectPtr<U>& other) noexcept {
+        resetToBorrowed(static_cast<T*>(other.ptr_));
+    }
+private:
+    template<class U> friend class ObjectPtr;
+    T* ptr_;
+};
+
+
+} // namespace ddb
+#endif /* SMARTPOINTER_H_ */
