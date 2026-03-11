@@ -133,5 +133,48 @@ result2 = agentOS::askTable("刚才的分析中，哪些因素最重要？", "{}
 // 销毁 Agent
 agentOS::destroyAgent(handle)
 
-// ── 11. 关闭 ──
+// ── 11. 知识库 RAG ──
+// 创建知识库（可配置 embedding 模型、分块参数等）
+kb = agentOS::createKB('{"embedding_model":"text-embedding-3-small","chunk_size":500,"chunk_overlap":50}')
+// 也可以不传参数，使用默认配置
+// kb = agentOS::createKB()
+
+// 灌入文本文档
+agentOS::ingest(kb, "ddb_intro", "DolphinDB 是一款高性能分布式时序数据库，支持流计算、内存计算和分布式计算。广泛应用于金融量化、物联网和工业互联网等场景。")
+agentOS::ingest(kb, "ddb_sql", "DolphinDB 使用类 SQL 语法进行数据查询，支持 select、exec、pivot by、context by 等丰富的查询子句。还支持向量化计算和窗口函数。")
+agentOS::ingest(kb, "ddb_stream", "DolphinDB 的流计算引擎支持实时数据处理，提供时间序列聚合引擎、横截面引擎、异常检测引擎等多种内置引擎。可以用于实时行情处理、实时风控和实时指标计算。")
+
+// 批量灌入目录下的 .md/.txt 文件
+// agentOS::ingestDir(kb, "/data/knowledge_docs/")
+
+// 查看知识库状态
+agentOS::kbInfo(kb)
+// 返回 dict: {chunk_count: 6, doc_count: 3, embedding_model: "text-embedding-3-small", ...}
+
+// 检索知识库
+results = agentOS::search(kb, "DolphinDB 支持什么查询语法", 3)
+select * from results
+// 输出 table: doc_id | chunk_id | content | score | graph_context
+
+// RAG 对话：自动检索 + LLM 回答
+agentOS::askWithKB(kb, "DolphinDB 有哪些流计算引擎？")
+// 返回：基于知识库内容生成的回答
+
+// 带自定义 system prompt
+agentOS::askWithKB(kb, "如何用 DolphinDB 做实时风控？", 5, "你是一个金融科技专家，用中文详细回答")
+
+// 删除文档
+agentOS::removeDoc(kb, "ddb_intro")
+
+// 持久化知识库到磁盘
+agentOS::saveKB(kb, "/data/my_kb/")
+
+// 从磁盘加载（先创建空 KB，再 load）
+kb2 = agentOS::createKB()
+agentOS::loadKB(kb2, "/data/my_kb/")
+
+// 销毁知识库
+agentOS::destroyKB(kb)
+
+// ── 12. 关闭 ──
 agentOS::close()

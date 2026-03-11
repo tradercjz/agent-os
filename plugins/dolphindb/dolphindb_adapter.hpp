@@ -422,6 +422,47 @@ private:
 #endif // AGENTOS_ENABLE_SSE
 
 // ─────────────────────────────────────────────────────────────
+// § D.1e  KnowledgeBase 实例管理器
+// ─────────────────────────────────────────────────────────────
+
+/// 管理多个 KnowledgeBase 实例（进程级单例）
+/// DolphinDB 端通过 handle (long long) 引用知识库
+class KBManager {
+public:
+    static KBManager& instance() {
+        static KBManager inst;
+        return inst;
+    }
+
+    /// 创建知识库，返回 handle
+    long long create(std::shared_ptr<knowledge::KnowledgeBase> kb) {
+        std::lock_guard lk(mu_);
+        long long h = next_handle_++;
+        kbs_[h] = std::move(kb);
+        return h;
+    }
+
+    /// 查找知识库
+    std::shared_ptr<knowledge::KnowledgeBase> find(long long handle) {
+        std::lock_guard lk(mu_);
+        auto it = kbs_.find(handle);
+        return (it != kbs_.end()) ? it->second : nullptr;
+    }
+
+    /// 销毁知识库
+    bool destroy(long long handle) {
+        std::lock_guard lk(mu_);
+        return kbs_.erase(handle) > 0;
+    }
+
+private:
+    KBManager() = default;
+    std::mutex mu_;
+    std::unordered_map<long long, std::shared_ptr<knowledge::KnowledgeBase>> kbs_;
+    long long next_handle_{1};
+};
+
+// ─────────────────────────────────────────────────────────────
 // § D.2  类型转换工具
 // ─────────────────────────────────────────────────────────────
 
@@ -570,6 +611,60 @@ ConstantSP agentOSPoll(Heap* heap, vector<ConstantSP>& args);
 /// 取消/清理异步请求
 /// @return BOOL
 ConstantSP agentOSCancelAsync(Heap* heap, vector<ConstantSP>& args);
+
+// ─── RAG: KnowledgeBase 系列函数 ────────────────────────────
+
+/// agentOS::createKB([configJson])
+/// 创建知识库实例
+/// configJson: {"vector_dim":1536, "max_chunks":100000, "embedding_model":"text-embedding-3-small",
+///              "chunk_size":500, "chunk_overlap":50}
+/// @return LONG — KB handle
+ConstantSP agentOSCreateKB(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::destroyKB(handle)
+/// 销毁知识库
+/// @return BOOL
+ConstantSP agentOSDestroyKB(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::saveKB(handle, dirPath)
+/// 持久化知识库到磁盘
+/// @return BOOL
+ConstantSP agentOSSaveKB(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::loadKB(handle, dirPath)
+/// 从磁盘加载知识库
+/// @return BOOL
+ConstantSP agentOSLoadKB(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::ingest(handle, docId, text)
+/// 向知识库灌入文本
+/// @return INT — 成功灌入的 chunk 数
+ConstantSP agentOSIngest(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::ingestDir(handle, dirPath)
+/// 批量灌入目录下的 .md/.txt 文件
+/// @return BOOL
+ConstantSP agentOSIngestDir(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::removeDoc(handle, docId)
+/// 从知识库中删除文档
+/// @return BOOL
+ConstantSP agentOSRemoveDoc(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::search(handle, query, [topK], [graphHops])
+/// 混合检索（BM25 + HNSW + RRF）
+/// @return TABLE — columns: doc_id, chunk_id, content, score, graph_context
+ConstantSP agentOSSearch(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::askWithKB(handle, question, [topK], [systemPrompt])
+/// RAG 对话：自动检索知识库 + 拼接上下文 + LLM 生成
+/// @return STRING — LLM 回答
+ConstantSP agentOSAskWithKB(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::kbInfo(handle)
+/// 查询知识库状态
+/// @return DICTIONARY — {chunk_count, doc_count, embedding_model, chunk_size, chunk_overlap}
+ConstantSP agentOSKBInfo(Heap* heap, vector<ConstantSP>& args);
 
 } // extern "C"
 

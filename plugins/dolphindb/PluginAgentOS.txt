@@ -17,3 +17,13 @@ agentOSDestroyAgent,destroyAgent,system,1,1,0
 agentOSAskAsync,askAsync,system,1,2,0
 agentOSPoll,poll,system,1,1,0
 agentOSCancelAsync,cancelAsync,system,1,1,0
+agentOSCreateKB,createKB,system,0,1,0
+agentOSDestroyKB,destroyKB,system,1,1,0
+agentOSSaveKB,saveKB,system,2,2,0
+agentOSLoadKB,loadKB,system,2,2,0
+agentOSIngest,ingest,system,3,3,0
+agentOSIngestDir,ingestDir,system,2,2,0
+agentOSRemoveDoc,removeDoc,system,2,2,0
+agentOSSearch,search,system,2,4,0
+agentOSAskWithKB,askWithKB,system,2,4,0
+agentOSKBInfo,kbInfo,system,1,1,0

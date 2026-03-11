@@ -13,6 +13,7 @@
 
 #include <agentos/core/logger.hpp>
 #include <agentos/memory/graph_memory.hpp>
+#include <agentos/knowledge/knowledge_base.hpp>
 #include <iostream>
 #include <sstream>
 
@@ -1099,6 +1100,332 @@ ConstantSP agentOSCancelAsync(Heap* heap, vector<ConstantSP>& args) {
     std::string rid = args[0]->getString();
     AsyncRequestManager::instance().remove(rid);
     return new Bool(true);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RAG: KnowledgeBase 系列函数
+// ═══════════════════════════════════════════════════════════════
+
+// ─── agentOS::createKB([configJson]) ─────────────────────────
+//
+// 创建知识库实例，返回 handle (LONG)。
+// configJson 可选字段:
+//   vector_dim       : INT    (默认 1536)
+//   max_chunks       : INT    (默认 100000)
+//   embedding_model  : STRING (默认 "text-embedding-3-small")
+//   chunk_size       : INT    (默认 500)
+//   chunk_overlap    : INT    (默认 50)
+
+ConstantSP agentOSCreateKB(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    DDB_SAFE_BEGIN
+
+    auto& os = PluginRuntime::instance().os();
+
+    // 默认参数
+    uint32_t vector_dim = 1536;
+    size_t max_chunks = 100000;
+    std::string embedding_model = "text-embedding-3-small";
+    size_t chunk_size = 500;
+    size_t chunk_overlap = 50;
+
+    // 解析可选 configJson
+    if (!args.empty() && !args[0]->isNull() && args[0]->getType() == DT_STRING) {
+        std::string cfg_str = args[0]->getString();
+        if (!cfg_str.empty()) {
+            auto cfg = nlohmann::json::parse(cfg_str, nullptr, false);
+            if (!cfg.is_discarded()) {
+                if (cfg.contains("vector_dim"))      vector_dim      = cfg["vector_dim"].get<uint32_t>();
+                if (cfg.contains("max_chunks"))      max_chunks      = cfg["max_chunks"].get<size_t>();
+                if (cfg.contains("embedding_model")) embedding_model = cfg["embedding_model"].get<std::string>();
+                if (cfg.contains("chunk_size"))      chunk_size      = cfg["chunk_size"].get<size_t>();
+                if (cfg.contains("chunk_overlap"))   chunk_overlap   = cfg["chunk_overlap"].get<size_t>();
+            }
+        }
+    }
+
+    // 获取 LLM backend 用于 embedding
+    auto llm = os.kernel().backend_ptr();
+    if (!llm) {
+        throw RuntimeException("agentOS::createKB: LLM backend not initialized. Call agentOS::init first.");
+    }
+
+    auto kb = std::make_shared<knowledge::KnowledgeBase>(
+        llm, vector_dim, max_chunks, embedding_model);
+    kb->set_chunk_params(chunk_size, chunk_overlap);
+
+    long long handle = KBManager::instance().create(std::move(kb));
+    return new Long(handle);
+
+    DDB_SAFE_END("agentOS::createKB")
+}
+
+// ─── agentOS::destroyKB(handle) ──────────────────────────────
+
+ConstantSP agentOSDestroyKB(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::destroyKB(handle)";
+    if (args.empty()) throw IllegalArgumentException("agentOS::destroyKB", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+    bool ok = KBManager::instance().destroy(handle);
+    if (!ok) throw IllegalArgumentException("agentOS::destroyKB", "Unknown KB handle: " + std::to_string(handle));
+    return new Bool(true);
+    DDB_SAFE_END("agentOS::destroyKB")
+}
+
+// ─── agentOS::saveKB(handle, dirPath) ────────────────────────
+
+ConstantSP agentOSSaveKB(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::saveKB(handle, dirPath)";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::saveKB", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+    std::string dir_path = args[1]->getString();
+
+    auto kb = KBManager::instance().find(handle);
+    if (!kb) throw IllegalArgumentException("agentOS::saveKB", "Unknown KB handle: " + std::to_string(handle));
+
+    bool ok = kb->save(dir_path);
+    if (!ok) throw RuntimeException("agentOS::saveKB: failed to save to " + dir_path);
+    return new Bool(true);
+    DDB_SAFE_END("agentOS::saveKB")
+}
+
+// ─── agentOS::loadKB(handle, dirPath) ────────────────────────
+
+ConstantSP agentOSLoadKB(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::loadKB(handle, dirPath)";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::loadKB", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+    std::string dir_path = args[1]->getString();
+
+    auto kb = KBManager::instance().find(handle);
+    if (!kb) throw IllegalArgumentException("agentOS::loadKB", "Unknown KB handle: " + std::to_string(handle));
+
+    bool ok = kb->load(dir_path);
+    if (!ok) throw RuntimeException("agentOS::loadKB: failed to load from " + dir_path);
+    return new Bool(true);
+    DDB_SAFE_END("agentOS::loadKB")
+}
+
+// ─── agentOS::ingest(handle, docId, text) ────────────────────
+
+ConstantSP agentOSIngest(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::ingest(handle, docId, text)";
+    if (args.size() < 3) throw IllegalArgumentException("agentOS::ingest", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+    std::string doc_id = args[1]->getString();
+    std::string text = args[2]->getString();
+
+    if (doc_id.empty()) throw IllegalArgumentException("agentOS::ingest", "docId must not be empty");
+    if (text.empty()) throw IllegalArgumentException("agentOS::ingest", "text must not be empty");
+
+    auto kb = KBManager::instance().find(handle);
+    if (!kb) throw IllegalArgumentException("agentOS::ingest", "Unknown KB handle: " + std::to_string(handle));
+
+    auto result = kb->ingest_text(doc_id, text);
+    if (!result.has_value()) {
+        throw RuntimeException("agentOS::ingest: " + result.error().message);
+    }
+    return new Int(static_cast<int>(result.value()));
+    DDB_SAFE_END("agentOS::ingest")
+}
+
+// ─── agentOS::ingestDir(handle, dirPath) ─────────────────────
+
+ConstantSP agentOSIngestDir(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::ingestDir(handle, dirPath)";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::ingestDir", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+    std::string dir_path = args[1]->getString();
+
+    auto kb = KBManager::instance().find(handle);
+    if (!kb) throw IllegalArgumentException("agentOS::ingestDir", "Unknown KB handle: " + std::to_string(handle));
+
+    kb->ingest_directory(dir_path);
+    return new Bool(true);
+    DDB_SAFE_END("agentOS::ingestDir")
+}
+
+// ─── agentOS::removeDoc(handle, docId) ───────────────────────
+
+ConstantSP agentOSRemoveDoc(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::removeDoc(handle, docId)";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::removeDoc", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+    std::string doc_id = args[1]->getString();
+
+    auto kb = KBManager::instance().find(handle);
+    if (!kb) throw IllegalArgumentException("agentOS::removeDoc", "Unknown KB handle: " + std::to_string(handle));
+
+    bool ok = kb->remove_document(doc_id);
+    return new Bool(ok);
+    DDB_SAFE_END("agentOS::removeDoc")
+}
+
+// ─── agentOS::search(handle, query, [topK], [graphHops]) ─────
+//
+// 返回 TABLE: doc_id(STRING), chunk_id(STRING), content(STRING),
+//             score(DOUBLE), graph_context(STRING)
+
+ConstantSP agentOSSearch(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::search(handle, query, [topK], [graphHops])";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::search", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+    std::string query = args[1]->getString();
+    size_t top_k = 5;
+    int graph_hops = 0;
+
+    if (args.size() >= 3 && !args[2]->isNull()) top_k = static_cast<size_t>(args[2]->getInt());
+    if (args.size() >= 4 && !args[3]->isNull()) graph_hops = args[3]->getInt();
+
+    if (query.empty()) throw IllegalArgumentException("agentOS::search", "query must not be empty");
+
+    auto kb = KBManager::instance().find(handle);
+    if (!kb) throw IllegalArgumentException("agentOS::search", "Unknown KB handle: " + std::to_string(handle));
+
+    auto results = kb->search(query, top_k, graph_hops);
+
+    // 构建 DolphinDB Table
+    size_t n = results.size();
+    auto col_doc_id        = Util::createVector(DT_STRING, n);
+    auto col_chunk_id      = Util::createVector(DT_STRING, n);
+    auto col_content       = Util::createVector(DT_STRING, n);
+    auto col_score         = Util::createVector(DT_DOUBLE, n);
+    auto col_graph_context = Util::createVector(DT_STRING, n);
+
+    for (size_t i = 0; i < n; ++i) {
+        col_doc_id->setString(i, results[i].doc_id);
+        col_chunk_id->setString(i, results[i].chunk_id);
+        col_content->setString(i, results[i].content);
+        col_score->setDouble(i, results[i].score);
+        col_graph_context->setString(i, results[i].graph_context);
+    }
+
+    vector<std::string> col_names = {"doc_id", "chunk_id", "content", "score", "graph_context"};
+    vector<ConstantSP> cols = {col_doc_id, col_chunk_id, col_content, col_score, col_graph_context};
+    return Util::createTable(col_names, cols);
+    DDB_SAFE_END("agentOS::search")
+}
+
+// ─── agentOS::askWithKB(handle, question, [topK], [systemPrompt]) ──
+//
+// RAG 对话: 检索知识库 → 拼接上下文 → LLM 生成
+// 返回 STRING — LLM 回答
+
+ConstantSP agentOSAskWithKB(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::askWithKB(handle, question, [topK], [systemPrompt])";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::askWithKB", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+    std::string question = args[1]->getString();
+    size_t top_k = 5;
+    std::string system_prompt;
+
+    if (args.size() >= 3 && !args[2]->isNull()) top_k = static_cast<size_t>(args[2]->getInt());
+    if (args.size() >= 4 && !args[3]->isNull() && args[3]->getType() == DT_STRING) {
+        system_prompt = args[3]->getString();
+    }
+
+    if (question.empty()) throw IllegalArgumentException("agentOS::askWithKB", "question must not be empty");
+
+    auto kb = KBManager::instance().find(handle);
+    if (!kb) throw IllegalArgumentException("agentOS::askWithKB", "Unknown KB handle: " + std::to_string(handle));
+
+    auto& os = PluginRuntime::instance().os();
+
+    // Step 1: 检索知识库
+    auto results = kb->search(question, top_k);
+
+    // Step 2: 拼接检索结果为 context
+    std::string context;
+    for (size_t i = 0; i < results.size(); ++i) {
+        context += "[" + std::to_string(i + 1) + "] (来源: " + results[i].doc_id + ")\n";
+        context += results[i].content + "\n\n";
+        if (!results[i].graph_context.empty()) {
+            context += "相关知识图谱:\n" + results[i].graph_context + "\n\n";
+        }
+    }
+
+    // Step 3: 构建 RAG prompt
+    std::string rag_system = system_prompt.empty()
+        ? "You are a helpful AI assistant integrated with DolphinDB. "
+          "Answer questions based on the provided context. "
+          "If the context doesn't contain relevant information, say so."
+        : system_prompt;
+
+    std::string rag_user = "Based on the following context, answer the question.\n\n"
+                           "## Context\n" + context +
+                           "## Question\n" + question;
+
+    // Step 4: LLM 推理
+    kernel::LLMRequest llm_req;
+    llm_req.messages.push_back(kernel::Message::system(rag_system));
+    llm_req.messages.push_back(kernel::Message::user(rag_user));
+
+    std::string full_response;
+    auto result = os.kernel().stream_infer(llm_req,
+        [&full_response](std::string_view token) {
+            full_response += std::string(token);
+        });
+
+    if (!result.has_value()) {
+        auto& err = result.error();
+        throw RuntimeException("agentOS::askWithKB LLM error: " + err.message);
+    }
+
+    if (full_response.empty() && result.value().content.size() > 0) {
+        full_response = result.value().content;
+    }
+
+    return new String(full_response.empty() ? "(no response)" : full_response);
+    DDB_SAFE_END("agentOS::askWithKB")
+}
+
+// ─── agentOS::kbInfo(handle) ─────────────────────────────────
+//
+// 返回 DICTIONARY: chunk_count, doc_count, embedding_model, chunk_size, chunk_overlap
+
+ConstantSP agentOSKBInfo(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::kbInfo(handle)";
+    if (args.empty()) throw IllegalArgumentException("agentOS::kbInfo", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+
+    auto kb = KBManager::instance().find(handle);
+    if (!kb) throw IllegalArgumentException("agentOS::kbInfo", "Unknown KB handle: " + std::to_string(handle));
+
+    DictionarySP dict = Util::createDictionary(DT_STRING, nullptr, DT_ANY, nullptr);
+    dict->set(new String("chunk_count"),    new Long(static_cast<long long>(kb->chunk_count())));
+    dict->set(new String("doc_count"),      new Long(static_cast<long long>(kb->document_count())));
+    dict->set(new String("embedding_model"),new String(kb->embedding_model()));
+    dict->set(new String("chunk_size"),     new Int(static_cast<int>(kb->chunk_size())));
+    dict->set(new String("chunk_overlap"),  new Int(static_cast<int>(kb->chunk_overlap())));
+    return dict;
+    DDB_SAFE_END("agentOS::kbInfo")
 }
 
 } // extern "C"
