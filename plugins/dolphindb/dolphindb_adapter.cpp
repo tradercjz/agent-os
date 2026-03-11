@@ -990,7 +990,12 @@ ConstantSP agentOSAskAsync(Heap* heap, vector<ConstantSP>& args) {
         }
     });
 
-    return new String(rid);
+    // 返回带 __stream__ 标记的 dict，前端据此进入流式渲染模式
+    DictionarySP dict = Util::createDictionary(DT_STRING, nullptr, DT_ANY, nullptr);
+    dict->set(new String("__stream__"), new Bool(true));
+    dict->set(new String("requestId"),  new String(rid));
+    dict->set(new String("status"),     new String("streaming"));
+    return dict;
 }
 
 // ─── agentOS::poll(requestId) ────────────────────────────────
