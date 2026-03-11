@@ -151,16 +151,149 @@ async handleStreamResponse(ddbobj: DdbObj) {
 
 ---
 
-## 为什么不用 SSE / WebSocket / 额外代理？
+## 方案 B（推荐）：SSE 真推送
 
-插件函数全部运行在 DolphinDB Server 进程内，前端通过 `ddb.run()` 已经和 Server 有稳定连接。在这个连接上做 poll 循环：
+插件可选内嵌一个轻量 HTTP 服务（基于 [cpp-httplib](https://github.com/yhirose/cpp-httplib)），提供标准 SSE 端点。前端用 `EventSource` 直连，token 一出来立刻推送，无需轮询。
 
-- **零部署成本**：不加端口、不加服务、不改网络拓扑
-- **复用已有认证**：poll 走的和普通脚本执行一样的 session
-- **对旧前端无感**：不识别 `__stream__` 的前端就当普通 dict 展示，不报错
-- **延迟可控**：同进程内 poll 开销极低（微秒级内存读取），瓶颈在网络 RTT
+### 开启方式
 
-如果未来需要进一步优化（比如减少 HTTP 请求次数），可以考虑 DolphinDB 的 streaming publish 机制或在 Web 层升级为 WebSocket。但当前方案已足够满足流式渲染需求。
+编译时加 `-DAGENTOS_ENABLE_SSE=ON`，并将 `httplib.h` 放到 `third_party/httplib/` 目录：
+
+```bash
+# 下载 cpp-httplib（header-only，单文件）
+wget -O third_party/httplib/httplib.h \
+  https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h
+
+# 编译时开启 SSE
+cmake -DAGENTOS_ENABLE_SSE=ON -DAGENTOS_NO_DUCKDB=ON ..
+```
+
+### SSE 开启后 askAsync 返回值变化
+
+```dolphindb
+result = agentOS::askAsync("帮我分析最近的交易数据")
+// 返回 dict:
+//   __stream__ = true
+//   requestId  = "req_42"
+//   status     = "streaming"
+//   sseUrl     = "http://localhost:8849/sse"    ← 新增
+//   token      = "a3f7...8e1d"                  ← 新增（一次性令牌）
+```
+
+相比方案 A 多了两个字段：`sseUrl`（SSE 端点地址）和 `token`（一次性安全令牌）。
+
+### 安全机制
+
+- **token 绑定 requestId**：每个 token 只能消费对应的 requestId
+- **一次性**：首次 SSE 连接后 token 立即失效，防重放
+- **自动过期**：60 秒内未使用自动作废
+- **内存存储**：进程重启自动清空，无持久化风险
+
+### 前端对接（SSE 优先，poll 兜底）
+
+```typescript
+async handleStreamResponse(ddbobj: DdbObj) {
+    const requestId = ddbobj.value.get('requestId').value;
+    const sseUrl    = ddbobj.value.get('sseUrl')?.value;
+    const token     = ddbobj.value.get('token')?.value;
+
+    let accumulated = '';
+    this.set({ result: { type: 'stream', text: '' } });
+
+    // 优先 SSE，无 sseUrl 时降级为 poll
+    if (sseUrl && token) {
+        await this.streamViaSSE(sseUrl, requestId, token, accumulated);
+    } else {
+        await this.streamViaPoll(requestId, accumulated);
+    }
+}
+
+// 方案 B: SSE 真推送
+async streamViaSSE(sseUrl: string, rid: string, token: string, accumulated: string) {
+    return new Promise<void>((resolve, reject) => {
+        const url = `${sseUrl}?rid=${rid}&token=${encodeURIComponent(token)}`;
+        const es = new EventSource(url);
+
+        es.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.delta) {
+                    accumulated += data.delta;
+                    this.set({ result: { type: 'stream', text: accumulated } });
+                }
+                if (data.done) {
+                    es.close();
+                    resolve();
+                }
+                if (data.error) {
+                    es.close();
+                    this.set({ result: { type: 'stream', text: accumulated, error: data.error } });
+                    resolve();
+                }
+            } catch (e) {
+                // 非 JSON 数据，忽略
+            }
+        };
+
+        es.onerror = () => {
+            es.close();
+            // SSE 断开时降级为 poll 完成剩余部分
+            this.streamViaPoll(rid, accumulated).then(resolve);
+        };
+    });
+}
+
+// 方案 A: poll 兜底
+async streamViaPoll(rid: string, accumulated: string) {
+    while (true) {
+        const pollResult = await this.ddb.run(`agentOS::poll("${rid}")`);
+        const delta = pollResult.value.get('delta').value;
+        const done  = pollResult.value.get('done').value;
+        const error = pollResult.value.get('error').value;
+
+        if (delta) {
+            accumulated += delta;
+            this.set({ result: { type: 'stream', text: accumulated } });
+        }
+        if (done) {
+            if (error) {
+                this.set({ result: { type: 'stream', text: accumulated, error } });
+            }
+            break;
+        }
+        await sleep(50);
+    }
+}
+```
+
+### 配置
+
+在 `agentOS::init` 的 JSON 配置中可自定义 SSE 端口和 CORS：
+
+```dolphindb
+agentOS::init('{"api_key": "sk-xxx", "sse_port": 8849, "sse_cors": "http://your-domain.com"}')
+```
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| sse_port | 8849 | SSE 服务监听端口 |
+| sse_cors | `*` | CORS 允许的源，生产环境建议设为具体域名 |
+
+---
+
+## 两种方案对比
+
+| | 方案 A: Poll | 方案 B: SSE（推荐） |
+|--|-------------|-------------------|
+| 编译选项 | 默认可用 | 需 `-DAGENTOS_ENABLE_SSE=ON` |
+| 额外依赖 | 无 | cpp-httplib（header-only 单文件） |
+| 额外端口 | 无 | 需要一个（默认 8849） |
+| 延迟 | 轮询间隔 + RTT | 仅网络传输延迟 |
+| 空请求 | 大量无效 poll | 无（服务端推送） |
+| 体验 | 可接受，略有顿挫 | 流畅，与 ChatGPT 一致 |
+| 降级 | — | SSE 断开自动降级为 poll |
+
+**建议**：生产环境开启 SSE，开发/测试可先用 poll 快速调通。两个方案可以共存，前端代码自动选择。
 
 ---
 
@@ -170,12 +303,20 @@ async handleStreamResponse(ddbobj: DdbObj) {
 // 加载插件
 loadPlugin("/path/to/PluginAgentOS.txt")
 
+// 初始化（开启 SSE 时会自动启动 SSE 服务）
+agentOS::init('{"api_key": "sk-xxx", "sse_port": 8849}')
+
 // 同步调用（阻塞，等完整结果）
 result = agentOS::ask("什么是DolphinDB？")
 
 // 异步流式调用
 streamObj = agentOS::askAsync("帮我分析最近的交易数据")
-// streamObj 是 dict: {__stream__: true, requestId: "...", status: "streaming"}
+// streamObj 是 dict:
+//   __stream__ = true
+//   requestId  = "req_1"
+//   status     = "streaming"
+//   sseUrl     = "http://localhost:8849/sse"    (SSE 开启时)
+//   token      = "a3f7...8e1d"                  (SSE 开启时)
 
 // 手动 poll（一般由前端自动执行，此处仅演示）
 pollResult = agentOS::poll(streamObj["requestId"])
@@ -191,6 +332,6 @@ agentOS::cancelAsync(streamObj["requestId"])
 
 | 角色 | 要做的事 |
 |------|---------|
-| **插件（已完成）** | `askAsync` 返回 `{__stream__: true, requestId, status}` dict；`poll` 返回增量 delta |
-| **前端** | 检测 `__stream__` 标记 → 自动 poll 循环 → 增量拼接渲染 → done 时停止 |
-| **后端 / 运维** | 无额外工作 |
+| **插件（已完成）** | `askAsync` 返回 `{__stream__, requestId, status, sseUrl?, token?}`；`poll` 返回增量 delta；SSE 服务端推送 |
+| **前端** | 检测 `__stream__` → 有 `sseUrl` 用 EventSource 连接，无则降级 poll → 增量渲染 |
+| **后端 / 运维** | 编译时加 `-DAGENTOS_ENABLE_SSE=ON`，确保 SSE 端口可访问 |

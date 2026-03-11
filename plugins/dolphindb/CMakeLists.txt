@@ -68,6 +68,12 @@ else()
     message(STATUS "AgentOS library: ${AGENTOS_LIBRARY}")
 endif()
 
+# ── 可选：内嵌 SSE 服务（需要 cpp-httplib） ──
+# 开启方式: cmake -DAGENTOS_ENABLE_SSE=ON ..
+# 需要将 httplib.h 放到 third_party/httplib/ 目录下
+# 下载: https://github.com/yhirose/cpp-httplib/blob/master/httplib.h
+option(AGENTOS_ENABLE_SSE "Enable embedded SSE server for streaming (requires cpp-httplib)" OFF)
+
 # ── 插件动态库 ──
 add_library(PluginAgentOS SHARED
     dolphindb_adapter.cpp
@@ -95,6 +101,26 @@ target_compile_definitions(PluginAgentOS PRIVATE
     LINUX                       # 平台标识（Windows 用 WINDOWS）
     LOCKFREE_SYMBASE            # DolphinDB release 1.30+ 必须
 )
+
+# SSE 编译宏和头文件路径
+if(AGENTOS_ENABLE_SSE)
+    target_compile_definitions(PluginAgentOS PRIVATE AGENTOS_ENABLE_SSE)
+    # cpp-httplib header-only 库
+    set(HTTPLIB_DIR "${CMAKE_SOURCE_DIR}/../../third_party/httplib" CACHE PATH "cpp-httplib directory")
+    if(EXISTS "${HTTPLIB_DIR}/httplib.h")
+        target_include_directories(PluginAgentOS SYSTEM PRIVATE ${HTTPLIB_DIR})
+        message(STATUS "SSE enabled: using cpp-httplib from ${HTTPLIB_DIR}")
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/httplib/httplib.h")
+        target_include_directories(PluginAgentOS SYSTEM PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/httplib")
+        message(STATUS "SSE enabled: using cpp-httplib from project third_party")
+    else()
+        message(FATAL_ERROR
+            "AGENTOS_ENABLE_SSE is ON but httplib.h not found.\n"
+            "Download from: https://github.com/yhirose/cpp-httplib/blob/master/httplib.h\n"
+            "Place it in: ${HTTPLIB_DIR}/httplib.h")
+    endif()
+endif()
 
 # GCC ABI 兼容（DolphinDB server 使用旧 ABI）
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

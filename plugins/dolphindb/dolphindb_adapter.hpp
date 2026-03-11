@@ -24,6 +24,14 @@
 #include <thread>
 #include <deque>
 #include <condition_variable>
+#include <random>
+#include <chrono>
+
+// SSE 服务：通过 cmake -DAGENTOS_ENABLE_SSE=ON 开启
+// 需要 cpp-httplib（header-only）: third_party/httplib/httplib.h
+#ifdef AGENTOS_ENABLE_SSE
+#include <httplib.h>
+#endif
 
 using namespace ddb;
 using std::vector;
@@ -187,6 +195,231 @@ private:
     std::unordered_map<std::string, std::shared_ptr<AsyncRequest>> requests_;
     long long next_id_{1};
 };
+
+// ─────────────────────────────────────────────────────────────
+// § D.1c  SSE 一次性令牌管理器
+// ─────────────────────────────────────────────────────────────
+
+/// SSE 连接令牌：绑定 requestId，一次性使用，带过期时间
+struct SSEToken {
+    std::string requestId;
+    std::chrono::steady_clock::time_point expires_at;
+    bool consumed{false};
+};
+
+/// SSE 令牌管理（进程级单例）
+class SSETokenManager {
+public:
+    static SSETokenManager& instance() {
+        static SSETokenManager inst;
+        return inst;
+    }
+
+    /// 生成一次性 token，绑定 requestId，有效期 ttl_seconds 秒
+    std::string generate(const std::string& requestId, int ttl_seconds = 60) {
+        std::lock_guard lk(mu_);
+        cleanup_expired_();
+        std::string token = random_token_();
+        tokens_[token] = SSEToken{
+            requestId,
+            std::chrono::steady_clock::now() + std::chrono::seconds(ttl_seconds),
+            false
+        };
+        return token;
+    }
+
+    /// 验证并消费 token。成功返回 requestId，失败返回空字符串。
+    /// 一次性：验证成功后 token 立即失效。
+    std::string validate_and_consume(const std::string& token) {
+        std::lock_guard lk(mu_);
+        auto it = tokens_.find(token);
+        if (it == tokens_.end()) return "";
+
+        auto& t = it->second;
+        // 已过期或已消费
+        if (t.consumed || std::chrono::steady_clock::now() > t.expires_at) {
+            tokens_.erase(it);
+            return "";
+        }
+        t.consumed = true;
+        std::string rid = t.requestId;
+        tokens_.erase(it);
+        return rid;
+    }
+
+private:
+    SSETokenManager() = default;
+    std::mutex mu_;
+    std::unordered_map<std::string, SSEToken> tokens_;
+
+    /// 生成随机 token（32 字节 hex = 64 字符）
+    std::string random_token_() {
+        static thread_local std::mt19937 rng{std::random_device{}()};
+        std::uniform_int_distribution<int> dist(0, 15);
+        const char hex[] = "0123456789abcdef";
+        std::string token;
+        token.reserve(64);
+        for (int i = 0; i < 64; ++i)
+            token += hex[dist(rng)];
+        return token;
+    }
+
+    /// 清理过期 token
+    void cleanup_expired_() {
+        auto now = std::chrono::steady_clock::now();
+        for (auto it = tokens_.begin(); it != tokens_.end(); ) {
+            if (it->second.consumed || now > it->second.expires_at)
+                it = tokens_.erase(it);
+            else
+                ++it;
+        }
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
+// § D.1d  内嵌 SSE HTTP 服务（可选，需 AGENTOS_ENABLE_SSE）
+// ─────────────────────────────────────────────────────────────
+
+#ifdef AGENTOS_ENABLE_SSE
+
+/// 内嵌 SSE 服务器（进程级单例）
+/// 在 agentOS::init 时启动，监听独立端口，提供 /sse 端点。
+/// 前端通过 EventSource 连接，服务器直接从 AsyncRequest 读取 delta 推送。
+class SSEServer {
+public:
+    static SSEServer& instance() {
+        static SSEServer inst;
+        return inst;
+    }
+
+    /// 启动 SSE 服务。幂等：已启动时直接返回。
+    /// @param port 监听端口（默认 8849）
+    /// @param cors_origin CORS 允许的源（默认 "*"）
+    void start(int port = 8849, const std::string& cors_origin = "*") {
+        std::lock_guard lk(mu_);
+        if (running_) return;
+
+        port_ = port;
+        cors_origin_ = cors_origin;
+
+        server_thread_ = std::thread([this]() {
+            httplib::Server svr;
+
+            // CORS preflight
+            svr.Options("/sse", [this](const httplib::Request&, httplib::Response& res) {
+                set_cors_headers_(res);
+                res.status = 204;
+            });
+
+            // SSE 端点: GET /sse?rid=xxx&token=yyy
+            svr.Get("/sse", [this](const httplib::Request& req, httplib::Response& res) {
+                set_cors_headers_(res);
+
+                auto token = req.get_param_value("token");
+                auto rid_param = req.get_param_value("rid");
+
+                if (token.empty() || rid_param.empty()) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"missing rid or token"})", "application/json");
+                    return;
+                }
+
+                // 验证一次性 token
+                auto validated_rid = SSETokenManager::instance().validate_and_consume(token);
+                if (validated_rid.empty() || validated_rid != rid_param) {
+                    res.status = 403;
+                    res.set_content(R"({"error":"invalid or expired token"})", "application/json");
+                    return;
+                }
+
+                // 查找 AsyncRequest
+                auto req_ptr = AsyncRequestManager::instance().find(validated_rid);
+                if (!req_ptr) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"request not found"})", "application/json");
+                    return;
+                }
+
+                // SSE 流式输出
+                res.set_chunked_content_provider(
+                    "text/event-stream",
+                    [req_ptr](size_t /*offset*/, httplib::DataSink& sink) {
+                        auto [status, delta, content, error] = req_ptr->poll();
+
+                        if (!delta.empty()) {
+                            // 转义换行符用于 SSE
+                            std::string escaped;
+                            for (char c : delta) {
+                                if (c == '\n') escaped += "\\n";
+                                else if (c == '\r') continue;
+                                else escaped += c;
+                            }
+                            std::string event = "data: {\"delta\":\"" + escaped + "\"}\n\n";
+                            sink.write(event.data(), event.size());
+                        }
+
+                        if (status == AsyncRequest::Status::Done) {
+                            std::string done_event = "data: {\"done\":true}\n\n";
+                            sink.write(done_event.data(), done_event.size());
+                            sink.done();
+                            return false;  // 关闭连接
+                        }
+
+                        if (status == AsyncRequest::Status::Error) {
+                            std::string err_event = "data: {\"error\":\"" + error + "\"}\n\n";
+                            sink.write(err_event.data(), err_event.size());
+                            sink.done();
+                            return false;
+                        }
+
+                        // 50ms 间隔，避免空转
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        return true;  // 继续
+                    },
+                    // Content provider resource releaser (no-op)
+                    [](bool) {}
+                );
+            });
+
+            // 健康检查
+            svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
+                res.set_content(R"({"status":"ok","service":"agentOS-sse"})", "application/json");
+            });
+
+            running_ = true;
+            svr.listen("0.0.0.0", port_);
+            running_ = false;
+        });
+
+        server_thread_.detach();
+    }
+
+    bool is_running() const { return running_; }
+    int port() const { return port_; }
+
+    /// 获取 SSE 基础 URL（不含路径）
+    std::string base_url() const {
+        return "http://localhost:" + std::to_string(port_);
+    }
+
+private:
+    SSEServer() = default;
+    std::mutex mu_;
+    std::thread server_thread_;
+    std::atomic<bool> running_{false};
+    int port_{8849};
+    std::string cors_origin_{"*"};
+
+    void set_cors_headers_(httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", cors_origin_);
+        res.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.set_header("Access-Control-Allow-Headers", "Content-Type");
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Connection", "keep-alive");
+    }
+};
+
+#endif // AGENTOS_ENABLE_SSE
 
 // ─────────────────────────────────────────────────────────────
 // § D.2  类型转换工具

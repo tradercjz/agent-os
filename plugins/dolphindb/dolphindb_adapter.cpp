@@ -262,6 +262,23 @@ ConstantSP agentOSInit(Heap* heap, vector<ConstantSP>& args) {
     if (is_new) {
         LOG_INFO("AgentOS initialized via DolphinDB plugin.");
     }
+
+#ifdef AGENTOS_ENABLE_SSE
+    // 启动内嵌 SSE 服务（幂等）
+    // 可通过 config_json 中的 "sse_port" 和 "sse_cors" 配置
+    int sse_port = 8849;
+    std::string sse_cors = "*";
+    if (!config_json.empty()) {
+        try {
+            auto cfg = nlohmann::json::parse(config_json);
+            if (cfg.contains("sse_port")) sse_port = cfg["sse_port"].get<int>();
+            if (cfg.contains("sse_cors")) sse_cors = cfg["sse_cors"].get<std::string>();
+        } catch (...) { /* 忽略解析错误 */ }
+    }
+    SSEServer::instance().start(sse_port, sse_cors);
+    LOG_INFO("AgentOS SSE server started on port " + std::to_string(sse_port));
+#endif
+
     return new Bool(true);
 }
 
@@ -995,6 +1012,17 @@ ConstantSP agentOSAskAsync(Heap* heap, vector<ConstantSP>& args) {
     dict->set(new String("__stream__"), new Bool(true));
     dict->set(new String("requestId"),  new String(rid));
     dict->set(new String("status"),     new String("streaming"));
+
+#ifdef AGENTOS_ENABLE_SSE
+    // 生成一次性 SSE 令牌，有效期 60 秒
+    if (SSEServer::instance().is_running()) {
+        std::string token = SSETokenManager::instance().generate(rid, 60);
+        std::string sse_url = SSEServer::instance().base_url() + "/sse";
+        dict->set(new String("sseUrl"), new String(sse_url));
+        dict->set(new String("token"),  new String(token));
+    }
+#endif
+
     return dict;
 }
 
