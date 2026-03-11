@@ -1145,10 +1145,8 @@ ConstantSP agentOSCreateKB(Heap* heap, vector<ConstantSP>& args) {
     }
 
     // 获取 LLM backend 用于 embedding
-    auto llm = os.kernel().backend_ptr();
-    if (!llm) {
-        throw RuntimeException("agentOS::createKB: LLM backend not initialized. Call agentOS::init first.");
-    }
+    // 由于 LLMKernel 现持有 unique_ptr，使用一个无 deleter 的 shared_ptr 包装引用
+    auto llm = std::shared_ptr<kernel::ILLMBackend>(&os.kernel().backend(), [](kernel::ILLMBackend*){});
 
     auto kb = std::make_shared<knowledge::KnowledgeBase>(
         llm, vector_dim, max_chunks, embedding_model);
