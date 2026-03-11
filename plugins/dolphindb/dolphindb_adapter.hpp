@@ -381,6 +381,194 @@ public:
                 );
             });
 
+            // ─── RAG HTTP API 端点 ───────────────────────
+
+            // POST /api/kb/search — 检索知识库
+            // Body: {"kb_handle": 1, "query": "...", "top_k": 5}
+            svr.Post("/api/kb/search", [this](const httplib::Request& req, httplib::Response& res) {
+                set_cors_headers_(res);
+                try {
+                    auto body = nlohmann::json::parse(req.body);
+                    long long handle = body.value("kb_handle", 0LL);
+                    std::string query = body.value("query", "");
+                    size_t top_k = body.value("top_k", 5);
+                    int graph_hops = body.value("graph_hops", 0);
+
+                    auto kb = KBManager::instance().find(handle);
+                    if (!kb) {
+                        res.status = 404;
+                        res.set_content(R"({"error":"KB not found"})", "application/json");
+                        return;
+                    }
+
+                    auto results = kb->search(query, top_k, graph_hops);
+                    nlohmann::json j_results = nlohmann::json::array();
+                    for (auto& r : results) {
+                        j_results.push_back({
+                            {"doc_id", r.doc_id}, {"chunk_id", r.chunk_id},
+                            {"content", r.content}, {"score", r.score},
+                            {"graph_context", r.graph_context}
+                        });
+                    }
+                    res.set_content(j_results.dump(), "application/json");
+                } catch (const std::exception& e) {
+                    res.status = 400;
+                    res.set_content(nlohmann::json{{"error", e.what()}}.dump(), "application/json");
+                }
+            });
+
+            // POST /api/kb/ingest — 灌入文档
+            // Body: {"kb_handle": 1, "doc_id": "doc1", "text": "..."}
+            svr.Post("/api/kb/ingest", [this](const httplib::Request& req, httplib::Response& res) {
+                set_cors_headers_(res);
+                try {
+                    auto body = nlohmann::json::parse(req.body);
+                    long long handle = body.value("kb_handle", 0LL);
+                    std::string doc_id = body.value("doc_id", "");
+                    std::string text = body.value("text", "");
+
+                    auto kb = KBManager::instance().find(handle);
+                    if (!kb) {
+                        res.status = 404;
+                        res.set_content(R"({"error":"KB not found"})", "application/json");
+                        return;
+                    }
+
+                    auto result = kb->ingest_text(doc_id, text);
+                    if (result.has_value()) {
+                        res.set_content(nlohmann::json{{"chunks", result.value()}}.dump(), "application/json");
+                    } else {
+                        res.status = 500;
+                        res.set_content(nlohmann::json{{"error", result.error().message}}.dump(), "application/json");
+                    }
+                } catch (const std::exception& e) {
+                    res.status = 400;
+                    res.set_content(nlohmann::json{{"error", e.what()}}.dump(), "application/json");
+                }
+            });
+
+            // GET /api/kb/ask — RAG 流式对话（SSE）
+            // Params: kb_handle, q, top_k, token
+            svr.Get("/api/kb/ask", [this](const httplib::Request& req, httplib::Response& res) {
+                set_cors_headers_(res);
+
+                long long handle = 0;
+                try { handle = std::stoll(req.get_param_value("kb_handle")); } catch (...) {}
+                std::string question = req.get_param_value("q");
+                size_t top_k = 5;
+                try { top_k = std::stoul(req.get_param_value("top_k")); } catch (...) {}
+
+                if (question.empty() || handle == 0) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"missing kb_handle or q"})", "application/json");
+                    return;
+                }
+
+                auto kb = KBManager::instance().find(handle);
+                if (!kb) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"KB not found"})", "application/json");
+                    return;
+                }
+
+                // 先检索（同步，通常很快）
+                auto search_results = kb->search(question, top_k);
+
+                // 拼接 context
+                std::string context;
+                for (size_t i = 0; i < search_results.size(); ++i) {
+                    context += "[" + std::to_string(i + 1) + "] (" + search_results[i].doc_id + ")\n";
+                    context += search_results[i].content + "\n\n";
+                }
+
+                // 创建 AsyncRequest 用于流式生成
+                auto& mgr = AsyncRequestManager::instance();
+                std::string rid = mgr.create();
+                auto req_ptr = mgr.find(rid);
+
+                // 后台线程: LLM 流式生成
+                std::thread([req_ptr, question, context]() {
+                    try {
+                        auto& os = PluginRuntime::instance().os();
+                        kernel::LLMRequest llm_req;
+                        llm_req.messages.push_back(kernel::Message::system(
+                            "You are a helpful AI assistant. Answer based on the provided context."));
+                        llm_req.messages.push_back(kernel::Message::user(
+                            "Context:\n" + context + "\nQuestion: " + question));
+
+                        auto result = os.kernel().stream_infer(llm_req,
+                            [&req_ptr](std::string_view token) { req_ptr->append_token(token); });
+
+                        if (result.has_value()) {
+                            std::lock_guard lk(req_ptr->mu);
+                            if (req_ptr->content.empty() && !result.value().content.empty()) {
+                                req_ptr->content = result.value().content;
+                                req_ptr->delta = result.value().content;
+                            }
+                        } else {
+                            req_ptr->mark_error(result.error().message);
+                            return;
+                        }
+                        req_ptr->mark_done();
+                    } catch (const std::exception& e) {
+                        req_ptr->mark_error(std::string("Error: ") + e.what());
+                    }
+                }).detach();
+
+                // SSE 流式推送
+                res.set_chunked_content_provider(
+                    "text/event-stream",
+                    [req_ptr, search_results](size_t, httplib::DataSink& sink) {
+                        // 第一次先推送检索来源
+                        static thread_local bool sources_sent = false;
+                        if (!sources_sent) {
+                            nlohmann::json sources = nlohmann::json::array();
+                            for (auto& r : search_results) {
+                                sources.push_back({{"doc_id", r.doc_id}, {"score", r.score}});
+                            }
+                            std::string src_event = "event: sources\ndata: " + sources.dump() + "\n\n";
+                            sink.write(src_event.data(), src_event.size());
+                            sources_sent = true;
+                        }
+
+                        auto [status, delta, content, error] = req_ptr->poll();
+                        if (!delta.empty()) {
+                            std::string escaped;
+                            for (char c : delta) {
+                                if (c == '\n') escaped += "\\n";
+                                else if (c == '\r') continue;
+                                else escaped += c;
+                            }
+                            std::string event = "data: {\"delta\":\"" + escaped + "\"}\n\n";
+                            sink.write(event.data(), event.size());
+                        }
+                        if (status == AsyncRequest::Status::Done) {
+                            sink.write("data: {\"done\":true}\n\n", 21);
+                            sink.done();
+                            sources_sent = false;
+                            return false;
+                        }
+                        if (status == AsyncRequest::Status::Error) {
+                            std::string err_ev = "data: {\"error\":\"" + error + "\"}\n\n";
+                            sink.write(err_ev.data(), err_ev.size());
+                            sink.done();
+                            sources_sent = false;
+                            return false;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        return true;
+                    },
+                    [](bool) {}
+                );
+            });
+
+            // CORS preflight for API endpoints
+            svr.Options("/api/kb/(.*)", [this](const httplib::Request&, httplib::Response& res) {
+                set_cors_headers_(res);
+                res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                res.status = 204;
+            });
+
             // 健康检查
             svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
                 res.set_content(R"({"status":"ok","service":"agentOS-sse"})", "application/json");
@@ -665,6 +853,11 @@ ConstantSP agentOSAskWithKB(Heap* heap, vector<ConstantSP>& args);
 /// 查询知识库状态
 /// @return DICTIONARY — {chunk_count, doc_count, embedding_model, chunk_size, chunk_overlap}
 ConstantSP agentOSKBInfo(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::askWithKBAsync(handle, question, [topK], [systemPrompt])
+/// 异步 RAG 对话：检索知识库 + 流式 LLM 生成
+/// 返回 dict: {__stream__: true, requestId, status, sseUrl?, token?}
+ConstantSP agentOSAskWithKBAsync(Heap* heap, vector<ConstantSP>& args);
 
 } // extern "C"
 

@@ -27,3 +27,4 @@ agentOSRemoveDoc,removeDoc,system,2,2,0
 agentOSSearch,search,system,2,4,0
 agentOSAskWithKB,askWithKB,system,2,4,0
 agentOSKBInfo,kbInfo,system,1,1,0
+agentOSAskWithKBAsync,askWithKBAsync,system,2,4,0

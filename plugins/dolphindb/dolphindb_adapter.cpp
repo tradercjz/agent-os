@@ -1426,6 +1426,115 @@ ConstantSP agentOSKBInfo(Heap* heap, vector<ConstantSP>& args) {
     DDB_SAFE_END("agentOS::kbInfo")
 }
 
+// ─── agentOS::askWithKBAsync(handle, question, [topK], [systemPrompt]) ──
+//
+// 异步 RAG 对话：检索知识库 → 后台线程流式 LLM 生成
+// 返回 dict: {__stream__: true, requestId, status, sseUrl?, token?}
+
+ConstantSP agentOSAskWithKBAsync(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::askWithKBAsync(handle, question, [topK], [systemPrompt])";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::askWithKBAsync", usage);
+
+    DDB_SAFE_BEGIN
+    long long handle = args[0]->getLong();
+    std::string question = args[1]->getString();
+    size_t top_k = 5;
+    std::string system_prompt;
+
+    if (args.size() >= 3 && !args[2]->isNull()) top_k = static_cast<size_t>(args[2]->getInt());
+    if (args.size() >= 4 && !args[3]->isNull() && args[3]->getType() == DT_STRING) {
+        system_prompt = args[3]->getString();
+    }
+
+    if (question.empty()) throw IllegalArgumentException("agentOS::askWithKBAsync", "question must not be empty");
+
+    auto kb = KBManager::instance().find(handle);
+    if (!kb) throw IllegalArgumentException("agentOS::askWithKBAsync", "Unknown KB handle: " + std::to_string(handle));
+
+    auto& os = PluginRuntime::instance().os();
+    (void)os;
+
+    // Step 1: 检索知识库（同步，通常毫秒级）
+    auto search_results = kb->search(question, top_k);
+
+    // 拼接 context
+    std::string context;
+    for (size_t i = 0; i < search_results.size(); ++i) {
+        context += "[" + std::to_string(i + 1) + "] (来源: " + search_results[i].doc_id + ")\n";
+        context += search_results[i].content + "\n\n";
+        if (!search_results[i].graph_context.empty()) {
+            context += "相关知识图谱:\n" + search_results[i].graph_context + "\n\n";
+        }
+    }
+
+    std::string rag_system = system_prompt.empty()
+        ? "You are a helpful AI assistant integrated with DolphinDB. "
+          "Answer questions based on the provided context. "
+          "If the context doesn't contain relevant information, say so."
+        : system_prompt;
+
+    std::string rag_user = "Based on the following context, answer the question.\n\n"
+                           "## Context\n" + context +
+                           "## Question\n" + question;
+
+    // Step 2: 创建异步请求，后台线程流式生成
+    auto& mgr = AsyncRequestManager::instance();
+    std::string rid = mgr.create();
+    auto req_ptr = mgr.find(rid);
+
+    req_ptr->worker = std::thread([req_ptr, rag_system, rag_user]() {
+        try {
+            auto& os = PluginRuntime::instance().os();
+
+            kernel::LLMRequest llm_req;
+            llm_req.messages.push_back(kernel::Message::system(rag_system));
+            llm_req.messages.push_back(kernel::Message::user(rag_user));
+
+            auto result = os.kernel().stream_infer(llm_req,
+                [&req_ptr](std::string_view token) {
+                    req_ptr->append_token(token);
+                });
+
+            if (result.has_value()) {
+                auto& resp = result.value();
+                std::lock_guard lk(req_ptr->mu);
+                if (req_ptr->content.empty() && !resp.content.empty()) {
+                    req_ptr->content = resp.content;
+                    req_ptr->delta = resp.content;
+                }
+            } else {
+                auto& err = result.error();
+                req_ptr->mark_error("LLM error: " + err.message);
+                return;
+            }
+            req_ptr->mark_done();
+        } catch (const std::exception& e) {
+            req_ptr->mark_error(std::string("Internal error: ") + e.what());
+        } catch (...) {
+            req_ptr->mark_error("Unknown internal error");
+        }
+    });
+
+    // Step 3: 返回 __stream__ dict
+    DictionarySP dict = Util::createDictionary(DT_STRING, nullptr, DT_ANY, nullptr);
+    dict->set(new String("__stream__"), new Bool(true));
+    dict->set(new String("requestId"),  new String(rid));
+    dict->set(new String("status"),     new String("streaming"));
+
+#ifdef AGENTOS_ENABLE_SSE
+    if (SSEServer::instance().is_running()) {
+        std::string token = SSETokenManager::instance().generate(rid, 60);
+        std::string sse_url = SSEServer::instance().base_url() + "/sse";
+        dict->set(new String("sseUrl"), new String(sse_url));
+        dict->set(new String("token"),  new String(token));
+    }
+#endif
+
+    return dict;
+    DDB_SAFE_END("agentOS::askWithKBAsync")
+}
+
 } // extern "C"
 
 } // namespace agentos::dolphindb
