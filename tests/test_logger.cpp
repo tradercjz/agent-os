@@ -14,9 +14,11 @@ TEST(LoggerTest, DefaultLevelIsWarn) {
 
 TEST(LoggerTest, LevelFilteringWorks) {
   std::vector<std::string> captured;
+  std::mutex cap_mu;
 
   Logger::instance().set_level(LogLevel::Warn);
   Logger::instance().set_sink([&](LogLevel, std::string_view msg) {
+    std::lock_guard lk(cap_mu);
     captured.emplace_back(msg);
   });
 
@@ -25,6 +27,9 @@ TEST(LoggerTest, LevelFilteringWorks) {
   LOG_WARN("warn msg");
   LOG_ERROR("error msg");
 
+  Logger::instance().flush();
+
+  std::lock_guard lk(cap_mu);
   // Only Warn and Error should pass
   EXPECT_EQ(captured.size(), 2u);
   EXPECT_NE(captured[0].find("WARN"), std::string::npos);
@@ -37,9 +42,11 @@ TEST(LoggerTest, LevelFilteringWorks) {
 
 TEST(LoggerTest, DebugLevelCapturesAll) {
   std::vector<std::string> captured;
+  std::mutex cap_mu;
 
   Logger::instance().set_level(LogLevel::Debug);
   Logger::instance().set_sink([&](LogLevel, std::string_view msg) {
+    std::lock_guard lk(cap_mu);
     captured.emplace_back(msg);
   });
 
@@ -48,7 +55,14 @@ TEST(LoggerTest, DebugLevelCapturesAll) {
   LOG_WARN("w");
   LOG_ERROR("e");
 
+  Logger::instance().flush();
+
+  std::lock_guard lk(cap_mu);
+#ifdef NDEBUG
+  EXPECT_EQ(captured.size(), 3u);
+#else
   EXPECT_EQ(captured.size(), 4u);
+#endif
 
   Logger::instance().set_sink(nullptr);
   Logger::instance().set_level(LogLevel::Warn);
@@ -67,27 +81,27 @@ TEST(LoggerTest, OffLevelSilencesAll) {
   LOG_WARN("w");
   LOG_ERROR("e");
 
+  Logger::instance().flush();
+
   EXPECT_EQ(captured.size(), 0u);
 
   Logger::instance().set_sink(nullptr);
   Logger::instance().set_level(LogLevel::Warn);
 }
 
-TEST(LoggerTest, CustomSinkReceivesMessages) {
-  LogLevel received_level = LogLevel::Off;
-  std::string received_msg;
-
+TEST(LoggerTest, StructuredLoggingKV) {
+  std::string captured;
   Logger::instance().set_level(LogLevel::Info);
-  Logger::instance().set_sink([&](LogLevel level, std::string_view msg) {
-    received_level = level;
-    received_msg = std::string(msg);
+  Logger::instance().set_sink([&](LogLevel, std::string_view msg) {
+    captured = std::string(msg);
   });
 
-  LOG_INFO("test message");
+  LOG_INFO_KV("Task started", KV("id", 123), KV("user", "alice"));
+  Logger::instance().flush();
 
-  EXPECT_EQ(received_level, LogLevel::Info);
-  EXPECT_NE(received_msg.find("test message"), std::string::npos);
+  EXPECT_NE(captured.find("Task started"), std::string::npos);
+  EXPECT_NE(captured.find("id=123"), std::string::npos);
+  EXPECT_NE(captured.find("user=alice"), std::string::npos);
 
   Logger::instance().set_sink(nullptr);
-  Logger::instance().set_level(LogLevel::Warn);
 }

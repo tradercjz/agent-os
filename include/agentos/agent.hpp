@@ -13,12 +13,13 @@
 #include <agentos/tools/tool_manager.hpp>
 #include <atomic>
 #include <cassert>
-#include <chrono>
+#include <concepts>
 #include <functional>
 #include <future>
 #include <memory>
 #include <shared_mutex>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace agentos {
@@ -47,6 +48,8 @@ struct Middleware {
 // § A.1  AgentConfig — Agent 构建配置
 // ─────────────────────────────────────────────────────────────
 
+class AgentConfigBuilder;
+
 struct AgentConfig {
   std::string name{};                     // Default: empty
   std::string role_prompt{};              // Default: empty (System prompt / 角色设定)
@@ -55,7 +58,46 @@ struct AgentConfig {
   TokenCount context_limit{8192};
   std::vector<std::string> allowed_tools{}; // Default: empty (空 = 全部允许)
   bool persist_memory{false};             // 是否使用长期记忆
+
+  static AgentConfigBuilder builder();
 };
+
+class AgentConfigBuilder {
+public:
+  AgentConfigBuilder& name(std::string n) {
+    cfg_.name = std::move(n);
+    return *this;
+  }
+  AgentConfigBuilder& role_prompt(std::string p) {
+    cfg_.role_prompt = std::move(p);
+    return *this;
+  }
+  AgentConfigBuilder& security_role(std::string r) {
+    cfg_.security_role = std::move(r);
+    return *this;
+  }
+  AgentConfigBuilder& priority(Priority p) {
+    cfg_.priority = p;
+    return *this;
+  }
+  AgentConfigBuilder& context_limit(TokenCount l) {
+    cfg_.context_limit = l;
+    return *this;
+  }
+  AgentConfigBuilder& tools(std::vector<std::string> t) {
+    cfg_.allowed_tools = std::move(t);
+    return *this;
+  }
+  AgentConfigBuilder& persist_memory(bool p) {
+    cfg_.persist_memory = p;
+    return *this;
+  }
+  AgentConfig build() { return std::move(cfg_); }
+private:
+  AgentConfig cfg_;
+};
+
+inline AgentConfigBuilder AgentConfig::builder() { return AgentConfigBuilder{}; }
 
 class AgentOS; // 前向声明
 
@@ -106,9 +148,23 @@ protected:
 };
 
 // ── AgentBase (CRTP) ───────────────────────────
+// ── Agent Concepts ────────────────────────────
+template <typename T>
+concept AgentConcept = requires(T a, std::string s) {
+  { a.run(s) } -> std::same_as<Result<std::string>>;
+  requires std::derived_from<T, Agent>;
+};
+
+// ── AgentBase (CRTP) ───────────────────────────
 template <typename Derived>
 class AgentBase : public Agent {
 public:
+  AgentBase(AgentId id, AgentConfig cfg, AgentOS *os)
+      : Agent(id, std::move(cfg), os) {
+    // Moved check to constructor to avoid incomplete type issues during class definition
+    static_assert(std::is_base_of_v<Agent, Derived>, "Derived must inherit from Agent");
+  }
+
   using Agent::Agent;
 
   [[nodiscard]] Result<kernel::LLMResponse> think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb = nullptr);
@@ -145,6 +201,8 @@ protected:
 
 class AgentOS : private NonCopyable {
 public:
+  class ConfigBuilder;
+
   struct Config {
     uint32_t scheduler_threads{4};
     uint32_t tpm_limit{100000};
@@ -153,6 +211,35 @@ public:
     std::string ltm_dir{
         (std::filesystem::temp_directory_path() / "agentos_ltm").string()};
     bool enable_security{true};
+
+    static ConfigBuilder builder();
+  };
+
+  class ConfigBuilder {
+  public:
+    ConfigBuilder& scheduler_threads(uint32_t n) {
+      cfg_.scheduler_threads = n;
+      return *this;
+    }
+    ConfigBuilder& tpm_limit(uint32_t n) {
+      cfg_.tpm_limit = n;
+      return *this;
+    }
+    ConfigBuilder& snapshot_dir(std::string dir) {
+      cfg_.snapshot_dir = std::move(dir);
+      return *this;
+    }
+    ConfigBuilder& ltm_dir(std::string dir) {
+      cfg_.ltm_dir = std::move(dir);
+      return *this;
+    }
+    ConfigBuilder& enable_security(bool e) {
+      cfg_.enable_security = e;
+      return *this;
+    }
+    Config build() { return std::move(cfg_); }
+  private:
+    Config cfg_;
   };
 
   explicit AgentOS(std::unique_ptr<kernel::ILLMBackend> backend,
@@ -220,7 +307,7 @@ public:
   ~AgentOS() { scheduler_->shutdown(); }
 
   // ── Agent 工厂 ─────────────────────────────────────────
-  template <typename AgentT = ReActAgent, typename... Args>
+  template <AgentConcept AgentT = ReActAgent, typename... Args>
   std::shared_ptr<AgentT> create_agent(AgentConfig cfg, Args &&...args) {
     AgentId id = next_agent_id_++;
     auto agent = std::make_shared<AgentT>(id, std::move(cfg), this,
@@ -540,5 +627,7 @@ inline Result<std::string> ReActAgent::run(std::string user_input) {
 
   return make_error(ErrorCode::Timeout, "ReActAgent: exceeded max_steps");
 }
+
+inline AgentOS::ConfigBuilder AgentOS::Config::builder() { return AgentOS::ConfigBuilder{}; }
 
 } // namespace agentos

@@ -10,13 +10,16 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <concepts>
 #include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <regex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace agentos::kernel {
@@ -71,7 +74,69 @@ struct LLMRequest {
   std::optional<std::vector<std::string>> tool_names; // 允许调用的工具
   std::optional<std::string>
       tools_json; // OpenAI function-calling 格式的工具列表 JSON
+
+  static class LLMRequestBuilder builder();
 };
+
+class LLMRequestBuilder {
+public:
+  LLMRequestBuilder& add_message(Message msg) {
+    req_.messages.push_back(std::move(msg));
+    return *this;
+  }
+  LLMRequestBuilder& user(std::string content) {
+    return add_message(Message::user(std::move(content)));
+  }
+  LLMRequestBuilder& system(std::string content) {
+    return add_message(Message::system(std::move(content)));
+  }
+  LLMRequestBuilder& assistant(std::string content) {
+    return add_message(Message::assistant(std::move(content)));
+  }
+  LLMRequestBuilder& model(std::string m) {
+    req_.model = std::move(m);
+    return *this;
+  }
+  LLMRequestBuilder& temperature(float t) {
+    req_.temperature = t;
+    return *this;
+  }
+  LLMRequestBuilder& max_tokens(TokenCount m) {
+    req_.max_tokens = m;
+    return *this;
+  }
+  LLMRequestBuilder& priority(Priority p) {
+    req_.priority = p;
+    return *this;
+  }
+  LLMRequestBuilder& agent_id(AgentId id) {
+    req_.agent_id = id;
+    return *this;
+  }
+  LLMRequestBuilder& task_id(TaskId id) {
+    req_.task_id = id;
+    return *this;
+  }
+  LLMRequestBuilder& request_id(std::string id) {
+    req_.request_id = std::move(id);
+    return *this;
+  }
+  LLMRequestBuilder& tools(std::vector<std::string> names) {
+    req_.tool_names = std::move(names);
+    return *this;
+  }
+  LLMRequestBuilder& tools_json(std::string json) {
+    req_.tools_json = std::move(json);
+    return *this;
+  }
+
+  LLMRequest build() { return std::move(req_); }
+
+private:
+  LLMRequest req_;
+};
+
+inline LLMRequestBuilder LLMRequest::builder() { return LLMRequestBuilder{}; }
 
 struct LLMResponse {
   std::string content;                     // 文本输出
@@ -189,6 +254,13 @@ public:
     return static_cast<TokenCount>(text.size() / 4 + 1);
   }
 };
+
+// ── LLM Backend Concept ────────────────────────
+template <typename T>
+concept LLMBackendConcept = requires(T b, const LLMRequest &req) {
+  { b.complete(req) } -> std::same_as<Result<LLMResponse>>;
+  { b.name() } -> std::same_as<std::string>;
+} && std::derived_from<T, ILLMBackend>;
 
 inline TokenCount Message::tokens() const {
   if (cached_tokens == 0 && !content.empty()) {
@@ -353,7 +425,57 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────
-// § 1.6  LLMKernel：内核门面，含限流、指标收集
+// § 1.6  EmbeddingCache：向量嵌入 LRU 缓存 (Thread-safe)
+// ─────────────────────────────────────────────────────────────
+class EmbeddingCache {
+public:
+  explicit EmbeddingCache(size_t capacity = 1024) : capacity_(capacity) {}
+
+  std::optional<std::vector<float>> get(const std::string &input) {
+    std::lock_guard lk(mu_);
+    auto it = cache_map_.find(input);
+    if (it == cache_map_.end()) return std::nullopt;
+    
+    // Move to front (LRU)
+    cache_list_.splice(cache_list_.begin(), cache_list_, it->second);
+    return it->second->second;
+  }
+
+  void put(const std::string &input, std::vector<float> embedding) {
+    std::lock_guard lk(mu_);
+    auto it = cache_map_.find(input);
+    if (it != cache_map_.end()) {
+      cache_list_.splice(cache_list_.begin(), cache_list_, it->second);
+      it->second->second = std::move(embedding);
+      return;
+    }
+
+    if (cache_list_.size() >= capacity_) {
+      auto last = cache_list_.back();
+      cache_map_.erase(last.first);
+      cache_list_.pop_back();
+    }
+
+    cache_list_.emplace_front(input, std::move(embedding));
+    cache_map_[input] = cache_list_.begin();
+  }
+
+  void clear() {
+    std::lock_guard lk(mu_);
+    cache_list_.clear();
+    cache_map_.clear();
+  }
+
+private:
+  size_t capacity_;
+  std::mutex mu_;
+  using Entry = std::pair<std::string, std::vector<float>>;
+  std::list<Entry> cache_list_;
+  std::unordered_map<std::string, std::list<Entry>::iterator> cache_map_;
+};
+
+// ─────────────────────────────────────────────────────────────
+// § 1.7  LLMKernel：内核门面，含限流、指标收集
 // ─────────────────────────────────────────────────────────────
 
 struct KernelMetrics {
@@ -406,21 +528,49 @@ public:
 
   // 获取文本向量嵌入
   [[nodiscard]] Result<EmbeddingResponse> embed(const EmbeddingRequest &req) {
+    EmbeddingResponse final_resp;
+    EmbeddingRequest missed_req;
+    std::vector<int> missed_indices;
+
+    for (size_t i = 0; i < req.inputs.size(); ++i) {
+      if (auto cached = embed_cache_.get(req.inputs[i])) {
+        if (final_resp.embeddings.size() <= i) final_resp.embeddings.resize(i + 1);
+        final_resp.embeddings[i] = std::move(*cached);
+      } else {
+        missed_req.inputs.push_back(req.inputs[i]);
+        missed_indices.push_back(i);
+      }
+    }
+
+    if (missed_req.inputs.empty()) {
+      return final_resp;
+    }
+
+    missed_req.model = req.model;
     TokenCount estimated = 0;
-    for (const auto &text : req.inputs)
+    for (const auto &text : missed_req.inputs)
       estimated += ILLMBackend::estimate_tokens(text);
 
     if (auto err = acquire_rate_limit(estimated))
       return make_unexpected(*err);
 
     metrics_.total_requests++;
-    auto result = backend_->embed(req);
+    auto result = backend_->embed(missed_req);
     if (result) {
       KernelMetrics::saturating_add(metrics_.total_tokens, result->total_tokens);
+      for (size_t j = 0; j < result->embeddings.size(); ++j) {
+        int original_idx = missed_indices[j];
+        if (final_resp.embeddings.size() <= static_cast<size_t>(original_idx)) 
+          final_resp.embeddings.resize(original_idx + 1);
+        final_resp.embeddings[original_idx] = result->embeddings[j];
+        embed_cache_.put(missed_req.inputs[j], std::move(result->embeddings[j]));
+      }
+      final_resp.total_tokens = result->total_tokens;
     } else {
       metrics_.errors++;
+      return make_unexpected(result.error());
     }
-    return result;
+    return final_resp;
   }
 
   ILLMBackend &backend() noexcept { return *backend_; }
@@ -517,6 +667,7 @@ private:
 
   std::unique_ptr<ILLMBackend> backend_;
   TokenBucketRateLimiter rate_limiter_;
+  EmbeddingCache embed_cache_;
   KernelMetrics metrics_;
   uint32_t max_retries_;
 };

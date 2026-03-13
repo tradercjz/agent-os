@@ -242,6 +242,8 @@ set(TEST_SOURCES
   tests/test_sdk.cpp
   tests/test_integration.cpp
   tests/test_logger.cpp
+  tests/test_api_fluent.cpp
+  tests/test_compile_safety.cpp
 )
 if(NOT AGENTOS_NO_DUCKDB)
   list(APPEND TEST_SOURCES tests/test_duckdb_store.cpp)

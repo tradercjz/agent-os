@@ -7,13 +7,12 @@
 #include <agentos/core/types.hpp>
 #include <algorithm>
 #include <chrono>
-#include <cmath>
+#include <concepts>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <limits>
+#include <list>
 #include <mutex>
-#include <numeric>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -78,11 +77,23 @@ struct MemoryEntry {
   // FIX #17: Precondition: both vectors must be non-empty and same size.
   // Returns normalized cosine similarity (assumes inputs are L2-normalized).
   [[nodiscard]] static float cosine_similarity(const Embedding &a, const Embedding &b) noexcept {
-    // Runtime guards that work in release builds
-    if (a.empty() || b.empty()) return 0.0f;
-    if (a.size() != b.size()) return 0.0f;
-    float dot = std::inner_product(a.begin(), a.end(), b.begin(), 0.0f);
-    return dot; // 已归一化时 dot == cosine
+    if (a.empty() || b.empty() || a.size() != b.size()) return 0.0f;
+    
+    const float* data_a = a.data();
+    const float* data_b = b.data();
+    size_t n = a.size();
+    float dot = 0.0f;
+
+    // Use compiler hint for SIMD vectorization
+#if defined(__clang__) || defined(__GNUC__)
+#pragma omp simd reduction(+:dot)
+    for (size_t i = 0; i < n; ++i) {
+        dot += data_a[i] * data_b[i];
+    }
+#else
+    dot = std::inner_product(a.begin(), a.end(), b.begin(), 0.0f);
+#endif
+    return dot;
   }
 };
 
@@ -114,6 +125,17 @@ public:
   virtual size_t size() const noexcept = 0;
   virtual std::string name() const noexcept = 0;
 };
+
+// ── Memory Store Concept ───────────────────────
+template <typename T>
+concept MemoryStoreConcept = requires(T s, MemoryEntry entry, const std::string &id, 
+                                      const Embedding &q_emb, const MemoryFilter &filter) {
+  { s.write(std::move(entry)) } -> std::same_as<Result<std::string>>;
+  { s.read(id) } -> std::same_as<Result<MemoryEntry>>;
+  { s.forget(id) } -> std::same_as<Result<bool>>;
+  { s.search(q_emb, filter) } -> std::same_as<Result<std::vector<SearchResult>>>;
+  { s.name() } -> std::same_as<std::string>;
+} && std::derived_from<T, IMemoryStore>;
 
 // ─────────────────────────────────────────────────────────────
 // § 4.3  WorkingMemory — 当前窗口内的即时记忆（最快）
@@ -512,6 +534,61 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────
+// § 4.4.1  LRUCache (Generic Metadata Cache)
+// ─────────────────────────────────────────────────────────────
+template <typename K, typename V>
+class LRUCache {
+public:
+  explicit LRUCache(size_t capacity = 1024) : capacity_(capacity) {}
+
+  std::optional<V> get(const K &key) {
+    std::lock_guard lk(mu_);
+    auto it = cache_map_.find(key);
+    if (it == cache_map_.end()) return std::nullopt;
+    cache_list_.splice(cache_list_.begin(), cache_list_, it->second);
+    return it->second->second;
+  }
+
+  void put(const K &key, V value) {
+    std::lock_guard lk(mu_);
+    auto it = cache_map_.find(key);
+    if (it != cache_map_.end()) {
+      cache_list_.splice(cache_list_.begin(), cache_list_, it->second);
+      it->second->second = std::move(value);
+      return;
+    }
+    if (cache_list_.size() >= capacity_) {
+      auto last = cache_list_.back();
+      cache_map_.erase(last.first);
+      cache_list_.pop_back();
+    }
+    cache_list_.emplace_front(key, std::move(value));
+    cache_map_[key] = cache_list_.begin();
+  }
+
+  void remove(const K &key) {
+    std::lock_guard lk(mu_);
+    auto it = cache_map_.find(key);
+    if (it != cache_map_.end()) {
+      cache_list_.erase(it->second);
+      cache_map_.erase(it);
+    }
+  }
+
+  void clear() {
+    std::lock_guard lk(mu_);
+    cache_list_.clear();
+    cache_map_.clear();
+  }
+
+private:
+  size_t capacity_;
+  std::mutex mu_;
+  std::list<std::pair<K, V>> cache_list_;
+  std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> cache_map_;
+};
+
+// ─────────────────────────────────────────────────────────────
 // § 4.5  LongTermMemory — 持久化磁盘记忆（慢但无限）
 // ─────────────────────────────────────────────────────────────
 
@@ -632,8 +709,15 @@ public:
   }
 
   [[nodiscard]] Result<MemoryEntry> read(const std::string &id) override {
+    if (auto cached = metadata_cache_.get(id)) {
+      return *cached;
+    }
     std::lock_guard lk(mu_);
-    return read_locked(id);
+    auto res = read_locked(id);
+    if (res) {
+      metadata_cache_.put(id, *res);
+    }
+    return res;
   }
 
   [[nodiscard]] Result<bool> forget(const std::string &id) override {
@@ -647,6 +731,7 @@ public:
     if (!fs::exists(path))
       return false;
     fs::remove(path);
+    metadata_cache_.remove(id);
 
     auto it = index_.find(id);
     if (it != index_.end()) {
@@ -986,6 +1071,7 @@ private:
   size_t dim_{0};
   hnswlib::labeltype label_counter_{0};
   std::unordered_map<hnswlib::labeltype, std::string> label_to_id_; // 持久化反向映射
+  LRUCache<std::string, MemoryEntry> metadata_cache_;
 };
 
 // ─────────────────────────────────────────────────────────────
