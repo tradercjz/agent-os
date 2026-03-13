@@ -216,49 +216,50 @@ public:
   }
 
   [[nodiscard]] Result<LLMResponse> complete(const LLMRequest &req) override {
-    // 收集所有消息内容
-    std::string combined;
-    for (auto &m : req.messages)
-      combined += m.content + " ";
-
-    // 匹配工具调用规则
-    for (auto &[trigger, tool, args] : tool_rules_) {
-      if (combined.find(trigger) != std::string::npos) {
-        LLMResponse resp;
-        resp.tool_calls.push_back({
-            .id = "call_" + std::to_string(call_count_++),
-            .name = tool,
-            .args_json = args,
-        });
-        resp.finish_reason = "tool_calls";
-        resp.prompt_tokens = ILLMBackend::estimate_tokens(combined);
-        resp.completion_tokens = 20;
-        return resp;
-      }
+    // 仅针对最后一条有效消息进行匹配，以实现严谨的状态机逻辑
+    if (!req.messages.empty()) {
+        const auto& text = req.messages.back().content;
+        if (!text.empty()) {
+            // 1. 尝试匹配文本规则
+            for (auto it = rules_.rbegin(); it != rules_.rend(); ++it) {
+                if (text.find(it->first) != std::string::npos) {
+                    LLMResponse resp;
+                    resp.content = it->second;
+                    resp.finish_reason = "stop";
+                    resp.prompt_tokens = ILLMBackend::estimate_tokens(text);
+                    resp.completion_tokens = ILLMBackend::estimate_tokens(it->second);
+                    return resp;
+                }
+            }
+            // 2. 尝试匹配工具规则
+            for (auto it = tool_rules_.rbegin(); it != tool_rules_.rend(); ++it) {
+                if (text.find(std::get<0>(*it)) != std::string::npos) {
+                    LLMResponse resp;
+                    resp.tool_calls.push_back({
+                        .id = "call_" + std::to_string(call_count_++),
+                        .name = std::get<1>(*it),
+                        .args_json = std::get<2>(*it),
+                    });
+                    resp.finish_reason = "tool_calls";
+                    resp.prompt_tokens = ILLMBackend::estimate_tokens(text);
+                    resp.completion_tokens = 20;
+                    return resp;
+                }
+            }
+        }
     }
 
-    // 匹配文本规则
-    for (auto &[trigger, response] : rules_) {
-      if (combined.find(trigger) != std::string::npos) {
-        LLMResponse resp;
-        resp.content = response;
-        resp.finish_reason = "stop";
-        resp.prompt_tokens = ILLMBackend::estimate_tokens(combined);
-        resp.completion_tokens = ILLMBackend::estimate_tokens(response);
-        return resp;
-      }
-    }
+    // 默认回复用最后一条消息估计 token
+    std::string test_target = req.messages.empty() ? "" : req.messages.back().content;
 
     // 默认回复
     std::string default_reply =
-        fmt::format("[MockLLM:{}] 收到 {} 条消息，最后一条：\"{}\"",
-                    model_name_, req.messages.size(),
-                    req.messages.empty() ? "" : req.messages.back().content);
+        fmt::format("[MockLLM:{}] 收到 {} 条消息", model_name_, req.messages.size());
 
     LLMResponse resp;
     resp.content = default_reply;
     resp.finish_reason = "stop";
-    resp.prompt_tokens = ILLMBackend::estimate_tokens(combined);
+    resp.prompt_tokens = ILLMBackend::estimate_tokens(test_target);
     resp.completion_tokens = ILLMBackend::estimate_tokens(default_reply);
     return resp;
   }

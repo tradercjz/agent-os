@@ -191,7 +191,7 @@ public:
 
   Result<std::string> run(std::string user_input) override;
 
-private:
+protected:
   static constexpr int MAX_STEPS = 10; // 防止无限循环
 };
 

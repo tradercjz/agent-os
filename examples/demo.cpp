@@ -4,6 +4,7 @@
 //   LLM Kernel → Scheduler → Context → Memory → Tools → Security → Bus
 // ============================================================
 #include <agentos/agent.hpp>
+#include <agentos/reflective_agent.hpp>
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -542,6 +543,42 @@ void demo_full_system() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Demo 9：Reflective Agent 演示
+// ─────────────────────────────────────────────────────────────
+void demo_reflective_agent() {
+  section("Reflective Agent: 自我反思与修正演示");
+
+  auto backend = std::make_unique<kernel::MockLLMBackend>("gpt-4o-reflective");
+  
+  // 1. 初始输入触发工具调用
+  backend->register_tool_rule("启动危险任务", "delete_database", "{\"path\": \"/var/lib/mysql\"}");
+
+  // 2. 当反思器看到工具调用时，模拟模型输出反思建议
+  backend->register_rule("计划执行工具调用: delete_database", "警告：删除数据库目录是灾难性操作，违反了运维安全准则。");
+
+  // 3. 当模型收到修正指令（system message）时，模拟模型输出安全方案
+  backend->register_rule("自我反思驱动的修正指令", "修正指令：考虑到安全风险，我已放弃删除数据库，改为清理 /tmp 缓存。任务完成。");
+
+  AgentOS::Config os_cfg;
+  os_cfg.enable_security = false;
+  AgentOS os(std::move(backend), std::move(os_cfg));
+
+  auto agent = os.create_agent<ReflectiveReActAgent>(AgentConfig{
+      .name = "Reflector",
+      .role_prompt = "你是一个负责任的智能体。",
+  });
+
+  ok("向 ReflectiveAgent 发送指令...");
+  auto result = agent->run("启动危险任务：删除 /var/lib/mysql 以释放空间");
+  if (result) {
+    ok(fmt::format("Agent 最终决定: \"{}\"", *result));
+    info("可以看到 Agent 通过‘内部反思’识别到了方案的危险性并进行了修正。");
+  } else {
+    std::cerr << "Agent 执行失败: " << result.error().message << "\n";
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────
 int main() {
@@ -556,6 +593,7 @@ int main() {
       << "  C++23 Agent Operating System  v0.1.0\033[0m\n\n";
 
   try {
+    Logger::instance().set_level(LogLevel::Info);
     demo_llm_kernel();
     demo_scheduler();
     demo_context_manager();
@@ -564,6 +602,7 @@ int main() {
     demo_security();
     demo_agent_bus();
     demo_full_system();
+    demo_reflective_agent();
 
     section("✓ 所有模块演示完成");
     std::cout << "\n";
