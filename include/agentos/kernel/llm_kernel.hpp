@@ -6,16 +6,17 @@
 #include <agentos/core/logger.hpp>
 #include <agentos/core/task.hpp>
 #include <agentos/core/types.hpp>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <string>
-#include <unordered_map>
+#include <string_view>
 #include <vector>
 
 namespace agentos::kernel {
@@ -37,29 +38,24 @@ struct Message {
   std::string content;
   std::string name;                        // 工具名（role=Tool 时）
   std::string tool_call_id;                // 工具调用时填写
-  std::vector<ToolCallRequest> tool_calls; // Assistant 触发的工具调用记录
+  
+  static constexpr size_t kSmallToolCalls = 4;
+  std::vector<ToolCallRequest> tool_calls; 
 
-  // 静态工厂方法，用 C++20 指定初始化器避免警告
+  // R5-5: Cache token count to avoid redundant estimation.
+  mutable TokenCount cached_tokens{0};
+
+  TokenCount tokens() const;
+
+  // 静态工厂方法
   static Message system(std::string c) {
-    return {.role = Role::System,
-            .content = std::move(c),
-            .name = "",
-            .tool_call_id = "",
-            .tool_calls = {}};
+    return {.role = Role::System, .content = std::move(c), .name = {}, .tool_call_id = {}, .tool_calls = {}};
   }
   static Message user(std::string c) {
-    return {.role = Role::User,
-            .content = std::move(c),
-            .name = "",
-            .tool_call_id = "",
-            .tool_calls = {}};
+    return {.role = Role::User, .content = std::move(c), .name = {}, .tool_call_id = {}, .tool_calls = {}};
   }
   static Message assistant(std::string c) {
-    return {.role = Role::Assistant,
-            .content = std::move(c),
-            .name = "",
-            .tool_call_id = "",
-            .tool_calls = {}};
+    return {.role = Role::Assistant, .content = std::move(c), .name = {}, .tool_call_id = {}, .tool_calls = {}};
   }
 };
 
@@ -194,115 +190,129 @@ public:
   }
 };
 
+inline TokenCount Message::tokens() const {
+  if (cached_tokens == 0 && !content.empty()) {
+    cached_tokens = ILLMBackend::estimate_tokens(content) + 4;
+  }
+  return cached_tokens;
+}
+
 // ─────────────────────────────────────────────────────────────
 // § 1.4  MockBackend（用于测试/离线演示）
 // ─────────────────────────────────────────────────────────────
 
 class MockLLMBackend : public ILLMBackend {
 public:
-  explicit MockLLMBackend(std::string model_name = "mock-gpt")
-      : model_name_(std::move(model_name)) {}
+    struct Rule {
+        std::string trigger_pattern; // 可以是普通字符串或正则
+        std::string response_content;
+        std::optional<std::pair<std::string, std::string>> tool_call; // name, args
+        int priority{0};
+        bool is_regex{false};
 
-  // 注册规则：当 prompt 包含 trigger 时，回复 response
-  void register_rule(std::string trigger, std::string response) {
-    rules_.emplace_back(std::move(trigger), std::move(response));
-  }
-
-  // 注册工具调用规则
-  void register_tool_rule(std::string trigger, std::string tool_name,
-                          std::string args_json) {
-    tool_rules_.emplace_back(std::move(trigger), std::move(tool_name),
-                             std::move(args_json));
-  }
-
-  [[nodiscard]] Result<LLMResponse> complete(const LLMRequest &req) override {
-    // 仅针对最后一条有效消息进行匹配，以实现严谨的状态机逻辑
-    if (!req.messages.empty()) {
-        const auto& text = req.messages.back().content;
-        if (!text.empty()) {
-            // 1. 尝试匹配文本规则
-            for (auto it = rules_.rbegin(); it != rules_.rend(); ++it) {
-                if (text.find(it->first) != std::string::npos) {
-                    LLMResponse resp;
-                    resp.content = it->second;
-                    resp.finish_reason = "stop";
-                    resp.prompt_tokens = ILLMBackend::estimate_tokens(text);
-                    resp.completion_tokens = ILLMBackend::estimate_tokens(it->second);
-                    return resp;
-                }
+        auto matches(std::string_view text) const -> bool {
+            if (is_regex) {
+                try {
+                    return std::regex_search(text.begin(), text.end(), std::regex(trigger_pattern));
+                } catch (...) { return false; }
             }
-            // 2. 尝试匹配工具规则
-            for (auto it = tool_rules_.rbegin(); it != tool_rules_.rend(); ++it) {
-                if (text.find(std::get<0>(*it)) != std::string::npos) {
-                    LLMResponse resp;
+            return text.find(trigger_pattern) != std::string_view::npos;
+        }
+    };
+
+    explicit MockLLMBackend(std::string model_name = "mock-gpt")
+        : model_name_(std::move(model_name)) {}
+
+    void register_rule(std::string trigger, std::string response, int priority = 0, bool is_regex = false) {
+        std::lock_guard lk(mu_);
+        rules_.push_back({std::move(trigger), std::move(response), std::nullopt, priority, is_regex});
+        sort_rules_locked();
+    }
+
+    void register_tool_rule(std::string trigger, std::string tool_name, std::string args_json, int priority = 0, bool is_regex = false) {
+        std::lock_guard lk(mu_);
+        rules_.push_back({std::move(trigger), "", std::make_pair(std::move(tool_name), std::move(args_json)), priority, is_regex});
+        sort_rules_locked();
+    }
+
+    [[nodiscard]] Result<LLMResponse> complete(const LLMRequest &req) override {
+        std::lock_guard lk(mu_);
+        if (req.messages.empty()) return default_response(req);
+
+        std::string_view last_msg = req.messages.back().content;
+        
+        for (const auto& rule : rules_) {
+            if (rule.matches(last_msg)) {
+                LLMResponse resp;
+                if (rule.tool_call) {
                     resp.tool_calls.push_back({
-                        .id = "call_" + std::to_string(call_count_++),
-                        .name = std::get<1>(*it),
-                        .args_json = std::get<2>(*it),
+                        .id = fmt::format("call_{}", call_count_++),
+                        .name = rule.tool_call->first,
+                        .args_json = rule.tool_call->second,
                     });
                     resp.finish_reason = "tool_calls";
-                    resp.prompt_tokens = ILLMBackend::estimate_tokens(text);
                     resp.completion_tokens = 20;
-                    return resp;
+                } else {
+                    resp.content = rule.response_content;
+                    resp.finish_reason = "stop";
+                    resp.completion_tokens = ILLMBackend::estimate_tokens(rule.response_content);
                 }
+                resp.prompt_tokens = ILLMBackend::estimate_tokens(last_msg);
+                return resp;
             }
         }
+
+        return default_response(req);
     }
 
-    // 默认回复用最后一条消息估计 token
-    std::string test_target = req.messages.empty() ? "" : req.messages.back().content;
-
-    // 默认回复
-    std::string default_reply =
-        fmt::format("[MockLLM:{}] 收到 {} 条消息", model_name_, req.messages.size());
-
-    LLMResponse resp;
-    resp.content = default_reply;
-    resp.finish_reason = "stop";
-    resp.prompt_tokens = ILLMBackend::estimate_tokens(test_target);
-    resp.completion_tokens = ILLMBackend::estimate_tokens(default_reply);
-    return resp;
-  }
-
-  // 向量嵌入：生成确定性伪向量（基于文本内容哈希）
-  [[nodiscard]] Result<EmbeddingResponse> embed(const EmbeddingRequest &req) override {
-    EmbeddingResponse resp;
-    for (const auto &input : req.inputs) {
-      std::vector<float> emb(embed_dim_, 0.0f);
-      // 确定性哈希：同一文本始终生成相同向量
-      std::hash<std::string> hasher;
-      size_t h = hasher(input);
-      float norm_sq = 0.0f;
-      for (size_t i = 0; i < embed_dim_; ++i) {
-        // 用哈希种子生成伪随机分量
-        h ^= (h << 13) ^ (h >> 7) ^ (i * 2654435761ULL);
-        emb[i] = static_cast<float>(static_cast<int32_t>(h & 0xFFFF) - 32768) /
-                 32768.0f;
-        norm_sq += emb[i] * emb[i];
-      }
-      // L2 归一化（使 inner product == cosine similarity）
-      float norm = std::sqrt(norm_sq);
-      if (norm > 0.0f) {
-        for (auto &v : emb)
-          v /= norm;
-      }
-      resp.embeddings.push_back(std::move(emb));
-      resp.total_tokens += ILLMBackend::estimate_tokens(input);
+    [[nodiscard]] Result<EmbeddingResponse> embed(const EmbeddingRequest &req) override {
+        EmbeddingResponse resp;
+        for (const auto &input : req.inputs) {
+            std::vector<float> emb(embed_dim_, 0.0f);
+            size_t h = std::hash<std::string>{}(input);
+            float norm_sq = 0.0f;
+            for (size_t i = 0; i < embed_dim_; ++i) {
+                h ^= (h << 13) ^ (h >> 7) ^ (i * 2654435761ULL);
+                emb[i] = static_cast<float>(static_cast<int32_t>(h & 0xFFFF) - 32768) / 32768.0f;
+                norm_sq += emb[i] * emb[i];
+            }
+            float norm = std::sqrt(norm_sq);
+            if (norm > 0.0f) {
+                for (auto &v : emb) v /= norm;
+            }
+            resp.embeddings.push_back(std::move(emb));
+            resp.total_tokens += ILLMBackend::estimate_tokens(input);
+        }
+        return resp;
     }
-    return resp;
-  }
 
-  std::string name() const noexcept override { return model_name_; }
-
-  // 设置 embed() 输出维度（默认 1536，可调小以加速测试）
-  void set_embed_dim(size_t dim) { embed_dim_ = dim; }
+    std::string name() const noexcept override { return model_name_; }
+    void set_embed_dim(size_t dim) { embed_dim_ = dim; }
 
 private:
-  std::string model_name_;
-  std::vector<std::pair<std::string, std::string>> rules_;
-  std::vector<std::tuple<std::string, std::string, std::string>> tool_rules_;
-  std::atomic<uint64_t> call_count_{0};
-  size_t embed_dim_{1536};
+    void sort_rules_locked() {
+        std::stable_sort(rules_.begin(), rules_.end(), [](const Rule& a, const Rule& b) {
+            return a.priority > b.priority; // 更高优先级在前
+        });
+    }
+
+    LLMResponse default_response(const LLMRequest& req) const {
+        std::string text = req.messages.empty() ? "" : req.messages.back().content;
+        std::string reply = fmt::format("[MockLLM:{}] 收到 {} 条消息", model_name_, req.messages.size());
+        
+        LLMResponse resp;
+        resp.content = std::move(reply);
+        resp.finish_reason = "stop";
+        resp.prompt_tokens = ILLMBackend::estimate_tokens(text);
+        resp.completion_tokens = ILLMBackend::estimate_tokens(resp.content);
+        return resp;
+    }
+
+    std::string model_name_;
+    std::vector<Rule> rules_;
+    std::atomic<uint64_t> call_count_{0};
+    size_t embed_dim_{1536};
+    mutable std::mutex mu_;
 };
 
 // ─────────────────────────────────────────────────────────────

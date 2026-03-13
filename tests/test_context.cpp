@@ -110,8 +110,8 @@ TEST(SnapshotTest, SerializeDeserializeRoundTrip) {
   snap.messages.push_back(Message::user("Hello world"));
   snap.messages.push_back(Message::assistant("Hi there"));
 
-  std::string serialized = snap.serialize();
-  auto restored = ContextSnapshot::deserialize(serialized);
+  std::vector<uint8_t> serialized = snap.serialize_binary();
+  auto restored = ContextSnapshot::deserialize_binary(serialized);
 
   ASSERT_TRUE(restored.has_value());
   EXPECT_EQ(restored->agent_id, 42u);
@@ -129,7 +129,8 @@ TEST(SnapshotTest, EscapedNewlinesPreserved) {
   snap.messages.push_back(Message::user("line1\nline2\nline3"));
   snap.metadata_json = "{}";
 
-  auto restored = ContextSnapshot::deserialize(snap.serialize());
+  auto serialized = snap.serialize_binary();
+  auto restored = ContextSnapshot::deserialize_binary(serialized);
   ASSERT_TRUE(restored);
   EXPECT_EQ(restored->messages[0].content, "line1\nline2\nline3");
 }
@@ -156,9 +157,9 @@ TEST_F(ContextManagerTest, SnapshotAndRestore) {
   win.try_add(Message::user("What's 2+2?"));
   win.try_add(Message::assistant("4"));
 
-  auto path = mgr_->snapshot(100);
-  ASSERT_TRUE(path);
-  EXPECT_TRUE(std::filesystem::exists(*path));
+  auto path_result = mgr_->snapshot(100);
+  ASSERT_TRUE(path_result);
+  EXPECT_TRUE(std::filesystem::exists(*path_result));
 
   // Clear and restore
   mgr_->clear(100);
@@ -199,8 +200,8 @@ TEST(ContextSnapshotTest, RoundtripWithSpecialChars) {
   snap.messages.push_back(Message::assistant("Tab\there\rand\\backslash"));
   snap.messages.push_back(Message::system("")); // empty content
 
-  auto serialized = snap.serialize();
-  auto restored = ContextSnapshot::deserialize(serialized);
+  auto serialized = snap.serialize_binary();
+  auto restored = ContextSnapshot::deserialize_binary(serialized);
 
   ASSERT_TRUE(restored.has_value());
   ASSERT_EQ(restored->messages.size(), 3u);
@@ -211,9 +212,9 @@ TEST(ContextSnapshotTest, RoundtripWithSpecialChars) {
 }
 
 TEST(ContextSnapshotTest, DeserializeRejectsOversizedInput) {
-  // Create a string > 50 MiB
-  std::string huge(51 * 1024 * 1024, 'X');
-  auto result = ContextSnapshot::deserialize(huge);
+  // Create a vector > 50 MiB
+  std::vector<uint8_t> huge(51 * 1024 * 1024, 'X');
+  auto result = ContextSnapshot::deserialize_binary(huge);
   EXPECT_FALSE(result.has_value());
 }
 

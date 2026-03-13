@@ -49,10 +49,10 @@ static void print_tool(const std::string &name, const std::string &result) {
 }
 
 // ── 自定义 Agent：打印工具调用过程 ──────────────────────────
-class VerboseReActAgent : public Agent {
+class VerboseReActAgent : public AgentBase<VerboseReActAgent> {
 public:
   VerboseReActAgent(AgentId id, AgentConfig cfg, AgentOS *os)
-      : Agent(id, std::move(cfg), os) {}
+      : AgentBase<VerboseReActAgent>(id, std::move(cfg), os) {}
 
   Result<std::string> run(std::string user_input) override {
     // 从记忆中检索相关上下文

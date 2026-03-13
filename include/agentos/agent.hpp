@@ -57,12 +57,9 @@ struct AgentConfig {
   bool persist_memory{false};             // 是否使用长期记忆
 };
 
-// ─────────────────────────────────────────────────────────────
-// § A.2  AgentRuntime — Agent 运行时状态
-// ─────────────────────────────────────────────────────────────
-
 class AgentOS; // 前向声明
 
+// ── Agent 基础接口 ───────────────────────────
 class Agent : private NonCopyable {
 public:
   Agent(AgentId id, AgentConfig cfg, AgentOS *os)
@@ -71,128 +68,75 @@ public:
   }
 
   virtual ~Agent() {
-    // Signal async tasks that agent is being destroyed.
-    // Uses release ordering so the store is visible to any thread that
-    // subsequently loads alive_ with acquire ordering in run_async().
     alive_->store(false, std::memory_order_release);
   }
 
-  // Explicitly deleted to prevent accidental copies.
-  // Rationale: Agents maintain unique identity (AgentId), own async state,
-  // and are lifecycle-managed via shared_ptr in AgentOS::agents_ map.
-  // Copying an Agent would duplicate the AgentId and corrupt the registry.
   Agent(const Agent&)            = delete;
   Agent& operator=(const Agent&) = delete;
   Agent(Agent&&)                 = delete;
   Agent& operator=(Agent&&)      = delete;
 
-  // ── 生命周期钩子（子类可重写）───────────────────────────
   virtual void on_start() {}
   virtual void on_stop() {}
 
-  // ── 核心执行循环（ReAct 范式：Think → Act → Observe）──
-  // 子类实现具体业务逻辑
   virtual Result<std::string> run(std::string user_input) = 0;
-
-  // ── 便捷接口（通过 AgentOS 调用各子系统）────────────────
-  [[nodiscard]] Result<kernel::LLMResponse>
-  think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb = nullptr);
-  [[nodiscard]] Result<tools::ToolResult> act(const kernel::ToolCallRequest &call);
-  Result<std::string> remember(std::string content, float importance = 0.5f);
-  /// \param query Query string. Internally copied on first use, so the view
-  /// need not remain valid beyond this call.
-  Result<std::vector<memory::SearchResult>> recall(std::string_view query,
-                                                   size_t k = 5);
-  bool send(AgentId target, std::string topic, std::string payload);
-  std::optional<bus::BusMessage> recv(Duration timeout = Duration{3000});
-
-  // ── 异步执行 ────────────────────────────────────────────────
-  /// Run agent asynchronously, returning a future for the result
-  /// PRECONDITION: The caller must ensure this Agent's lifetime exceeds the
-  /// returned future. Capturing `this` by raw pointer means undefined behavior
-  /// if the Agent is destroyed before future.get() is called.
-  /// Recommended usage: only call run_async() on Agents managed via shared_ptr
-  /// and keep the shared_ptr alive until the future completes.
-  ///
-  /// NOTE: This implementation detects the common case where the Agent is destroyed
-  /// before the async task starts by using an alive_ flag. However, this does NOT
-  /// prevent use-after-free if the Agent is destroyed mid-execution. It is still
-  /// the caller's responsibility to ensure the Agent lifetime outlives the future.
-  std::future<Result<std::string>> run_async(std::string user_input) {
-    auto alive = alive_;  // Capture shared_ptr to alive flag
-    return std::async(std::launch::async,
-                      [this, alive, input = std::move(user_input)]() mutable -> Result<std::string> {
-                        if (!alive->load(std::memory_order_acquire)) {
-                          return make_error(ErrorCode::InvalidArgument,
-                                           "Agent destroyed before async task started");
-                        }
-                        return this->run(std::move(input));
-                      });
-  }
-
-  // ── Middleware ──────────────────────────────────────────────
-  /// Thread-safe. Can be called before or after agent starts processing.
-  /// Hooks registered after agent.run() has started will be visible to
-  /// subsequent requests (not the currently running one).
-  void use(Middleware mw) {
-    std::unique_lock lk(middleware_mu_);
-    middleware_.push_back(std::move(mw));
-  }
 
   AgentId id() const { return id_; }
   const AgentConfig &config() const { return config_; }
 
+  void use(Middleware mw) {
+    std::lock_guard lk(middleware_mu_);
+    middleware_.push_back(std::move(mw));
+  }
+
 protected:
   AgentId id_;
   AgentConfig config_;
-  AgentOS *os_; // 非拥有指针，指向父系统
+  AgentOS *os_; 
   std::shared_ptr<bus::Channel> channel_;
   std::vector<Middleware> middleware_;
   mutable std::shared_mutex middleware_mu_;
   std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 
-  // Run middleware hooks; returns true if operation should proceed
-  bool run_before_hooks(HookContext &ctx) {
-    // Take a snapshot under shared lock to avoid holding lock during callbacks
-    std::vector<Middleware> mw_snapshot;
-    {
-      std::shared_lock lk(middleware_mu_);
-      mw_snapshot = middleware_;
-    }
-    for (auto &mw : mw_snapshot) {
-      if (mw.before) mw.before(ctx);
-      if (ctx.cancelled) return false;
-    }
-    return true;
-  }
-  void run_after_hooks(HookContext &ctx) {
-    // Take a snapshot under shared lock to avoid holding lock during callbacks
-    std::vector<Middleware> mw_snapshot;
-    {
-      std::shared_lock lk(middleware_mu_);
-      mw_snapshot = middleware_;
-    }
-    for (auto &mw : mw_snapshot) {
-      if (mw.after) mw.after(ctx);
-    }
-  }
+  // Middleware utilities
+  bool run_before_hooks(HookContext &ctx);
+  void run_after_hooks(HookContext &ctx);
 
   friend class AgentOS;
 };
 
-// ─────────────────────────────────────────────────────────────
-// § A.3  ReActAgent — 通用 ReAct 循环实现
-// ─────────────────────────────────────────────────────────────
-
-class ReActAgent : public Agent {
+// ── AgentBase (CRTP) ───────────────────────────
+template <typename Derived>
+class AgentBase : public Agent {
 public:
-  ReActAgent(AgentId id, AgentConfig cfg, AgentOS *os)
-      : Agent(id, std::move(cfg), os) {}
+  using Agent::Agent;
 
+  [[nodiscard]] Result<kernel::LLMResponse> think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb = nullptr);
+  [[nodiscard]] Result<tools::ToolResult> act(const kernel::ToolCallRequest &call);
+  Result<std::string> remember(std::string content, float importance = 0.5f);
+  Result<std::vector<memory::SearchResult>> recall(std::string_view query, size_t k = 5);
+  bool send(AgentId target, std::string topic, std::string payload);
+  std::optional<bus::BusMessage> recv(Duration timeout = Duration{3000});
+
+  std::future<Result<std::string>> run_async(std::string user_input) {
+    auto alive = alive_;
+    return std::async(std::launch::async, [this, alive, input = std::move(user_input)]() mutable -> Result<std::string> {
+      if (!alive->load(std::memory_order_acquire)) {
+        return make_error(ErrorCode::InvalidArgument, "Agent destroyed before async task started");
+      }
+      return static_cast<Derived*>(this)->run(std::move(input));
+    });
+  }
+};
+
+// ── ReActAgent ──
+class ReActAgent : public AgentBase<ReActAgent> {
+public:
+  using AgentBase<ReActAgent>::AgentBase;
   Result<std::string> run(std::string user_input) override;
 
 protected:
-  static constexpr int MAX_STEPS = 10; // 防止无限循环
+  static constexpr int MAX_STEPS = 10;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -445,138 +389,118 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────
-// § A.5  Agent 便捷方法实现（需要 AgentOS 完整定义）
+// § A.5  AgentBase 便捷方法实现（需要 AgentOS 完整定义）
 // ─────────────────────────────────────────────────────────────
 
-inline Result<kernel::LLMResponse>
-Agent::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
-  // THREAD-SAFETY NOTE: os_ capture is not atomic. think() must not be called
-  // concurrently with detach()/destroy operations. Users are responsible for
-  // ensuring agent lifetime outlives all think() calls.
-  AgentOS *os = os_;
-  if (!os)
-    return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
+template <typename Derived>
+Result<kernel::LLMResponse>
+AgentBase<Derived>::think(std::string user_msg, kernel::ILLMBackend::TokenCallback cb) {
+  AgentOS *os = this->os_;
+  if (!os) return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
+  if (user_msg.empty()) return make_error(ErrorCode::InvalidArgument, "think: user_msg must not be empty");
 
-  // R7-12: Validate user_msg is not empty
-  if (user_msg.empty())
-    return make_error(ErrorCode::InvalidArgument, "think: user_msg must not be empty");
+  HookContext hook_ctx{this->id_, "think", user_msg, false, {}};
+  if (!this->run_before_hooks(hook_ctx)) return make_error(ErrorCode::Cancelled, hook_ctx.cancel_reason);
 
-  // Middleware: before think
-  HookContext hook_ctx{id_, "think", user_msg, false, {}};
-  if (!run_before_hooks(hook_ctx))
-    return make_error(ErrorCode::Cancelled, hook_ctx.cancel_reason);
+  os->ctx().append(this->id_, kernel::Message::user(user_msg));
 
-  // 追加到上下文
-  os->ctx().append(id_, kernel::Message::user(user_msg));
-
-  // 构建请求
   kernel::LLMRequest req;
-  req.agent_id = id_;
-  req.priority = config_.priority;
-  auto &win = os->ctx().get_window(id_, config_.context_limit);
-  req.messages.clear();
-  req.messages.reserve(win.messages().size());
-  for (const auto &m : win.messages()) {
-    req.messages.push_back(m);
-  }
+  req.agent_id = this->id_;
+  req.priority = this->config_.priority;
+  auto &win = os->ctx().get_window(this->id_, this->config_.context_limit);
+  req.messages.assign(win.messages().begin(), win.messages().end());
 
-  // 将工具 Schema 注入请求（供真实 LLM function calling 使用）
-  if (!config_.allowed_tools.empty()) {
-    req.tool_names = config_.allowed_tools;
-    // 生成 OpenAI function-calling 格式的 tools 数组
-    std::string tj = os->tools().tools_json(config_.allowed_tools);
-    if (!tj.empty() && tj != "[]")
-      req.tools_json = tj;
-  } else {
-    // allowed_tools 为空表示允许全部工具
-    std::string tj = os->tools().tools_json({});
-    if (!tj.empty() && tj != "[]")
-      req.tools_json = tj;
-  }
+  std::string tj = os->tools().tools_json(this->config_.allowed_tools);
+  if (!tj.empty() && tj != "[]") req.tools_json = std::move(tj);
 
   auto result = cb ? os->kernel().stream_infer(req, std::move(cb))
                    : os->kernel().infer(req);
   if (result) {
-    // 追加 assistant 回复到上下文，并携带 tool_calls（如果有）
     auto m = kernel::Message::assistant(result->content);
-    if (result->wants_tool_call()) {
-      m.tool_calls = result->tool_calls;
-    }
-    os->ctx().append(id_, std::move(m));
+    if (result->wants_tool_call()) m.tool_calls = result->tool_calls;
+    os->ctx().append(this->id_, std::move(m));
   }
-  run_after_hooks(hook_ctx);
+  this->run_after_hooks(hook_ctx);
   return result;
 }
 
-inline Result<tools::ToolResult>
-Agent::act(const kernel::ToolCallRequest &call) {
-  if (!os_)
-    return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
+template <typename Derived>
+Result<tools::ToolResult>
+AgentBase<Derived>::act(const kernel::ToolCallRequest &call) {
+  if (!this->os_) return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
 
-  // Middleware: before act
-  HookContext act_ctx{id_, "act", call.name, false, {}};
-  if (!run_before_hooks(act_ctx))
-    return make_error(ErrorCode::Cancelled, act_ctx.cancel_reason);
+  HookContext act_ctx{this->id_, "act", call.name, false, {}};
+  if (!this->run_before_hooks(act_ctx)) return make_error(ErrorCode::Cancelled, act_ctx.cancel_reason);
 
-  // ECL 安全检查
-  if (os_->security()) {
-    auto check =
-        os_->security()->authorize_tool(id_, call.name, call.args_json);
-    if (!check) {
-      return make_error(check.error().code, check.error().message);
-    }
+  if (this->os_->security()) {
+    auto check = this->os_->security()->authorize_tool(this->id_, call.name, call.args_json);
+    if (!check) return make_error(check.error().code, check.error().message);
   }
-  auto result = os_->tools().dispatch(call);
-  run_after_hooks(act_ctx);
+  auto result = this->os_->tools().dispatch(call);
+  this->run_after_hooks(act_ctx);
   return result;
 }
 
-inline Result<std::string> Agent::remember(std::string content,
-                                           float importance) {
-  if (!os_)
-    return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
+template <typename Derived>
+Result<std::string> AgentBase<Derived>::remember(std::string content, float importance) {
+  if (!this->os_) return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
   kernel::EmbeddingRequest req{{content}, ""};
-  auto emb_res = os_->kernel().embed(req);
+  auto emb_res = this->os_->kernel().embed(req);
   memory::Embedding emb;
   if (emb_res && !emb_res->embeddings.empty()) {
     emb = std::move(emb_res->embeddings[0]);
-  } else if (!emb_res) {
-    LOG_WARN(fmt::format("Agent {}: embedding failed for remember(), storing without vector", id_));
   }
-  return os_->memory().remember(std::move(content), emb, std::to_string(id_),
-                                importance);
+  return this->os_->memory().remember(std::move(content), emb, std::to_string(this->id_), importance);
 }
 
-inline Result<std::vector<memory::SearchResult>>
-Agent::recall(std::string_view query, size_t k) {
-  if (!os_)
-    return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
-  if (query.empty())
-    return make_error(ErrorCode::InvalidArgument, "recall: query must not be empty");
+template <typename Derived>
+Result<std::vector<memory::SearchResult>>
+AgentBase<Derived>::recall(std::string_view query, size_t k) {
+  if (!this->os_) return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
   kernel::EmbeddingRequest req{{std::string(query)}, ""};
-  auto emb_res = os_->kernel().embed(req);
+  auto emb_res = this->os_->kernel().embed(req);
+  if (!emb_res) return make_error(emb_res.error().code, "recall: embedding failed — " + emb_res.error().message);
+  
   memory::Embedding emb;
-  if (emb_res && !emb_res->embeddings.empty()) {
-    emb = std::move(emb_res->embeddings[0]);
-  } else if (!emb_res) {
-    // Embedding 失败时退化为空向量检索（线性扫描），不再静默
-    return make_error(emb_res.error().code,
-                      "recall: embedding failed — " + emb_res.error().message);
+  if (!emb_res->embeddings.empty()) emb = std::move(emb_res->embeddings[0]);
+  return this->os_->memory().recall(emb, {}, k);
+}
+
+template <typename Derived>
+bool AgentBase<Derived>::send(AgentId target, std::string topic, std::string payload) {
+  if (!this->os_) return false;
+  return this->os_->bus().send(bus::BusMessage::make_request(this->id_, target, std::move(topic), std::move(payload)));
+}
+
+template <typename Derived>
+std::optional<bus::BusMessage> AgentBase<Derived>::recv(Duration timeout) {
+  // channel_ is already initialized in AgentOS::create_agent via register_agent
+  return this->channel_ ? this->channel_->recv(timeout) : std::nullopt;
+}
+
+// ── Middleware Utils ─────────────────────
+inline bool Agent::run_before_hooks(HookContext &ctx) {
+  std::vector<Middleware> mw_snapshot;
+  {
+    std::shared_lock lk(middleware_mu_);
+    mw_snapshot = middleware_;
   }
-  return os_->memory().recall(emb, {}, k);
+  for (auto &mw : mw_snapshot) {
+    if (mw.before) mw.before(ctx);
+    if (ctx.cancelled) return false;
+  }
+  return true;
 }
 
-inline bool Agent::send(AgentId target, std::string topic,
-                        std::string payload) {
-  if (!os_) return false;
-  return os_->bus().send(bus::BusMessage::make_request(id_, target, std::move(topic),
-                                                       std::move(payload)));
-}
-
-inline std::optional<bus::BusMessage> Agent::recv(Duration timeout) {
-  if (!channel_)
-    return std::nullopt;
-  return channel_->recv(timeout);
+inline void Agent::run_after_hooks(HookContext &ctx) {
+  std::vector<Middleware> mw_snapshot;
+  {
+    std::shared_lock lk(middleware_mu_);
+    mw_snapshot = middleware_;
+  }
+  for (auto &mw : mw_snapshot) {
+    if (mw.after) mw.after(ctx);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -584,66 +508,37 @@ inline std::optional<bus::BusMessage> Agent::recv(Duration timeout) {
 // ─────────────────────────────────────────────────────────────
 
 inline Result<std::string> ReActAgent::run(std::string user_input) {
-  // 先从记忆中检索相关上下文
-  // Recall with single retry on transient failure
-  auto recall_result = recall(user_input, 3);
-  if (!recall_result) {
-    LOG_WARN(fmt::format("[ReActAgent] recall failed (attempt 1): {}",
-                         recall_result.error().message));
-    // Single retry after brief backoff for transient errors
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    recall_result = recall(user_input, 3);
-    if (!recall_result) {
-      LOG_WARN(fmt::format("[ReActAgent] recall failed (attempt 2): {} — continuing without memory",
-                           recall_result.error().message));
-    }
-  }
-
+  auto recall_result = this->recall(user_input, 3);
   if (recall_result && !recall_result->empty()) {
     std::string mem_ctx = "相关记忆：\n";
-    for (auto &sr : *recall_result) {
-      mem_ctx += "- " + sr.entry.content + "\n";
-    }
-    os_->ctx().append(id_, kernel::Message::system(mem_ctx));
+    for (auto &sr : *recall_result) mem_ctx += "- " + sr.entry.content + "\n";
+    this->os_->ctx().append(this->id_, kernel::Message::system(mem_ctx));
   }
 
   for (int step = 0; step < MAX_STEPS; ++step) {
-    // ── Think ──
-    auto resp = think(step == 0 ? user_input : "[继续]");
-    if (!resp)
-      return make_unexpected(resp.error());
+    auto resp = this->think(step == 0 ? user_input : "[继续]");
+    if (!resp) return make_unexpected(resp.error());
 
-    // ── 完成（无工具调用）──
     if (!resp->wants_tool_call()) {
-      // 将最终结果存入记忆
-      (void)remember(fmt::format("Q: {} → A: {}", user_input, resp->content), 0.6f);
+      (void)this->remember(fmt::format("Q: {} → A: {}", user_input, resp->content), 0.6f);
       return resp->content;
     }
 
-    // ── Act（处理工具调用）──
     for (auto &tc : resp->tool_calls) {
-      auto tool_result = act(tc);
-      std::string obs;
-      if (tool_result) {
-        obs = tool_result->success ? tool_result->output
-                                   : "工具执行失败: " + tool_result->error;
-      } else {
-        obs = "工具调用被拒绝: " + tool_result.error().message;
-      }
+      auto tool_result = this->act(tc);
+      std::string obs = tool_result ? (tool_result->success ? tool_result->output : "工具执行失败: " + tool_result->error)
+                                    : "工具调用被拒绝: " + tool_result.error().message;
 
-      // Observe：将工具结果追加到上下文
       kernel::Message obs_msg;
       obs_msg.role = kernel::Role::Tool;
-      obs_msg.content = obs;
+      obs_msg.content = std::move(obs);
       obs_msg.tool_call_id = tc.id;
       obs_msg.name = tc.name;
-      os_->ctx().append(id_, obs_msg);
+      this->os_->ctx().append(this->id_, std::move(obs_msg));
     }
   }
 
-  return make_error(ErrorCode::Timeout,
-                    fmt::format("ReActAgent: exceeded max_steps={} without producing final answer. "
-                                "Increase max_steps in AgentConfig or simplify the task.", MAX_STEPS));
+  return make_error(ErrorCode::Timeout, "ReActAgent: exceeded max_steps");
 }
 
 } // namespace agentos

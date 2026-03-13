@@ -5,8 +5,6 @@
 // （GCC 11 / C++20 兼容，不污染 std 命名空间）
 // ============================================================
 #include <cstdarg>
-#include <cstdio>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -76,6 +74,69 @@ public:
         return has_value() ? std::get<0>(data_) : static_cast<T>(std::forward<U>(def));
     }
 
+    // Monadic operations (C++23)
+    template<typename F>
+    auto and_then(F&& f) & {
+        using Ret = std::invoke_result_t<F, T&>;
+        if (has_value()) return std::invoke(std::forward<F>(f), value());
+        return Ret(make_unexpected(error()));
+    }
+
+    template<typename F>
+    auto and_then(F&& f) const & {
+        using Ret = std::invoke_result_t<F, const T&>;
+        if (has_value()) return std::invoke(std::forward<F>(f), value());
+        return Ret(make_unexpected(error()));
+    }
+
+    template<typename F>
+    auto transform(F&& f) & {
+        using U = std::invoke_result_t<F, T&>;
+        if constexpr (std::is_void_v<U>) {
+            if (has_value()) {
+                std::invoke(std::forward<F>(f), value());
+                return Expected<void, E>();
+            }
+            return Expected<void, E>(make_unexpected(error()));
+        } else {
+            if (has_value()) return Expected<U, E>(std::invoke(std::forward<F>(f), value()));
+            return Expected<U, E>(make_unexpected(error()));
+        }
+    }
+
+    template<typename F>
+    auto transform(F&& f) const & {
+        using U = std::invoke_result_t<F, const T&>;
+        if constexpr (std::is_void_v<U>) {
+            if (has_value()) {
+                std::invoke(std::forward<F>(f), value());
+                return Expected<void, E>();
+            }
+            return Expected<void, E>(make_unexpected(error()));
+        } else {
+            if (has_value()) return Expected<U, E>(std::invoke(std::forward<F>(f), value()));
+            return Expected<U, E>(make_unexpected(error()));
+        }
+    }
+
+    template<typename F>
+    auto or_else(F&& f) & {
+        if (has_value()) return *this;
+        return std::invoke(std::forward<F>(f), error());
+    }
+
+    template<typename F>
+    auto or_else(F&& f) const & {
+        if (has_value()) return *this;
+        return std::invoke(std::forward<F>(f), error());
+    }
+
+    template<typename F>
+    auto or_else(F&& f) && {
+        if (has_value()) return std::move(*this);
+        return std::invoke(std::forward<F>(f), std::move(error()));
+    }
+
 private:
     std::variant<T, E> data_;
 };
@@ -98,6 +159,28 @@ public:
     }
     E& error()             { return err_; }
     const E& error() const { return err_; }
+
+    // Monadic operations for void (C++23)
+    template<typename F>
+    auto and_then(F&& f) const & {
+        using Ret = std::invoke_result_t<F>;
+        if (has_value_) return std::invoke(std::forward<F>(f));
+        return Ret(make_unexpected(err_));
+    }
+
+    template<typename F>
+    auto transform(F&& f) const & {
+        using U = std::invoke_result_t<F>;
+        using Ret = Expected<U, E>;
+        if (has_value_) return Ret(std::invoke(std::forward<F>(f)));
+        return Ret(make_unexpected(err_));
+    }
+
+    template<typename F>
+    auto or_else(F&& f) const & {
+        if (has_value_) return *this;
+        return std::invoke(std::forward<F>(f), err_);
+    }
 
 private:
     bool has_value_;

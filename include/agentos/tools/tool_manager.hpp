@@ -318,12 +318,16 @@ public:
   // 注册工具
   void register_tool(std::shared_ptr<ITool> tool) {
     std::lock_guard lk(mu_);
-    auto schema = tool->schema();
-    registry_[schema.id] = std::move(tool);
+    auto s = tool->schema();
+    std::string id = s.id;
+    cached_jsons_[id] = s.to_function_json();
+    registry_[std::move(id)] = std::move(tool);
+    invalidate_cache_locked();
   }
 
   // 动态注册函数式工具（lambda/function）
   template <typename Fn> void register_fn(ToolSchema schema, Fn &&fn) {
+    auto id = schema.id;
     class FnTool : public ITool {
     public:
       FnTool(ToolSchema s, std::function<ToolResult(const ParsedArgs &)> f)
@@ -349,9 +353,44 @@ public:
   std::vector<ToolSchema> list_schemas() const {
     std::lock_guard lk(mu_);
     std::vector<ToolSchema> schemas;
+    schemas.reserve(registry_.size());
     for (auto &[id, tool] : registry_)
       schemas.push_back(tool->schema());
     return schemas;
+  }
+
+  // 高性能获取所有工具的合并 JSON
+  std::string get_all_tools_json() const {
+      std::lock_guard lk(mu_);
+      if (all_tools_json_cache_.empty() && !registry_.empty()) {
+          all_tools_json_cache_ = "[";
+          bool first = true;
+          for (const auto& [id, json] : cached_jsons_) {
+              if (!first) all_tools_json_cache_ += ",";
+              all_tools_json_cache_ += json;
+              first = false;
+          }
+          all_tools_json_cache_ += "]";
+      }
+      return all_tools_json_cache_;
+  }
+
+  std::string get_filtered_tools_json(const std::vector<std::string>& filter) const {
+      if (filter.empty()) return get_all_tools_json();
+      
+      std::lock_guard lk(mu_);
+      std::string result = "[";
+      bool first = true;
+      for (const auto& id : filter) {
+          auto it = cached_jsons_.find(id);
+          if (it != cached_jsons_.end()) {
+              if (!first) result += ",";
+              result += it->second;
+              first = false;
+          }
+      }
+      result += "]";
+      return result;
   }
 
   bool has(const std::string &id) const {
@@ -362,11 +401,19 @@ public:
   void unregister(const std::string &id) {
     std::lock_guard lk(mu_);
     registry_.erase(id);
+    cached_jsons_.erase(id);
+    invalidate_cache_locked();
   }
 
 private:
+  void invalidate_cache_locked() {
+      all_tools_json_cache_.clear();
+  }
+
   mutable std::mutex mu_;
   std::unordered_map<std::string, std::shared_ptr<ITool>> registry_;
+  std::unordered_map<std::string, std::string> cached_jsons_;
+  mutable std::string all_tools_json_cache_;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -519,21 +566,8 @@ public:
   }
 
   // 生成工具列表供 LLM 使用
-  // 优化：直接拼接各工具的 JSON 字符串，避免 serialize→parse→serialize 往返
   std::string tools_json(const std::vector<std::string> &filter = {}) const {
-    auto schemas = registry_.list_schemas();
-    std::string result = "[";
-    bool first = true;
-    for (auto &s : schemas) {
-      if (!filter.empty() &&
-          std::find(filter.begin(), filter.end(), s.id) == filter.end())
-        continue;
-      if (!first) result += ",";
-      result += s.to_function_json(); // 已是合法 JSON 字符串，无需再 parse
-      first = false;
-    }
-    result += "]";
-    return result;
+    return registry_.get_filtered_tools_json(filter);
   }
 
 private:

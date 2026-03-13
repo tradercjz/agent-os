@@ -12,8 +12,10 @@
 #include <limits>
 #include <mutex>
 #include <optional>
-#include <sstream>
+#include <shared_mutex>
 #include <unordered_map>
+#include <memory_resource>
+#include <vector>
 
 namespace agentos::context {
 
@@ -23,18 +25,20 @@ namespace fs = std::filesystem;
 // § 3.1  ContextWindow — Token 预算管理器
 // ─────────────────────────────────────────────────────────────
 
-/// Thread-safe: all public methods are guarded by mu_.
-/// Note: add_evict_if_needed() should only be called from ContextManager::append()
-/// under the ContextManager's own lock, or it must be called with mu_ held.
 class ContextWindow {
 public:
   explicit ContextWindow(TokenCount max_tokens = 8192)
-      : max_tokens_(max_tokens) {}
+      : max_tokens_(max_tokens), 
+        pool_(4096), // Initial 4KB block
+        messages_(&pool_),
+        evicted_(&pool_) {}
+
+  // R5-1: Per-window mutex for granular locking
+  mutable std::mutex mu;
 
   // 尝试添加消息；若超预算返回 false
   bool try_add(const kernel::Message &msg) {
-    TokenCount cost =
-        kernel::ILLMBackend::estimate_tokens(msg.content) + 4; // 角色 overhead
+    TokenCount cost = msg.tokens();
     if (used_tokens_ + cost > max_tokens_ || messages_.size() >= kMaxMessages)
       return false;
     messages_.push_back(msg);
@@ -43,51 +47,58 @@ public:
   }
 
   // 强制添加（可能触发驱逐）
-  // 驱逐策略：优先驱逐最老的非 system 消息（保留系统提示语）
-  // FIFO: 如果消息[0]是系统消息，从消息[1]开始驱逐；否则从[0]开始
-  //
-  // PRECONDITION: Must be called only from append() while ContextManager::mu_ is held.
-  // Direct calls without external synchronization will cause data races.
-  // This function modifies messages_ and used_tokens_ with no internal synchronization.
   void add_evict_if_needed(const kernel::Message &msg) {
-    TokenCount cost = kernel::ILLMBackend::estimate_tokens(msg.content) + 4;
+    TokenCount cost = msg.tokens();
     while (!messages_.empty() && used_tokens_ + cost > max_tokens_) {
-      // Find non-system message to evict.
-      // Strategy: skip system messages; among non-system, pick the one with
-      // lowest importance / (access + 1). On tie, pick the oldest (lowest index).
-      size_t evict_idx = messages_.size();  // sentinel: nothing to evict
-      float worst_score = std::numeric_limits<float>::max();
+      // R5-6: Fast heuristic-based eviction. 
+      // Instead of full O(N) scan, find first occurrence of each role.
+      size_t evict_idx = std::string::npos;
+      size_t first_user = std::string::npos;
+      size_t first_tool = std::string::npos;
+      size_t first_assistant = std::string::npos;
+      
       for (size_t i = 0; i < messages_.size(); ++i) {
-        if (messages_[i].role == kernel::Role::System) continue;
-        // Lower score = more likely to be evicted
-        float score = static_cast<float>(i);  // proxy for age (lower index = older)
-        // Boost by role importance: User(0.1) < Tool(0.3) < Assistant(0.5)
-        if (messages_[i].role == kernel::Role::User) score -= 1000.0f;
-        else if (messages_[i].role == kernel::Role::Tool) score -= 500.0f;
-        else if (messages_[i].role == kernel::Role::Assistant) score -= 100.0f;
-        if (score < worst_score) {
-          worst_score = score;
-          evict_idx = i;
+        auto role = messages_[i].role;
+        if (role == kernel::Role::User && first_user == std::string::npos) first_user = i;
+        else if (role == kernel::Role::Tool && first_tool == std::string::npos) first_tool = i;
+        else if (role == kernel::Role::Assistant && first_assistant == std::string::npos) first_assistant = i;
+        
+        if (first_user != std::string::npos && first_tool != std::string::npos && first_assistant != std::string::npos) break;
+        if (i > 128) break; // Defensive limit: good enough victims usually at the front
+      }
+      
+      float worst_score = std::numeric_limits<float>::max();
+      auto check = [&](size_t idx, float bias) {
+        if (idx == std::string::npos) return;
+        float s = static_cast<float>(idx) + bias;
+        if (s < worst_score) { worst_score = s; evict_idx = idx; }
+      };
+      
+      check(first_user, -1000.0f);
+      check(first_tool, -500.0f);
+      check(first_assistant, -100.0f);
+      
+      // Fallback: if no biased candidates, take the absolute first non-system message
+      if (evict_idx == std::string::npos) {
+        for (size_t i = 0; i < messages_.size(); ++i) {
+          if (messages_[i].role != kernel::Role::System) { evict_idx = i; break; }
         }
       }
-      if (evict_idx >= messages_.size()) {
-        // ALL messages are system messages — cannot evict further
-        // Log warning: new message will cause budget overrun
-        LOG_WARN(fmt::format("[Context] Cannot evict: only system messages remain. "
-                             "Token budget may be exceeded (used={}, cost={}, max={})",
-                             used_tokens_, cost, max_tokens_));
+
+      if (evict_idx == std::string::npos || evict_idx >= messages_.size()) {
+        LOG_WARN(fmt::format("[Context] Cannot evict system messages. Budget may overun."));
         break;
       }
-      evicted_.push_back(messages_[evict_idx]);
-      used_tokens_ -= kernel::ILLMBackend::estimate_tokens(messages_[evict_idx].content) + 4;
+      evicted_.push_back(std::move(messages_[evict_idx]));
+      used_tokens_ -= (evicted_.back()).tokens();
       messages_.erase(messages_.begin() + evict_idx);
     }
     messages_.push_back(msg);
     used_tokens_ += cost;
   }
 
-  const std::deque<kernel::Message> &messages() const { return messages_; }
-  const std::deque<kernel::Message> &evicted() const { return evicted_; }
+  const std::pmr::deque<kernel::Message> &messages() const { return messages_; }
+  const std::pmr::deque<kernel::Message> &evicted() const { return evicted_; }
   size_t message_count() const { return messages_.size(); }
   TokenCount used_tokens() const { return used_tokens_; }
   TokenCount max_tokens() const { return max_tokens_; }
@@ -104,27 +115,28 @@ public:
     messages_.clear();
     evicted_.clear();
     used_tokens_ = 0;
+    // pool_.release(); // Note: we don't release pool here to keep memory for reuse
   }
 
-  // 注入一段摘要，替换已驱逐的历史
   void inject_summary(std::string summary_content) {
     messages_.push_front(
         kernel::Message::system("=== 历史对话摘要 ===\n" + std::move(summary_content)));
     used_tokens_ = 0;
     for (auto &m : messages_)
-      used_tokens_ += kernel::ILLMBackend::estimate_tokens(m.content) + 4;
+      used_tokens_ += m.tokens();
   }
 
 private:
-  static constexpr size_t kMaxMessages = 50000; // safety cap independent of token count
+  static constexpr size_t kMaxMessages = 50000;
   TokenCount max_tokens_;
   TokenCount used_tokens_{0};
-  std::deque<kernel::Message> messages_;
-  std::deque<kernel::Message> evicted_; // 被驱逐的消息，等待持久化
+  std::pmr::monotonic_buffer_resource pool_;
+  std::pmr::deque<kernel::Message> messages_;
+  std::pmr::deque<kernel::Message> evicted_;
 };
 
 // ─────────────────────────────────────────────────────────────
-// § 3.2  ContextSnapshot — 序列化/反序列化
+// § 3.2  ContextSnapshot
 // ─────────────────────────────────────────────────────────────
 
 struct ContextSnapshot {
@@ -132,143 +144,104 @@ struct ContextSnapshot {
   SessionId session_id;
   TimePoint captured_at;
   std::vector<kernel::Message> messages;
-  std::string metadata_json; // 任意扩展元数据
+  std::string metadata_json;
 
-  // 序列化为文本（简单格式，生产可换 protobuf/msgpack）
-  std::string serialize() const {
-    std::string out;
-    out += fmt::format("SNAP:agent={},session={}\n", agent_id, session_id);
-    for (auto &m : messages) {
-      int role_id = static_cast<int>(m.role);
-      // 转义换行和特殊字符
-      std::string escaped;
-      for (char c : m.content) {
-        if (c == '\n')
-          escaped += "\\n";
-        else if (c == '\r')
-          escaped += "\\r";
-        else if (c == '\\')
-          escaped += "\\\\";
-        else
-          escaped += c;
-      }
-      out += fmt::format("MSG:{}:{}\n", role_id, escaped);
+  std::vector<uint8_t> serialize_binary() const {
+    std::vector<uint8_t> buf;
+    auto append_u32 = [&](uint32_t v) {
+      uint8_t b[4];
+      std::memcpy(b, &v, 4);
+      buf.insert(buf.end(), b, b + 4);
+    };
+    auto append_str = [&](const std::string &s) {
+      append_u32(static_cast<uint32_t>(s.size()));
+      buf.insert(buf.end(), s.begin(), s.end());
+    };
+
+    append_u32(static_cast<uint32_t>(agent_id));
+    append_str(session_id);
+    append_u32(static_cast<uint32_t>(captured_at.time_since_epoch().count() / 1000000)); // ms
+    append_u32(static_cast<uint32_t>(messages.size()));
+    for (const auto &m : messages) {
+      buf.push_back(static_cast<uint8_t>(m.role));
+      append_str(m.content);
+      append_str(m.name);
+      append_str(m.tool_call_id);
     }
-    out += "META:" + metadata_json + "\n";
-    out += "END\n";
-    return out;
+    append_str(metadata_json);
+    return buf;
   }
 
-  static std::optional<ContextSnapshot> deserialize(const std::string &data) {
-    constexpr size_t MAX_SNAPSHOT_SIZE = 50 * 1024 * 1024; // 50 MiB safety limit
-    if (data.size() > MAX_SNAPSHOT_SIZE)
-      return std::nullopt;
+  static std::optional<ContextSnapshot> deserialize_binary(std::span<const uint8_t> data) {
+    if (data.size() < 16) return std::nullopt;
+    if (data.size() > 50 * 1024 * 1024) return std::nullopt; // 50MB limit
+    size_t pos = 0;
+    auto read_u32 = [&]() -> uint32_t {
+      uint32_t v;
+      if (pos + 4 > data.size()) return 0;
+      std::memcpy(&v, &data[pos], 4);
+      pos += 4;
+      return v;
+    };
+    auto read_str = [&]() -> std::string {
+      uint32_t len = read_u32();
+      if (len > 10 * 1024 * 1024) return ""; // 10MB per string limit
+      if (pos + len > data.size()) return "";
+      std::string s(reinterpret_cast<const char*>(&data[pos]), len);
+      pos += len;
+      return s;
+    };
 
-    ContextSnapshot snap{};  // Value-initialize to zero out all members
-    snap.captured_at = now();
-    std::istringstream ss(data);
-    std::string line;
-    while (std::getline(ss, line)) {
-      if (line.starts_with("SNAP:")) {
-        auto body = line.substr(5);
-        auto agent_pos = body.find("agent=");
-        auto sess_pos = body.find(",session=");
-        if (agent_pos != std::string::npos) {
-          auto agent_end = body.find(',', agent_pos);
-          auto agent_val = body.substr(agent_pos + 6,
-              agent_end != std::string::npos ? agent_end - agent_pos - 6 : std::string::npos);
-          try { snap.agent_id = std::stoull(agent_val); } catch (const std::exception &) { continue; }
-        }
-        if (sess_pos != std::string::npos)
-          snap.session_id = body.substr(sess_pos + 9);
-      } else if (line.starts_with("MSG:")) {
-        auto rest = line.substr(4);
-        auto colon = rest.find(':');
-        if (colon == std::string::npos)
-          continue;
-        int role_id;
-        try { role_id = std::stoi(rest.substr(0, colon)); } catch (const std::exception &) { continue; }
-        if (role_id < 0 || role_id > 3) // Role enum: System=0, User=1, Assistant=2, Tool=3
-          continue;
-        std::string content;
-        // 反转义
-        bool escape = false;
-        for (char c : rest.substr(colon + 1)) {
-          if (escape) {
-            if (c == 'n')
-              content += '\n';
-            else if (c == 'r')
-              content += '\r';
-            else
-              content += c;
-            escape = false;
-          } else if (c == '\\') {
-            escape = true;
-          } else {
-            content += c;
-          }
-        }
-        snap.messages.push_back(
-            {.role = static_cast<kernel::Role>(role_id),
-             .content = content,
-             .name = "",
-             .tool_call_id = "",
-             .tool_calls = {}});
-      } else if (line.starts_with("META:")) {
-        snap.metadata_json = line.substr(5);
-      }
+    ContextSnapshot snap;
+    snap.agent_id = read_u32();
+    snap.session_id = read_str();
+    uint32_t ms = read_u32();
+    snap.captured_at = TimePoint(Duration(ms));
+    uint32_t msg_count = read_u32();
+    if (msg_count > 100000) return std::nullopt; // Safety limit
+    for (uint32_t i = 0; i < msg_count; ++i) {
+      if (pos >= data.size()) break;
+      kernel::Role role = static_cast<kernel::Role>(data[pos++]);
+      std::string content = read_str();
+      std::string name = read_str();
+      std::string tc_id = read_str();
+      snap.messages.push_back({role, std::move(content), std::move(name), std::move(tc_id), {}});
     }
+    snap.metadata_json = read_str();
     return snap;
   }
 };
 
 // ─────────────────────────────────────────────────────────────
-// § 3.3  ContextManager — 虚拟上下文管理门面
+// § 3.3  ContextManager
 // ─────────────────────────────────────────────────────────────
 
-// 换页策略回调（将被驱逐的消息写入长期存储）
-using EvictionCallback =
-    std::function<void(AgentId, const std::vector<kernel::Message> &)>;
-// 摘要生成回调（可由 LLM 实现）
-using SummarizeFn =
-    std::function<std::string(const std::vector<kernel::Message> &)>;
+using EvictionCallback = std::function<void(AgentId, const std::vector<kernel::Message> &)>;
+using SummarizeFn = std::function<std::string(const std::vector<kernel::Message> &)>;
 
 class ContextManager : private NonCopyable {
 public:
-  explicit ContextManager(
-      fs::path snapshot_dir = std::filesystem::temp_directory_path() / "agentos_snapshots")
+  explicit ContextManager(fs::path snapshot_dir = std::filesystem::temp_directory_path() / "agentos_snapshots")
       : snapshot_dir_(std::move(snapshot_dir)) {
     fs::create_directories(snapshot_dir_);
   }
 
-  // 获取或创建某 Agent 的上下文窗口
   ContextWindow &get_window(AgentId agent_id, TokenCount max_tokens = 8192) {
-    std::lock_guard lk(mu_);
-    auto [it, inserted] = windows_.emplace(agent_id, ContextWindow{max_tokens});
-    return it->second;
+    {
+      std::shared_lock lk(map_mu_);
+      auto it = windows_.find(agent_id);
+      if (it != windows_.end()) return *it->second;
+    }
+    std::lock_guard lk(map_mu_);
+    auto [it, inserted] = windows_.emplace(agent_id, std::make_unique<ContextWindow>(max_tokens));
+    return *it->second;
   }
 
-  // 向上下文追加消息，自动换页
-  void append(AgentId agent_id, kernel::Message msg,
-              EvictionCallback on_evict = nullptr) {
-    std::lock_guard lk(mu_);
-    auto it = windows_.find(agent_id);
-    if (it == windows_.end()) {
-      // 窗口不存在时自动创建（默认 8192 token）
-      it = windows_.emplace(agent_id, ContextWindow{8192}).first;
-    }
-    auto &win = it->second;
-
-    // Guard: if the single message exceeds window capacity, warn and skip eviction logic
-    TokenCount msg_cost = kernel::ILLMBackend::estimate_tokens(msg.content) + 4;
-    if (msg_cost > win.max_tokens()) {
-      LOG_WARN(fmt::format("[ContextManager] Message exceeds window capacity "
-                           "({} > {} tokens) for agent {}, appending anyway",
-                           msg_cost, win.max_tokens(), agent_id));
-    }
+  void append(AgentId agent_id, kernel::Message msg, EvictionCallback on_evict = nullptr) {
+    auto &win = get_window(agent_id);
+    std::lock_guard win_lk(win.mu);
     win.add_evict_if_needed(msg);
 
-    // 若有驱逐，触发回调
     if (!win.evicted().empty() && on_evict) {
       std::vector<kernel::Message> evicted(win.evicted().begin(), win.evicted().end());
       win.clear_evicted();
@@ -276,111 +249,68 @@ public:
     }
   }
 
-  // 当上下文接近满时，用摘要替换历史
   void compress(AgentId agent_id, SummarizeFn summarize) {
     std::vector<kernel::Message> all;
-
-    // Phase 1: collect messages under lock
     {
-      std::lock_guard lk(mu_);
-      auto it = windows_.find(agent_id);
-      if (it == windows_.end())
-        return;
-      auto &win = it->second;
-      if (!win.is_near_full())
-        return;
+      auto &win = get_window(agent_id);
+      std::lock_guard win_lk(win.mu);
+      if (!win.is_near_full()) return;
       all.assign(win.messages().begin(), win.messages().end());
     }
-
-    // Phase 2: call summarize callback WITHOUT lock (may call LLM)
     std::string summary = summarize(all);
-
-    // Phase 3: apply summary under lock
     {
-      std::lock_guard lk(mu_);
-      auto it = windows_.find(agent_id);
-      if (it == windows_.end())
-        return;
-      it->second.reset();
-      it->second.inject_summary(std::move(summary));
+      auto &win = get_window(agent_id);
+      std::lock_guard win_lk(win.mu);
+      win.reset();
+      win.inject_summary(std::move(summary));
     }
   }
 
-  // 快照：将 Agent 上下文序列化到磁盘
-  Result<fs::path> snapshot(AgentId agent_id,
-                            const std::string &metadata = "{}") {
-    // Phase 1: collect snapshot data under lock
+  Result<fs::path> snapshot(AgentId agent_id, const std::string &metadata = "{}") {
     ContextSnapshot snap;
     fs::path path;
     {
-      std::lock_guard lk(mu_);
-      auto it = windows_.find(agent_id);
-      if (it == windows_.end())
-        return make_error(ErrorCode::NotFound,
-                          fmt::format("No context for agent {}", agent_id));
-
+      auto &win = get_window(agent_id);
+      std::lock_guard win_lk(win.mu);
       snap.agent_id = agent_id;
       snap.session_id = std::to_string(agent_id);
       snap.captured_at = now();
       snap.metadata_json = metadata;
-      for (auto &m : it->second.messages())
-        snap.messages.push_back(m);
-      path = snapshot_dir_ / fmt::format("agent_{}_snap.txt", agent_id);
+      for (const auto &m : win.messages()) snap.messages.push_back(m);
+      path = snapshot_dir_ / fmt::format("agent_{}_snap.bin", agent_id);
     }
-
-    // Phase 2: file I/O outside lock
-    std::ofstream ofs(path);
-    if (!ofs)
-      return make_error(
-          ErrorCode::MemoryWriteFailed,
-          fmt::format("Cannot write snapshot to {}", path.string()));
-    ofs << snap.serialize();
-    ofs.flush();
-    if (!ofs.good())
-      return make_error(
-          ErrorCode::MemoryWriteFailed,
-          fmt::format("Write failed (disk full?) for {}", path.string()));
+    auto binary = snap.serialize_binary();
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) return make_error(ErrorCode::MemoryWriteFailed, "Cannot write snapshot");
+    ofs.write(reinterpret_cast<const char*>(binary.data()), binary.size());
     return path;
   }
 
-  // 从磁盘恢复上下文（断点续传）
   Result<void> restore(AgentId agent_id) {
-    // Phase 1: File I/O outside lock to avoid blocking other agents
-    fs::path path;
-    {
-      std::lock_guard lk(mu_);
-      path = snapshot_dir_ / fmt::format("agent_{}_snap.txt", agent_id);
-    }
-
-    if (!fs::exists(path))
-      return make_error(ErrorCode::NotFound,
-                        fmt::format("Snapshot not found: {}", path.string()));
-
-    std::ifstream ifs(path);
-    std::string data((std::istreambuf_iterator<char>(ifs)),
-                     std::istreambuf_iterator<char>());
-    auto snap = ContextSnapshot::deserialize(data);
-    if (!snap)
-      return make_error(ErrorCode::MemoryReadFailed, "Snapshot parse failed");
-
-    // Phase 2: Apply under lock
-    std::lock_guard lk(mu_);
-    auto &win = windows_.emplace(agent_id, ContextWindow{8192}).first->second;
+    fs::path path = snapshot_dir_ / fmt::format("agent_{}_snap.bin", agent_id);
+    if (!fs::exists(path)) return make_error(ErrorCode::NotFound, "Snapshot not found");
+    std::ifstream ifs(path, std::ios::binary | std::ios::ate);
+    std::streamsize size = ifs.tellg();
+    ifs.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buffer(size);
+    if (!ifs.read(reinterpret_cast<char*>(buffer.data()), size)) return make_error(ErrorCode::MemoryReadFailed, "Snapshot read failed");
+    auto snap = ContextSnapshot::deserialize_binary(buffer);
+    if (!snap) return make_error(ErrorCode::MemoryReadFailed, "Snapshot parse failed");
+    auto &win = get_window(agent_id);
+    std::lock_guard win_lk(win.mu);
     win.reset();
-    for (auto &m : snap->messages)
-      win.try_add(m);
+    for (const auto &m : snap->messages) win.try_add(m);
     return {};
   }
 
-  // 清除 Agent 上下文
   void clear(AgentId agent_id) {
-    std::lock_guard lk(mu_);
+    std::lock_guard lk(map_mu_);
     windows_.erase(agent_id);
   }
 
 private:
-  mutable std::mutex mu_;
-  std::unordered_map<AgentId, ContextWindow> windows_;
+  mutable std::shared_mutex map_mu_;
+  std::unordered_map<AgentId, std::unique_ptr<ContextWindow>> windows_;
   fs::path snapshot_dir_;
 };
 
