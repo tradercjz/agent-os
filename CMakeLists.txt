@@ -184,14 +184,13 @@ target_compile_options(agentos PRIVATE
     -Werror
     -Wno-error=unused-parameter   # Allow in callback signatures
     -Wno-error=unused-function    # Allow in header-only templates
+    -Wno-unknown-pragmas          # Allow omp pragmas without OpenMP enabled
 )
 
 # GCC ABI compatibility for DolphinDB plugin compatibility
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_compile_definitions(agentos PUBLIC
-        _GLIBCXX_USE_CXX11_ABI=0
-    )
-endif()
+# We only apply _GLIBCXX_USE_CXX11_ABI=0 to the plugin target later.
+# Do not apply it globally because it breaks GTest and other standard libraries
+# that are built with the new ABI.
 
 if(AGENTOS_ENABLE_JIEBA)
     target_link_libraries(agentos PUBLIC cppjieba::cppjieba)
@@ -216,8 +215,10 @@ target_link_libraries(csr_graph_demo agentos)
 add_executable(openai_demo examples/openai_demo.cpp)
 target_link_libraries(openai_demo agentos)
 
-add_executable(rag_agent_demo examples/rag_agent_demo.cpp)
-target_link_libraries(rag_agent_demo agentos)
+if(NOT AGENTOS_NO_DUCKDB)
+    add_executable(rag_agent_demo examples/rag_agent_demo.cpp)
+    target_link_libraries(rag_agent_demo agentos)
+endif()
 
 # ---- Tests ----
 add_executable(benchmark_csr_graph tests/benchmark_csr_graph.cpp)
@@ -237,7 +238,6 @@ set(TEST_SOURCES
   tests/test_bus.cpp
   tests/test_agent.cpp
   tests/test_csr_graph.cpp
-  tests/test_knowledge_base.cpp
   tests/test_sqlite_store.cpp
   tests/test_sdk.cpp
   tests/test_integration.cpp
@@ -245,7 +245,11 @@ set(TEST_SOURCES
   tests/test_api_fluent.cpp
   tests/test_compile_safety.cpp
 )
+
+# GTest issue with GCC 13: need to disable some warnings for the test target
+# or use correct C++ standard macros that GTest requires.
 if(NOT AGENTOS_NO_DUCKDB)
+  list(APPEND TEST_SOURCES tests/test_knowledge_base.cpp)
   list(APPEND TEST_SOURCES tests/test_duckdb_store.cpp)
 endif()
 add_executable(test_agentos ${TEST_SOURCES})
