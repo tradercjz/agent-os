@@ -17,7 +17,9 @@
 
 // ── Core modules ────────────────────────────────────────────
 #include <agentos/agent.hpp>
+#ifndef AGENTOS_NO_DUCKDB
 #include <agentos/knowledge/knowledge_base.hpp>
+#endif
 
 // ── Version info ────────────────────────────────────────────
 #define AGENTOS_VERSION_MAJOR 0

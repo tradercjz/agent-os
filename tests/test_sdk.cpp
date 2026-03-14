@@ -155,7 +155,8 @@ TEST_F(SDKBuilderTest, RegisterToolShorthand) {
           .params = {{.name = "msg",
                       .type = tools::ParamType::String,
                       .description = "message",
-                      .required = true}},
+                      .required = true,
+                      .default_value = std::nullopt}},
       },
       [](const tools::ParsedArgs &args) -> tools::ToolResult {
         return tools::ToolResult::ok(args.get("msg"));
@@ -241,6 +242,7 @@ TEST_F(SDKBuilderTest, MiddlewareCancellation) {
           ctx.cancel_reason = "blocked by policy";
         }
       },
+      .after = nullptr
   });
 
   auto resp = agent->think("hello");
