@@ -385,21 +385,37 @@ public:
 
     /// Drain: wait for all pending/running tasks to finish (up to timeout)
     [[nodiscard]] bool drain(Duration timeout = Duration{kDefaultWaitTimeout}) {
+      auto start = now();
       std::unique_lock lk(mu_);
-      bool success = done_cv_.wait_for(lk, timeout, [this] {
+
+      auto is_drained = [this] {
         for (auto &[id, task] : all_tasks_) {
-          auto st = task->state.load();
+          auto st = task->state.load(std::memory_order_acquire);
           if (st == TaskState::Pending || st == TaskState::Running)
             return false;
         }
         return true;
-      });
+      };
+
+      bool success = done_cv_.wait_for(lk, timeout, is_drained);
+
+      // Sometimes we get spurious wakeups or notify before state changes are fully
+      // visible. Let's do a loop over remaining time if it wasn't successful.
+      while (!success) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now() - start);
+        if (elapsed >= timeout) {
+          // One final check
+          success = is_drained();
+          break;
+        }
+        success = done_cv_.wait_for(lk, timeout - elapsed, is_drained);
+      }
 
       // Timeout reached — log stuck tasks for diagnosis
       if (!success) {
         size_t pending = 0, running = 0;
         for (auto &[id, task] : all_tasks_) {
-          auto st = task->state.load();
+          auto st = task->state.load(std::memory_order_acquire);
           if (st == TaskState::Pending) ++pending;
           else if (st == TaskState::Running) ++running;
         }
@@ -458,9 +474,6 @@ private:
                 metrics_.tasks_failed++;
             }
 
-            // 唤醒所有在 wait_for() 上等待的线程
-            done_cv_.notify_all();
-
             // 通知依赖该任务的下游任务就绪
             auto ready_ids = dep_graph_.complete_task(task->id);
             {
@@ -473,6 +486,16 @@ private:
                         cv_.notify_one();
                     }
                 }
+            }
+
+            {
+                std::lock_guard lk(mu_);
+                // 唤醒所有在 wait_for() / drain() 上等待的线程
+                // 注意：因为 drain() 依赖于所有 task 状态的判定，
+                // 当 task 已经置为 Completed 并且后继任务（若有）也已经 Pending 之后
+                // 我们就可以安全地 notify，确保 drain() 能重新检查状态。
+                // 持有锁的情况下调用 notify_all 保证 drain() 不会漏掉这次唤醒。
+                done_cv_.notify_all();
             }
         }
     }
@@ -559,6 +582,10 @@ private:
                 LOG_WARN(fmt::format("[Scheduler] Task {} skipped in dequeue: state was {} (expected Pending)",
                                      task->id, static_cast<int>(expected)));
                 task = nullptr;
+                // Since this task was skipped, another task might be ready
+                cv_.notify_one();
+                // Also notify drain in case this was the last pending task (though unlikely)
+                done_cv_.notify_all();
             }
         } else if (!fifo_queue_.empty()) {
             task = fifo_queue_.front();
@@ -573,6 +600,8 @@ private:
                 LOG_WARN(fmt::format("[Scheduler] Task {} skipped in dequeue: state was {} (expected Pending)",
                                      task->id, static_cast<int>(expected)));
                 task = nullptr;
+                cv_.notify_one();
+                done_cv_.notify_all();
             }
         }
         return task;

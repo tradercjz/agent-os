@@ -328,7 +328,10 @@ TEST_F(SDKBuilderTest, SchedulerDrain) {
 
   std::atomic<int> done{0};
   for (int i = 0; i < 5; ++i) {
-    (void)os->submit_task("t" + std::to_string(i), [&] { done++; });
+    (void)os->submit_task("t" + std::to_string(i), [&] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      done++;
+    });
   }
 
   bool drained = os->scheduler().drain(Duration{5000});
