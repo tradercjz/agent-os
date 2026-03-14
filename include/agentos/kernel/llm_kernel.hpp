@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <concepts>
+#include <condition_variable>
 #include <functional>
 #include <list>
 #include <memory>
@@ -183,6 +184,7 @@ public:
     refill_locked();
     if (bucket_ >= static_cast<double>(n)) [[likely]] {
       bucket_ -= n;
+      if (bucket_ > 0.0) cv_.notify_all();
       return {true, Duration{0}};
     }
     // 计算需要等待多少毫秒（clamp to sane range）
@@ -194,15 +196,66 @@ public:
     return {false, Duration{wait_ms}};
   }
 
+  // 尝试获取 n 个 token，如果不足则等待，最多重试 max_retries 次。
+  // 成功返回 {true, total_waited, retries}，失败返回 {false, total_waited, retries}。
+  struct AcquireResult {
+    bool ok;
+    Duration waited;
+    int retries;
+  };
+
+  AcquireResult acquire(TokenCount n, int max_retries = 2) {
+    std::unique_lock lk(mu_);
+    auto start_time = Clock::now();
+    int attempt = 0;
+
+    while (attempt <= max_retries) {
+      refill_locked();
+      if (bucket_ >= static_cast<double>(n)) [[likely]] {
+        bucket_ -= n;
+        if (bucket_ > 0.0) cv_.notify_all();
+        auto total_waited = std::chrono::duration_cast<Duration>(Clock::now() - start_time);
+        return {true, total_waited, attempt};
+      }
+
+      if (attempt == max_retries) {
+        break;
+      }
+
+      double deficit = n - bucket_;
+      double raw_wait = deficit / refill_rate_ * 1000.0;
+      if (raw_wait > static_cast<double>(kMaxWaitMs)) raw_wait = static_cast<double>(kMaxWaitMs);
+      if (raw_wait < 0.0) raw_wait = 0.0;
+      auto wait_ms = Duration{static_cast<int64_t>(raw_wait)};
+      auto target_time = Clock::now() + wait_ms;
+
+      // Use condition variable for waiting instead of sleep_for.
+      // The predicate handles spurious wakeups by checking if enough tokens
+      // have been refilled.
+      bool acquired = cv_.wait_until(lk, target_time, [this, n] {
+        refill_locked();
+        return bucket_ >= static_cast<double>(n);
+      });
+
+      if (acquired) {
+        bucket_ -= n;
+        if (bucket_ > 0.0) cv_.notify_all();
+        auto total_waited = std::chrono::duration_cast<Duration>(Clock::now() - start_time);
+        // If we acquired it here, attempt is still what it was before waiting.
+        return {true, total_waited, attempt + 1};
+      }
+
+      ++attempt;
+    }
+
+    auto total_waited = std::chrono::duration_cast<Duration>(Clock::now() - start_time);
+    return {false, total_waited, attempt};
+  }
+
   uint32_t available_tokens() const noexcept {
     std::lock_guard lk(mu_);
     return static_cast<uint32_t>(bucket_);
   }
-
-  // TODO: Consider improving the wait mechanism in acquire_rate_limit() with a
-  // condition variable instead of busy-waiting (sleep_for), but this requires
-  // careful design to avoid blocking the executor and may not be worth the
-  // complexity for the current use case.
 
 private:
   void refill_locked() {
@@ -220,6 +273,7 @@ private:
   double refill_rate_; // tokens/sec
   TimePoint last_refill_;
   mutable std::mutex mu_;
+  std::condition_variable cv_;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -589,24 +643,17 @@ private:
 
   // Try to acquire rate limit tokens, retrying up to 3 times
   std::optional<Error> acquire_rate_limit(TokenCount estimated) {
-    int64_t total_waited_ms = 0;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-      auto [ok, wait] = rate_limiter_.try_consume(estimated);
-      if (ok)
-        return std::nullopt;
-      if (attempt == 2) {
-        metrics_.rate_limit_hits++;
-        return Error{ErrorCode::RateLimitExceeded,
-                     fmt::format("Rate limit exhausted after {} retries "
-                                 "(needed={:.1f} tokens, bucket={:.1f}, rate={:.1f}/s, waited={}ms)",
-                                 attempt, static_cast<double>(estimated),
-                                 rate_limiter_.available_tokens(),
-                                 rate_limiter_.available_tokens() / 60.0, total_waited_ms)};
-      }
-      total_waited_ms += wait.count();
-      std::this_thread::sleep_for(wait);
-    }
-    return std::nullopt;
+    auto [ok, waited, retries] = rate_limiter_.acquire(estimated, 2);
+    if (ok)
+      return std::nullopt;
+
+    metrics_.rate_limit_hits++;
+    return Error{ErrorCode::RateLimitExceeded,
+                 fmt::format("Rate limit exhausted after {} retries "
+                             "(needed={:.1f} tokens, bucket={:.1f}, rate={:.1f}/s, waited={}ms)",
+                             retries, static_cast<double>(estimated),
+                             rate_limiter_.available_tokens(),
+                             rate_limiter_.available_tokens() / 60.0, waited.count())};
   }
 
   // Track metrics after LLM call
