@@ -239,6 +239,7 @@ set(TEST_SOURCES
   tests/test_agent.cpp
   tests/test_csr_graph.cpp
   tests/test_sqlite_store.cpp
+  tests/test_hindsight_store.cpp
   tests/test_sdk.cpp
   tests/test_integration.cpp
   tests/test_logger.cpp
