@@ -29,8 +29,10 @@ struct TaskPromiseBase {
     // 最终挂起：恢复 continuation（调用方协程）
     struct FinalAwaiter {
         bool await_ready() noexcept { return false; }
+
+        template <typename PromiseType>
         std::coroutine_handle<> await_suspend(
-            std::coroutine_handle<TaskPromiseBase> h) noexcept {
+            std::coroutine_handle<PromiseType> h) noexcept {
             return h.promise().continuation;
         }
         void await_resume() noexcept {}
