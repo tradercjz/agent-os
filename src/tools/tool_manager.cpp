@@ -99,6 +99,12 @@ ToolResult ShellTool::execute(const ParsedArgs &args, std::stop_token st) {
   // Parent process
   close(pipefd[1]);  // close write end
 
+  // Register cooperative cancellation
+  std::stop_callback cb(st, [pid]() {
+    kill(pid, SIGTERM);
+    // Give it a moment to terminate gracefully, though simple SIGTERM usually works
+  });
+
   std::string output;
   output.reserve(4096);
   char buf[4096];
@@ -160,6 +166,10 @@ ToolResult ShellTool::execute(const ParsedArgs &args, std::stop_token st) {
   int status;
   waitpid(pid, &status, 0);
   int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+  if (st.stop_requested()) {
+      return ToolResult::fail("Tool execution cancelled (timeout or user requested)");
+  }
 
   if (truncated) {
     output += "\n[output truncated]";
@@ -315,6 +325,10 @@ ToolResult HttpFetchTool::execute(const ParsedArgs &args, std::stop_token st) {
   check_opt(curl_easy_setopt(raw, CURLOPT_XFERINFODATA, &st), "CURLOPT_XFERINFODATA");
 
   CURLcode res = curl_easy_perform(raw);
+
+  if (res == CURLE_ABORTED_BY_CALLBACK) {
+      return ToolResult::fail("Tool execution cancelled (timeout or user requested)");
+  }
 
   long response_code = 0;
   curl_easy_getinfo(raw, CURLINFO_RESPONSE_CODE, &response_code);

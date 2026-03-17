@@ -18,9 +18,12 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <queue>
+#include <stop_token>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <agentos/utils/thread_pool.hpp>
 
 namespace agentos::tools {
 
@@ -103,6 +106,7 @@ struct ToolSchema {
 // ─────────────────────────────────────────────────────────────
 
 struct ParsedArgs {
+  std::stop_token stop_token;
   std::unordered_map<std::string, std::string> values;
 
   std::string get(std::string_view key,
@@ -334,18 +338,22 @@ public:
     auto id = schema.id;
     class FnTool : public ITool {
     public:
-      FnTool(ToolSchema s, std::function<ToolResult(const ParsedArgs &)> f)
+      FnTool(ToolSchema s, std::function<ToolResult(const ParsedArgs &, std::stop_token)> f)
           : schema_(std::move(s)), fn_(std::move(f)) {}
       ToolSchema schema() const override { return schema_; }
       ToolResult execute(const ParsedArgs &a, std::stop_token /*st*/ = {}) override { return fn_(a); }
 
     private:
       ToolSchema schema_;
-      std::function<ToolResult(const ParsedArgs &)> fn_;
+      std::function<ToolResult(const ParsedArgs &, std::stop_token)> fn_;
     };
     register_tool(std::make_shared<FnTool>(
         std::move(schema),
-        std::function<ToolResult(const ParsedArgs &)>(std::forward<Fn>(fn))));
+        std::function<ToolResult(const ParsedArgs &, std::stop_token)>(
+            [f = std::forward<Fn>(fn)](const ParsedArgs& args, std::stop_token /*st*/) mutable {
+                return f(args);
+            }
+        )));
   }
 
   std::shared_ptr<ITool> find(const std::string &id) const {
@@ -488,7 +496,7 @@ private:
 
 class ToolManager : private NonCopyable {
 public:
-  ToolManager(memory::MemorySystem *memory = nullptr) : memory_(memory) {
+  ToolManager(memory::MemorySystem *memory = nullptr) : memory_(memory), thread_pool_(4) {
     // 注册内置工具
     registry_.register_tool(std::make_shared<KVStoreTool>());
     registry_.register_tool(std::make_shared<ShellTool>());
@@ -641,6 +649,7 @@ private:
   ToolRegistry registry_;
   ToolThreadPool thread_pool_{4};
   memory::MemorySystem *memory_{nullptr};
+  ToolThreadPool thread_pool_;
 };
 
 } // namespace agentos::tools
