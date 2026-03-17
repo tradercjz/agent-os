@@ -246,6 +246,7 @@ set(TEST_SOURCES
   tests/test_logger.cpp
   tests/test_api_fluent.cpp
   tests/test_compile_safety.cpp
+  tests/test_immutable_graph.cpp
   tests/test_document.cpp
   tests/test_task.cpp
   tests/test_agentos.cpp
