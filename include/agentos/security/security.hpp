@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <queue>
 
 namespace agentos::security {
 
@@ -222,6 +223,12 @@ private:
 // § 6.3  InjectionDetector — Prompt 注入检测
 // ─────────────────────────────────────────────────────────────
 
+struct ACTrieNode {
+    std::unordered_map<char, int> children;
+    int fail = 0;
+    std::vector<size_t> match_indices;
+};
+
 class InjectionDetector {
 public:
     InjectionDetector() {
@@ -243,6 +250,7 @@ public:
             "现在你是",
             "扮演",
         };
+        trie_dirty_ = true;
     }
 
     struct DetectionResult {
@@ -300,23 +308,32 @@ public:
             return left_ok && right_ok;
         };
 
-        // Helper lambda for word-boundary aware search
-        auto contains_keyword = [&](const std::string& haystack, const std::string& kw) -> bool {
-            size_t pos = 0;
-            while ((pos = haystack.find(kw, pos)) != std::string::npos) {
-                // Check word boundaries
-                if (at_word_boundary(haystack, pos, kw.size())) return true;
-                pos += kw.size();
-            }
-            return false;
-        };
-
         std::lock_guard lk(mu_);
-        // O(n×m) scan — acceptable for kMaxScanLength=100KB and ~14 patterns
-        // TODO: Switch to Aho-Corasick if pattern count exceeds 50
-        for (const auto& pat : patterns_) {
-            if (contains_keyword(lower, pat)) {
-                return {true, pat, 0.9f};  // early exit on first match
+        if (trie_dirty_) {
+            build_trie();
+            trie_dirty_ = false;
+        }
+
+        // O(N + M) scan using Aho-Corasick Automaton
+        int state = 0;
+        for (size_t i = 0; i < lower.size(); ++i) {
+            char c = lower[i];
+
+            while (state != 0 && trie_[state].children.find(c) == trie_[state].children.end()) {
+                state = trie_[state].fail;
+            }
+            if (trie_[state].children.find(c) != trie_[state].children.end()) {
+                state = trie_[state].children[c];
+            } else {
+                state = 0;
+            }
+
+            for (size_t pat_idx : trie_[state].match_indices) {
+                const auto& pat = patterns_[pat_idx];
+                size_t pos = i + 1 - pat.size();
+                if (at_word_boundary(lower, pos, pat.size())) {
+                    return {true, pat, 0.9f};
+                }
             }
         }
 
@@ -340,6 +357,7 @@ public:
     void add_pattern(std::string pat) {
         std::lock_guard lk(mu_);
         patterns_.push_back(std::move(pat));
+        trie_dirty_ = true;
     }
 
     // Thread-safe: remove pattern by value
@@ -348,6 +366,7 @@ public:
         auto it = std::find(patterns_.begin(), patterns_.end(), pat);
         if (it != patterns_.end()) {
             patterns_.erase(it);
+            trie_dirty_ = true;
             return true;
         }
         return false;
@@ -357,6 +376,7 @@ public:
     void set_patterns(std::vector<std::string> pats) {
         std::lock_guard lk(mu_);
         patterns_ = std::move(pats);
+        trie_dirty_ = true;
     }
 
     size_t pattern_count() const noexcept {
@@ -368,6 +388,61 @@ private:
     static constexpr size_t kMaxScanLength = 100000; // 100KB scan cap
     mutable std::mutex mu_;
     std::vector<std::string> patterns_;
+    mutable std::vector<ACTrieNode> trie_;
+    mutable bool trie_dirty_ = true;
+
+    void build_trie() const {
+        trie_.clear();
+        trie_.emplace_back(); // Root node at index 0
+
+        // Insert patterns
+        for (size_t i = 0; i < patterns_.size(); ++i) {
+            int state = 0;
+            for (char c : patterns_[i]) {
+                if (trie_[state].children.find(c) == trie_[state].children.end()) {
+                    trie_[state].children[c] = trie_.size();
+                    trie_.emplace_back();
+                }
+                state = trie_[state].children[c];
+            }
+            trie_[state].match_indices.push_back(i);
+        }
+
+        // Build failure links using BFS
+        std::queue<int> q;
+        for (auto const& [c, next_state] : trie_[0].children) {
+            trie_[next_state].fail = 0;
+            q.push(next_state);
+        }
+
+        while (!q.empty()) {
+            int current_state = q.front();
+            q.pop();
+
+            for (auto const& [c, next_state] : trie_[current_state].children) {
+                int fail_state = trie_[current_state].fail;
+
+                while (fail_state != 0 && trie_[fail_state].children.find(c) == trie_[fail_state].children.end()) {
+                    fail_state = trie_[fail_state].fail;
+                }
+
+                if (trie_[fail_state].children.find(c) != trie_[fail_state].children.end()) {
+                    trie_[next_state].fail = trie_[fail_state].children[c];
+                } else {
+                    trie_[next_state].fail = 0;
+                }
+
+                auto& fail_matches = trie_[trie_[next_state].fail].match_indices;
+                trie_[next_state].match_indices.insert(
+                    trie_[next_state].match_indices.end(),
+                    fail_matches.begin(),
+                    fail_matches.end()
+                );
+
+                q.push(next_state);
+            }
+        }
+    }
 };
 
 // ─────────────────────────────────────────────────────────────
