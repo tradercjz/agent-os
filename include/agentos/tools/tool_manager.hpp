@@ -14,6 +14,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <queue>
+#include <stop_token>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -99,6 +101,7 @@ struct ToolSchema {
 // ─────────────────────────────────────────────────────────────
 
 struct ParsedArgs {
+  std::stop_token stop_token;
   std::unordered_map<std::string, std::string> values;
 
   std::string get(std::string_view key,
@@ -420,6 +423,55 @@ private:
 // § 5.6  ToolManager — 统一门面（注册 + 路由 + 执行）
 // ─────────────────────────────────────────────────────────────
 
+class ToolThreadPool : private NonCopyable {
+public:
+  explicit ToolThreadPool(size_t num_threads = 4) {
+    for (size_t i = 0; i < num_threads; ++i) {
+      workers_.emplace_back([this](std::stop_token pool_st) {
+        while (!pool_st.stop_requested()) {
+          std::function<void()> task;
+          {
+            std::unique_lock<std::mutex> lock(mu_);
+            cv_.wait(lock, pool_st, [this] { return !tasks_.empty(); });
+            if (pool_st.stop_requested() && tasks_.empty()) return;
+            if (!tasks_.empty()) {
+              task = std::move(tasks_.front());
+              tasks_.pop();
+            }
+          }
+          if (task) {
+            try { task(); } catch (...) {}
+          }
+        }
+      });
+    }
+  }
+
+  ~ToolThreadPool() {
+    for (auto& w : workers_) w.request_stop();
+    cv_.notify_all();
+  }
+
+  template<typename F>
+  auto enqueue(F&& f) -> std::future<std::invoke_result_t<F>> {
+    using R = std::invoke_result_t<F>;
+    auto task = std::make_shared<std::packaged_task<R()>>(std::forward<F>(f));
+    auto future = task->get_future();
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      tasks_.emplace([task]() { (*task)(); });
+    }
+    cv_.notify_one();
+    return future;
+  }
+
+private:
+  std::queue<std::function<void()>> tasks_;
+  std::mutex mu_;
+  std::condition_variable_any cv_;
+  std::vector<std::jthread> workers_;
+};
+
 class ToolManager : private NonCopyable {
 public:
   ToolManager(memory::MemorySystem *memory = nullptr) : memory_(memory) {
@@ -533,19 +585,22 @@ public:
     // Execute with timeout protection
     try {
       if (schema.timeout_ms > 0) {
-        // Capture by value to avoid dangling references in async context
-        auto future = std::async(std::launch::async,
-                                  [tool, args]() { return tool->execute(args); });
+        std::stop_source stop_source;
+        args.stop_token = stop_source.get_token();
+
+        auto future = thread_pool_.enqueue(
+            [tool, args, st = stop_source.get_token()]() -> ToolResult {
+              if (st.stop_requested()) {
+                return ToolResult::fail("Cancelled before execution");
+              }
+              return tool->execute(args);
+            });
+
         auto status = future.wait_for(
             std::chrono::milliseconds(schema.timeout_ms));
+
         if (status == std::future_status::timeout) {
-          // WARNING: std::async timeout does NOT cancel the tool execution.
-          // When timeout fires, the worker thread continues running in background.
-          // This means: (1) Resources (file handles, connections) stay open until
-          // tool completes naturally; (2) CPU continues to be consumed; (3) Multiple
-          // timed-out tools can accumulate background threads under load.
-          // TODO: Implement a bounded thread pool with cooperative cancellation
-          // using std::stop_token for production deployment.
+          stop_source.request_stop(); // Cooperative cancellation
           return ToolResult::fail(
               fmt::format("Tool '{}' timed out after {}ms",
                           call.name, schema.timeout_ms));
@@ -573,6 +628,7 @@ public:
 private:
   ToolRegistry registry_;
   memory::MemorySystem *memory_{nullptr};
+  ToolThreadPool thread_pool_;
 };
 
 } // namespace agentos::tools
