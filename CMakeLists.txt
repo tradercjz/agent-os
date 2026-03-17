@@ -248,6 +248,7 @@ set(TEST_SOURCES
   tests/test_api_fluent.cpp
   tests/test_compile_safety.cpp
   tests/test_tokenizer.cpp
+  tests/test_compat.cpp
   tests/test_graph_builder.cpp
   tests/test_realtime_news_processor.cpp
   tests/test_relation_extractor.cpp
