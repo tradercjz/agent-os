@@ -245,6 +245,7 @@ set(TEST_SOURCES
   tests/test_logger.cpp
   tests/test_api_fluent.cpp
   tests/test_compile_safety.cpp
+  tests/test_tokenizer.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
@@ -252,6 +253,7 @@ set(TEST_SOURCES
 if(NOT AGENTOS_NO_DUCKDB)
   list(APPEND TEST_SOURCES tests/test_knowledge_base.cpp)
   list(APPEND TEST_SOURCES tests/test_duckdb_store.cpp)
+
 endif()
 add_executable(test_agentos ${TEST_SOURCES})
 target_link_libraries(test_agentos PRIVATE agentos GTest::gtest_main GTest::gtest)
