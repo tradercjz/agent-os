@@ -246,6 +246,9 @@ set(TEST_SOURCES
   tests/test_api_fluent.cpp
   tests/test_compile_safety.cpp
   tests/test_document.cpp
+  tests/test_task.cpp
+  tests/test_agentos.cpp
+
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
