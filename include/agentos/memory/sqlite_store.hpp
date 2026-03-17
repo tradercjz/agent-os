@@ -66,13 +66,57 @@ public:
   bool is_open() const noexcept { return opened_; }
   sqlite3 *raw() const noexcept { return db_; }
 
+  // Exec without parameters (useful for simple schemas/pragmas).
   [[nodiscard]] bool exec(const std::string &sql) {
-    char *err = nullptr;
-    int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err);
-    if (err) {
-      sqlite3_free(err);
+    const char *pzTail = sql.c_str();
+    while (pzTail && *pzTail != '\0') {
+      sqlite3_stmt *stmt = nullptr;
+      int rc = sqlite3_prepare_v2(db_, pzTail, -1, &stmt, &pzTail);
+      if (rc != SQLITE_OK) {
+        if (stmt) sqlite3_finalize(stmt);
+        return false;
+      }
+      if (!stmt) continue;
+      while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {}
+      sqlite3_finalize(stmt);
+      if (rc != SQLITE_DONE) return false;
     }
-    return rc == SQLITE_OK;
+    return true;
+  }
+
+  // Bind values helper
+  template <typename T>
+  void bind_value(sqlite3_stmt *stmt, int index, const T &value) const {
+    using DecayedT = std::decay_t<T>;
+    if constexpr (std::is_same_v<DecayedT, int> || std::is_same_v<DecayedT, bool>) {
+      sqlite3_bind_int(stmt, index, static_cast<int>(value));
+    } else if constexpr (std::is_same_v<DecayedT, int64_t> || std::is_same_v<DecayedT, size_t> || std::is_same_v<DecayedT, uint64_t>) {
+      sqlite3_bind_int64(stmt, index, static_cast<int64_t>(value));
+    } else if constexpr (std::is_same_v<DecayedT, double> || std::is_same_v<DecayedT, float>) {
+      sqlite3_bind_double(stmt, index, static_cast<double>(value));
+    } else if constexpr (std::is_same_v<DecayedT, std::string>) {
+      sqlite3_bind_text(stmt, index, value.c_str(), -1, SQLITE_TRANSIENT);
+    } else if constexpr (std::is_convertible_v<DecayedT, const char *>) {
+      sqlite3_bind_text(stmt, index, value, -1, SQLITE_TRANSIENT);
+    } else {
+      static_assert(sizeof(T) == 0, "Unsupported type for sqlite_bind");
+    }
+  }
+
+  // Exec with parameterized values (prevents SQL injection).
+  template <typename... Args>
+  [[nodiscard]] bool exec(const std::string &sql, Args &&...args) const {
+    sqlite3_stmt *stmt = prepare(sql);
+    if (!stmt) return false;
+
+    int index = 1;
+    (bind_value(stmt, index++, std::forward<Args>(args)), ...);
+
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {}
+
+    // We do not finalize here because stmt is cached by prepare()
+    return rc == SQLITE_DONE;
   }
 
   // 带语句缓存的 prepare（mutable: 语句缓存是逻辑 const 的优化）
