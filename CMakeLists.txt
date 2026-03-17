@@ -237,7 +237,9 @@ set(TEST_SOURCES
   tests/test_security_enhanced.cpp
   tests/test_bus.cpp
   tests/test_agent.cpp
+  tests/test_reflective_agent.cpp
   tests/test_csr_graph.cpp
+  tests/test_immutable_graph.cpp
   tests/test_sqlite_store.cpp
   tests/test_hindsight_store.cpp
   tests/test_sdk.cpp
@@ -246,6 +248,15 @@ set(TEST_SOURCES
   tests/test_api_fluent.cpp
   tests/test_compile_safety.cpp
   tests/test_compat.cpp
+  tests/test_graph_builder.cpp
+  tests/test_realtime_news_processor.cpp
+  tests/test_relation_extractor.cpp
+  tests/test_bm25_index.cpp
+  tests/test_immutable_graph.cpp
+  tests/test_document.cpp
+  tests/test_task.cpp
+  tests/test_agentos.cpp
+
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
