@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <agentos/utils/thread_pool.hpp>
 
 namespace agentos::tools {
 
@@ -196,7 +197,7 @@ class ITool {
 public:
   virtual ~ITool() = default;
   virtual ToolSchema schema() const = 0;
-  virtual ToolResult execute(const ParsedArgs &args) = 0;
+  virtual ToolResult execute(const ParsedArgs &args, std::stop_token st = {}) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -231,7 +232,7 @@ public:
     };
   }
 
-  ToolResult execute(const ParsedArgs &args) override {
+  ToolResult execute(const ParsedArgs &args, std::stop_token /*st*/ = {}) override {
     auto op = args.get("op");
     auto key = args.get("key");
     if (op == "set") {
@@ -282,7 +283,7 @@ public:
     };
   }
 
-  ToolResult execute(const ParsedArgs &args) override;
+  ToolResult execute(const ParsedArgs &args, std::stop_token st = {}) override;
 
 private:
   std::unordered_set<std::string> allowed_cmds_;
@@ -306,7 +307,7 @@ public:
     };
   }
 
-  ToolResult execute(const ParsedArgs &args) override;
+  ToolResult execute(const ParsedArgs &args, std::stop_token st = {}) override;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -330,18 +331,22 @@ public:
     auto id = schema.id;
     class FnTool : public ITool {
     public:
-      FnTool(ToolSchema s, std::function<ToolResult(const ParsedArgs &)> f)
+      FnTool(ToolSchema s, std::function<ToolResult(const ParsedArgs &, std::stop_token)> f)
           : schema_(std::move(s)), fn_(std::move(f)) {}
       ToolSchema schema() const override { return schema_; }
-      ToolResult execute(const ParsedArgs &a) override { return fn_(a); }
+      ToolResult execute(const ParsedArgs &a, std::stop_token st = {}) override { return fn_(a, st); }
 
     private:
       ToolSchema schema_;
-      std::function<ToolResult(const ParsedArgs &)> fn_;
+      std::function<ToolResult(const ParsedArgs &, std::stop_token)> fn_;
     };
     register_tool(std::make_shared<FnTool>(
         std::move(schema),
-        std::function<ToolResult(const ParsedArgs &)>(std::forward<Fn>(fn))));
+        std::function<ToolResult(const ParsedArgs &, std::stop_token)>(
+            [f = std::forward<Fn>(fn)](const ParsedArgs& args, std::stop_token /*st*/) mutable {
+                return f(args);
+            }
+        )));
   }
 
   std::shared_ptr<ITool> find(const std::string &id) const {
@@ -422,7 +427,7 @@ private:
 
 class ToolManager : private NonCopyable {
 public:
-  ToolManager(memory::MemorySystem *memory = nullptr) : memory_(memory) {
+  ToolManager(memory::MemorySystem *memory = nullptr) : memory_(memory), thread_pool_(4) {
     // 注册内置工具
     registry_.register_tool(std::make_shared<KVStoreTool>());
     registry_.register_tool(std::make_shared<ShellTool>());
@@ -534,18 +539,13 @@ public:
     try {
       if (schema.timeout_ms > 0) {
         // Capture by value to avoid dangling references in async context
-        auto future = std::async(std::launch::async,
-                                  [tool, args]() { return tool->execute(args); });
+        auto [future, stop_source] = thread_pool_.enqueue(
+            [tool, args](std::stop_token st) { return tool->execute(args, st); });
+
         auto status = future.wait_for(
             std::chrono::milliseconds(schema.timeout_ms));
         if (status == std::future_status::timeout) {
-          // WARNING: std::async timeout does NOT cancel the tool execution.
-          // When timeout fires, the worker thread continues running in background.
-          // This means: (1) Resources (file handles, connections) stay open until
-          // tool completes naturally; (2) CPU continues to be consumed; (3) Multiple
-          // timed-out tools can accumulate background threads under load.
-          // TODO: Implement a bounded thread pool with cooperative cancellation
-          // using std::stop_token for production deployment.
+          stop_source.request_stop();
           return ToolResult::fail(
               fmt::format("Tool '{}' timed out after {}ms",
                           call.name, schema.timeout_ms));
@@ -573,6 +573,7 @@ public:
 private:
   ToolRegistry registry_;
   memory::MemorySystem *memory_{nullptr};
+  agentos::utils::ThreadPool thread_pool_;
 };
 
 } // namespace agentos::tools
