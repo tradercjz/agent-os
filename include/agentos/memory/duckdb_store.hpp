@@ -269,8 +269,7 @@ public:
       return results;
 
     try {
-      auto qr = con->Query("SELECT " + std::string(SELECT_ALL_COLS) +
-                            " FROM entries");
+      auto qr = con->Query(QUERY_SELECT_ALL);
       if (qr->HasError())
         return results;
 
@@ -498,6 +497,18 @@ private:
   static constexpr const char *SELECT_ALL_COLS =
       "id, content, source, user_id, agent_id, session_id, type, "
       "importance, access_count, created_at, accessed_at, embedding";
+  static constexpr const char *QUERY_SELECT_ALL =
+      "SELECT id, content, source, user_id, agent_id, session_id, type, "
+      "importance, access_count, created_at, accessed_at, embedding "
+      "FROM entries";
+  static constexpr const char *QUERY_SELECT_BY_ID =
+      "SELECT id, content, source, user_id, agent_id, session_id, type, "
+      "importance, access_count, created_at, accessed_at, embedding "
+      "FROM entries WHERE id = $1";
+  static constexpr const char *QUERY_SELECT_FILTER_BASE =
+      "SELECT id, content, source, user_id, agent_id, session_id, type, "
+      "importance, access_count, created_at, accessed_at, embedding "
+      "FROM entries WHERE 1=1";
 
   static MemoryEntry chunk_row_to_entry(duckdb::DataChunk &chunk, idx_t row) {
     MemoryEntry entry;
@@ -554,9 +565,7 @@ private:
                         "DuckDBLTM: no connection");
 
     try {
-      auto stmt = con->Prepare(
-          std::string("SELECT ") + SELECT_ALL_COLS +
-          " FROM entries WHERE id = $1");
+      auto stmt = con->Prepare(QUERY_SELECT_BY_ID);
       auto result = stmt->Execute(id);
       if (result->HasError())
         return make_error(ErrorCode::MemoryReadFailed,
@@ -598,8 +607,7 @@ private:
       return out;
     };
 
-    std::string sql = std::string("SELECT ") + SELECT_ALL_COLS +
-                      " FROM entries WHERE 1=1";
+    std::string sql = QUERY_SELECT_FILTER_BASE;
     if (filter.user_id)
       sql += " AND user_id = " + escape(*filter.user_id);
     if (filter.agent_id)
