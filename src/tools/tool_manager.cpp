@@ -5,6 +5,8 @@
 #include <netdb.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <poll.h>
+#include <signal.h>
 #include <sstream>
 
 namespace agentos::tools {
@@ -113,7 +115,29 @@ ToolResult ShellTool::execute(const ParsedArgs &args, std::stop_token st) {
   constexpr size_t kMaxOutputBytes = 1024 * 100; // 100 KB limit
 
   ssize_t n;
-  while ((n = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
+  struct pollfd pfd;
+  pfd.fd = pipefd[0];
+  pfd.events = POLLIN;
+
+  while (true) {
+    if (st.stop_requested()) {
+      kill(pid, SIGKILL);
+      truncated = true;
+      break;
+    }
+
+    int poll_res = poll(&pfd, 1, 100); // 100ms timeout
+    if (poll_res < 0) {
+      if (errno == EINTR) continue;
+      break;
+    } else if (poll_res == 0) {
+      // Timeout, check stop_token again
+      continue;
+    }
+
+    n = read(pipefd[0], buf, sizeof(buf) - 1);
+    if (n <= 0) break; // EOF or error
+
     buf[n] = '\0';
     // Count lines and check output size limit
     for (ssize_t i = 0; i < n; ++i) {
@@ -250,14 +274,10 @@ static std::string extract_hostname(const std::string &url) {
   return url.substr(host_start, host_end - host_start);
 }
 
-struct ProgressData {
-  std::stop_token st;
-};
-
-static int curl_progress_callback(void *clientp, curl_off_t /*dltotal*/, curl_off_t /*dlnow*/, curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
-  auto *data = static_cast<ProgressData*>(clientp);
-  if (data && data->st.stop_requested()) {
-    return 1; // Non-zero return value aborts the transfer
+static int curl_progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+  auto *st = static_cast<std::stop_token *>(clientp);
+  if (st && st->stop_requested()) {
+    return 1; // Return non-zero to abort the transfer
   }
   return 0;
 }
@@ -300,10 +320,9 @@ ToolResult HttpFetchTool::execute(const ParsedArgs &args, std::stop_token st) {
   check_opt(curl_easy_setopt(raw, CURLOPT_FOLLOWLOCATION, 1L), "CURLOPT_FOLLOWLOCATION");
   check_opt(curl_easy_setopt(raw, CURLOPT_MAXREDIRS, 3L), "CURLOPT_MAXREDIRS");
 
-  ProgressData prog_data{st};
   check_opt(curl_easy_setopt(raw, CURLOPT_NOPROGRESS, 0L), "CURLOPT_NOPROGRESS");
   check_opt(curl_easy_setopt(raw, CURLOPT_XFERINFOFUNCTION, curl_progress_callback), "CURLOPT_XFERINFOFUNCTION");
-  check_opt(curl_easy_setopt(raw, CURLOPT_XFERINFODATA, &prog_data), "CURLOPT_XFERINFODATA");
+  check_opt(curl_easy_setopt(raw, CURLOPT_XFERINFODATA, &st), "CURLOPT_XFERINFODATA");
 
   CURLcode res = curl_easy_perform(raw);
 
