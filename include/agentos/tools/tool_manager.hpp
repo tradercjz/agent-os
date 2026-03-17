@@ -9,6 +9,10 @@
 #include <agentos/memory/memory.hpp>
 #include <functional>
 #include <future>
+#include <stop_token>
+#include <queue>
+#include <thread>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -196,7 +200,7 @@ class ITool {
 public:
   virtual ~ITool() = default;
   virtual ToolSchema schema() const = 0;
-  virtual ToolResult execute(const ParsedArgs &args) = 0;
+  virtual ToolResult execute(const ParsedArgs &args, std::stop_token st = {}) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -231,7 +235,7 @@ public:
     };
   }
 
-  ToolResult execute(const ParsedArgs &args) override {
+  ToolResult execute(const ParsedArgs &args, std::stop_token st = {}) override {
     auto op = args.get("op");
     auto key = args.get("key");
     if (op == "set") {
@@ -282,7 +286,7 @@ public:
     };
   }
 
-  ToolResult execute(const ParsedArgs &args) override;
+  ToolResult execute(const ParsedArgs &args, std::stop_token st = {}) override;
 
 private:
   std::unordered_set<std::string> allowed_cmds_;
@@ -306,7 +310,7 @@ public:
     };
   }
 
-  ToolResult execute(const ParsedArgs &args) override;
+  ToolResult execute(const ParsedArgs &args, std::stop_token st = {}) override;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -333,7 +337,7 @@ public:
       FnTool(ToolSchema s, std::function<ToolResult(const ParsedArgs &)> f)
           : schema_(std::move(s)), fn_(std::move(f)) {}
       ToolSchema schema() const override { return schema_; }
-      ToolResult execute(const ParsedArgs &a) override { return fn_(a); }
+      ToolResult execute(const ParsedArgs &a, std::stop_token /*st*/ = {}) override { return fn_(a); }
 
     private:
       ToolSchema schema_;
@@ -419,6 +423,68 @@ private:
 // ─────────────────────────────────────────────────────────────
 // § 5.6  ToolManager — 统一门面（注册 + 路由 + 执行）
 // ─────────────────────────────────────────────────────────────
+
+
+// ─────────────────────────────────────────────────────────────
+// § 5.5.5 ToolThreadPool — Bounded thread pool for tool execution
+// ─────────────────────────────────────────────────────────────
+class ToolThreadPool : private NonCopyable {
+public:
+  explicit ToolThreadPool(size_t threads = 4) : stop_(false) {
+    for (size_t i = 0; i < threads; ++i) {
+      workers_.emplace_back([this] {
+        while (true) {
+          std::function<void()> task;
+          {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            condition_.wait(lock, [this] { return stop_ || !tasks_.empty(); });
+            if (stop_ && tasks_.empty())
+              return;
+            task = std::move(tasks_.front());
+            tasks_.pop();
+          }
+          task();
+        }
+      });
+    }
+  }
+
+  ~ToolThreadPool() {
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex_);
+      stop_ = true;
+    }
+    condition_.notify_all();
+    for (std::thread &worker : workers_) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+  }
+
+  template <class F>
+  auto enqueue(F &&f) -> std::future<std::invoke_result_t<F>> {
+    using return_type = std::invoke_result_t<F>;
+    auto task = std::make_shared<std::packaged_task<return_type()>>(
+        std::forward<F>(f));
+    std::future<return_type> res = task->get_future();
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex_);
+      if (stop_)
+        throw std::runtime_error("enqueue on stopped ThreadPool");
+      tasks_.emplace([task]() { (*task)(); });
+    }
+    condition_.notify_one();
+    return res;
+  }
+
+private:
+  std::vector<std::thread> workers_;
+  std::queue<std::function<void()>> tasks_;
+  std::mutex queue_mutex_;
+  std::condition_variable condition_;
+  bool stop_;
+};
 
 class ToolManager : private NonCopyable {
 public:
@@ -533,19 +599,20 @@ public:
     // Execute with timeout protection
     try {
       if (schema.timeout_ms > 0) {
+        // Use thread pool and std::stop_token for cooperative cancellation
+        std::stop_source stop_source;
+        auto st = stop_source.get_token();
+
         // Capture by value to avoid dangling references in async context
-        auto future = std::async(std::launch::async,
-                                  [tool, args]() { return tool->execute(args); });
+        auto future = thread_pool_.enqueue(
+            [tool, args, st]() { return tool->execute(args, st); });
+
         auto status = future.wait_for(
             std::chrono::milliseconds(schema.timeout_ms));
+
         if (status == std::future_status::timeout) {
-          // WARNING: std::async timeout does NOT cancel the tool execution.
-          // When timeout fires, the worker thread continues running in background.
-          // This means: (1) Resources (file handles, connections) stay open until
-          // tool completes naturally; (2) CPU continues to be consumed; (3) Multiple
-          // timed-out tools can accumulate background threads under load.
-          // TODO: Implement a bounded thread pool with cooperative cancellation
-          // using std::stop_token for production deployment.
+          // Cancel the tool execution cooperatively
+          stop_source.request_stop();
           return ToolResult::fail(
               fmt::format("Tool '{}' timed out after {}ms",
                           call.name, schema.timeout_ms));
@@ -558,7 +625,7 @@ public:
           return ToolResult{false, "Tool threw unknown exception", {}};
         }
       }
-      return tool->execute(args);
+      return tool->execute(args, {});
     } catch (const std::exception &e) {
       return ToolResult::fail(
           fmt::format("Tool execution exception: {}", e.what()));
@@ -572,6 +639,7 @@ public:
 
 private:
   ToolRegistry registry_;
+  ToolThreadPool thread_pool_{4};
   memory::MemorySystem *memory_{nullptr};
 };
 
