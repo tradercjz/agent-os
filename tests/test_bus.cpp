@@ -243,3 +243,128 @@ TEST_F(AgentBusTest, ChannelDepthQuery) {
   // Non-existent agent
   EXPECT_EQ(bus->channel_depth(999), 0u);
 }
+
+// ── Additional Channel Tests ────────────────────────────────────────
+
+TEST(ChannelTest, SizeAndEmpty) {
+  Channel ch(1, 10);
+  EXPECT_TRUE(ch.empty());
+  EXPECT_EQ(ch.size(), 0u);
+  EXPECT_EQ(ch.capacity(), 10u);
+
+  (void)ch.push(BusMessage::make_event(1, "t1", "p1"));
+  EXPECT_FALSE(ch.empty());
+  EXPECT_EQ(ch.size(), 1u);
+
+  (void)ch.push(BusMessage::make_event(1, "t2", "p2"));
+  EXPECT_EQ(ch.size(), 2u);
+
+  (void)ch.recv();
+  EXPECT_EQ(ch.size(), 1u);
+
+  (void)ch.recv();
+  EXPECT_TRUE(ch.empty());
+  EXPECT_EQ(ch.size(), 0u);
+}
+
+TEST(ChannelTest, ResetDroppedCount) {
+  Channel ch(1, 1);
+  (void)ch.push(BusMessage::make_event(1, "t", "p"));
+  EXPECT_FALSE(ch.push(BusMessage::make_event(1, "t", "overflow")));
+  EXPECT_EQ(ch.dropped_count(), 1u);
+
+  ch.reset_dropped_count();
+  EXPECT_EQ(ch.dropped_count(), 0u);
+}
+
+TEST(ChannelTest, Owner) {
+  Channel ch(42);
+  EXPECT_EQ(ch.owner(), 42u);
+}
+
+// ── Additional AgentBus Tests ──────────────────────────────────────
+
+TEST_F(AgentBusTest, UnregisterAgent) {
+  bus->unregister_agent(10);
+  // Send message to unregistered agent 10
+  auto msg = BusMessage::make_request(20, 10, "greet", "hello");
+  EXPECT_FALSE(bus->send(msg)); // Should return false as agent is not registered
+
+  // Verify channel_stats does not contain agent 10
+  auto stats = bus->channel_stats();
+  EXPECT_EQ(stats.find(10), stats.end());
+}
+
+TEST_F(AgentBusTest, Monitor) {
+  int monitor_called = 0;
+  bus->add_monitor([&](const BusMessage& msg) {
+    monitor_called++;
+    EXPECT_EQ(msg.payload, "monitor_test");
+  });
+
+  bus->send(BusMessage::make_request(10, 20, "test", "monitor_test"));
+  EXPECT_EQ(monitor_called, 1);
+}
+
+TEST_F(AgentBusTest, ChannelStats) {
+  // Push some messages to agent 20
+  bus->send(BusMessage::make_request(10, 20, "t1", "p1"));
+  bus->send(BusMessage::make_request(10, 20, "t2", "p2"));
+
+  auto stats = bus->channel_stats();
+  ASSERT_NE(stats.find(10), stats.end());
+  ASSERT_NE(stats.find(20), stats.end());
+
+  auto [size10, cap10, dropped10] = stats[10];
+  auto [size20, cap20, dropped20] = stats[20];
+
+  EXPECT_EQ(size10, 0u);
+  EXPECT_EQ(size20, 2u);
+  EXPECT_GT(cap10, 0u);
+  EXPECT_GT(cap20, 0u);
+  EXPECT_EQ(dropped10, 0u);
+  EXPECT_EQ(dropped20, 0u);
+}
+
+TEST_F(AgentBusTest, SynchronousCallSuccess) {
+  std::atomic<bool> thread_started{false};
+  std::thread responder([&]() {
+    thread_started = true;
+    // Wait for the request on agent 20's channel
+    auto req = ch_b->recv(Duration{5000});
+    if (req) {
+      auto resp = BusMessage::make_response(*req, "sync_answer");
+      bus->send(resp);
+    }
+  });
+
+  while (!thread_started) {
+    std::this_thread::yield();
+  }
+
+  // Caller is agent 10, target is agent 20
+  auto result = bus->call(10, 20, "sync_query", "sync_payload", Duration{5000});
+  responder.join();
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->type, MessageType::Response);
+  EXPECT_EQ(result->payload, "sync_answer");
+}
+
+TEST_F(AgentBusTest, SynchronousCallTimeout) {
+  // Caller is agent 10, target is agent 20
+  // Agent 20 never replies, so it should timeout
+  // Use a short timeout for the test
+  auto start_time = agentos::now();
+  auto result = bus->call(10, 20, "sync_query", "sync_payload", Duration{50});
+  auto end_time = agentos::now();
+
+  EXPECT_FALSE(result.has_value());
+  // Ensure it actually waited
+  EXPECT_GE(end_time - start_time, Duration{50});
+}
+
+TEST_F(AgentBusTest, SynchronousCallUnregisteredCaller) {
+  auto result = bus->call(999, 20, "sync_query", "sync_payload", Duration{50});
+  EXPECT_FALSE(result.has_value());
+}
