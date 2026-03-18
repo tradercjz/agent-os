@@ -155,7 +155,8 @@ TEST_F(SDKBuilderTest, RegisterToolShorthand) {
           .params = {{.name = "msg",
                       .type = tools::ParamType::String,
                       .description = "message",
-                      .required = true}},
+                      .required = true,
+                      .default_value = std::nullopt}},
       },
       [](const tools::ParsedArgs &args) -> tools::ToolResult {
         return tools::ToolResult::ok(args.get("msg"));
@@ -241,6 +242,7 @@ TEST_F(SDKBuilderTest, MiddlewareCancellation) {
           ctx.cancel_reason = "blocked by policy";
         }
       },
+      .after = nullptr
   });
 
   auto resp = agent->think("hello");
@@ -326,7 +328,10 @@ TEST_F(SDKBuilderTest, SchedulerDrain) {
 
   std::atomic<int> done{0};
   for (int i = 0; i < 5; ++i) {
-    (void)os->submit_task("t" + std::to_string(i), [&] { done++; });
+    (void)os->submit_task("t" + std::to_string(i), [&] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      done++;
+    });
   }
 
   bool drained = os->scheduler().drain(Duration{5000});

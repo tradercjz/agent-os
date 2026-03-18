@@ -149,7 +149,7 @@ TEST(WALIntegrity, CRC32RoundTrip) {
 
   {
     memory::LocalGraphMemory graph(test_dir);
-    (void)graph.add_node(memory::GraphNode{.id = "TestNode", .type = "Test"});
+    (void)graph.add_node(memory::GraphNode{.id = "TestNode", .type = "Test", .content = ""});
     (void)graph.add_edge(memory::GraphEdge{
         .source_id = "TestNode", .target_id = "Other", .relation = "tests"});
   }
@@ -172,7 +172,7 @@ TEST(WALIntegrity, CorruptedLineSkipped) {
   // Write valid data first
   {
     memory::LocalGraphMemory graph(test_dir);
-    (void)graph.add_node(memory::GraphNode{.id = "Good", .type = "Valid"});
+    (void)graph.add_node(memory::GraphNode{.id = "Good", .type = "Valid", .content = ""});
   }
 
   // Append a corrupted line to WAL

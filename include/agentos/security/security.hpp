@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <queue>
 
 namespace agentos::security {
 
@@ -181,9 +182,36 @@ private:
 // § 6.3  InjectionDetector — Prompt 注入检测
 // ─────────────────────────────────────────────────────────────
 
+struct ACTrieNode {
+    std::unordered_map<char, int> children;
+    int fail = 0;
+    std::vector<size_t> match_indices;
+};
+
 class InjectionDetector {
 public:
     InjectionDetector();
+    InjectionDetector() {
+        // 注入特征模式（可扩展）
+        patterns_ = {
+            "ignore previous instructions",
+            "ignore all previous",
+            "disregard your instructions",
+            "you are now",
+            "act as if",
+            "forget your guidelines",
+            "override system prompt",
+            "new system prompt",
+            "jailbreak",
+            "dan mode",
+            // 中文注入模式
+            "忽略之前的指令",
+            "忘记你的指令",
+            "现在你是",
+            "扮演",
+        };
+        trie_dirty_ = true;
+    }
 
     struct DetectionResult {
         bool        is_injection;
@@ -201,6 +229,125 @@ public:
 
     // Thread-safe: replace all patterns at once
     void set_patterns(std::vector<std::string> pats);
+    [[nodiscard]] DetectionResult scan(std::string_view text) const {
+        // Input must not exceed kMaxScanLength to prevent truncation bypass attacks
+        // Attackers could embed payloads past the truncation point
+        if (text.size() > kMaxScanLength) {
+            LOG_WARN(fmt::format("[Security] Input too large to scan: {} bytes (limit: {})",
+                                 text.size(), kMaxScanLength));
+            // Treat oversized input as suspicious but not certain injection
+            return {true, "input_too_large_for_scan", 0.5f};
+        }
+
+        // Strip null bytes, carriage returns, and control characters to prevent bypasses
+        std::string clean;
+        clean.reserve(text.size());
+        for (char c : text) {
+            // Strip null bytes, CR, and control characters (except space, tab, newline)
+            unsigned char uc = static_cast<unsigned char>(c);
+            if (uc >= 0x20 || c == ' ' || c == '\t' || c == '\n') {
+                clean += c;
+            }
+        }
+
+        // Strip zero-width and control characters that can bypass keyword detection
+        auto stripped = clean;
+        stripped.erase(std::remove_if(stripped.begin(), stripped.end(),
+            [](unsigned char c) { return c < 0x20 && c != ' ' && c != '\n' && c != '\t'; }),
+            stripped.end());
+
+        // Normalize: lowercase + collapse whitespace (defeat spacing bypass)
+        std::string lower;
+        lower.reserve(stripped.size());
+        bool last_space = false;
+        for (char c : stripped) {
+          char lc = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+          if (std::isspace(static_cast<unsigned char>(c))) {
+            if (!last_space) { lower += ' '; last_space = true; }
+          } else {
+            lower += lc;
+            last_space = false;
+          }
+        }
+
+        // Helper lambda: check if keyword match at position pos is at word boundary
+        auto at_word_boundary = [&](const std::string &haystack, size_t pos, size_t kw_len) -> bool {
+            bool left_ok  = (pos == 0 || !std::isalnum(static_cast<unsigned char>(haystack[pos - 1])));
+            bool right_ok = (pos + kw_len >= haystack.size() ||
+                             !std::isalnum(static_cast<unsigned char>(haystack[pos + kw_len])));
+            return left_ok && right_ok;
+        };
+
+        std::lock_guard lk(mu_);
+        if (trie_dirty_) {
+            build_trie();
+            trie_dirty_ = false;
+        }
+
+        // O(N + M) scan using Aho-Corasick Automaton
+        int state = 0;
+        for (size_t i = 0; i < lower.size(); ++i) {
+            char c = lower[i];
+
+            while (state != 0 && trie_[state].children.find(c) == trie_[state].children.end()) {
+                state = trie_[state].fail;
+            }
+            if (trie_[state].children.find(c) != trie_[state].children.end()) {
+                state = trie_[state].children[c];
+            } else {
+                state = 0;
+            }
+
+            for (size_t pat_idx : trie_[state].match_indices) {
+                const auto& pat = patterns_[pat_idx];
+                size_t pos = i + 1 - pat.size();
+                if (at_word_boundary(lower, pos, pat.size())) {
+                    return {true, pat, 0.9f};
+                }
+            }
+        }
+
+        // 启发式：异常多的指令性短语
+        int instruction_count = 0;
+        for (auto& kw : {"must", "shall", "should", "always", "never"}) {
+            size_t pos = 0;
+            while ((pos = lower.find(kw, pos)) != std::string::npos) {
+                instruction_count++;
+                pos += strlen(kw);
+            }
+        }
+        if (instruction_count > 5) {
+            return {true, "excessive instructions", 0.6f};
+        }
+
+        return {false, "", 0.0f};
+    }
+
+    // Thread-safe: add pattern at runtime (hot-reload)
+    void add_pattern(std::string pat) {
+        std::lock_guard lk(mu_);
+        patterns_.push_back(std::move(pat));
+        trie_dirty_ = true;
+    }
+
+    // Thread-safe: remove pattern by value
+    bool remove_pattern(const std::string &pat) {
+        std::lock_guard lk(mu_);
+        auto it = std::find(patterns_.begin(), patterns_.end(), pat);
+        if (it != patterns_.end()) {
+            patterns_.erase(it);
+            trie_dirty_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    // Thread-safe: replace all patterns at once
+    void set_patterns(std::vector<std::string> pats) {
+        std::lock_guard lk(mu_);
+        patterns_ = std::move(pats);
+        trie_dirty_ = true;
+    }
 
     size_t pattern_count() const noexcept {
         std::lock_guard lk(mu_);
@@ -211,6 +358,61 @@ private:
     static constexpr size_t kMaxScanLength = 100000; // 100KB scan cap
     mutable std::mutex mu_;
     std::vector<std::string> patterns_;
+    mutable std::vector<ACTrieNode> trie_;
+    mutable bool trie_dirty_ = true;
+
+    void build_trie() const {
+        trie_.clear();
+        trie_.emplace_back(); // Root node at index 0
+
+        // Insert patterns
+        for (size_t i = 0; i < patterns_.size(); ++i) {
+            int state = 0;
+            for (char c : patterns_[i]) {
+                if (trie_[state].children.find(c) == trie_[state].children.end()) {
+                    trie_[state].children[c] = trie_.size();
+                    trie_.emplace_back();
+                }
+                state = trie_[state].children[c];
+            }
+            trie_[state].match_indices.push_back(i);
+        }
+
+        // Build failure links using BFS
+        std::queue<int> q;
+        for (auto const& [c, next_state] : trie_[0].children) {
+            trie_[next_state].fail = 0;
+            q.push(next_state);
+        }
+
+        while (!q.empty()) {
+            int current_state = q.front();
+            q.pop();
+
+            for (auto const& [c, next_state] : trie_[current_state].children) {
+                int fail_state = trie_[current_state].fail;
+
+                while (fail_state != 0 && trie_[fail_state].children.find(c) == trie_[fail_state].children.end()) {
+                    fail_state = trie_[fail_state].fail;
+                }
+
+                if (trie_[fail_state].children.find(c) != trie_[fail_state].children.end()) {
+                    trie_[next_state].fail = trie_[fail_state].children[c];
+                } else {
+                    trie_[next_state].fail = 0;
+                }
+
+                auto& fail_matches = trie_[trie_[next_state].fail].match_indices;
+                trie_[next_state].match_indices.insert(
+                    trie_[next_state].match_indices.end(),
+                    fail_matches.begin(),
+                    fail_matches.end()
+                );
+
+                q.push(next_state);
+            }
+        }
+    }
 };
 
 // ─────────────────────────────────────────────────────────────

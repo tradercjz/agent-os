@@ -159,7 +159,8 @@ TEST(ToolValidationTest, RejectsWhenMissingRequiredParam) {
       .params = {{.name = "required_field",
                   .type = ParamType::String,
                   .description = "must be present",
-                  .required = true}},
+                  .required = true,
+                  .default_value = std::nullopt}},
   };
   ParsedArgs args; // empty
   auto result = validate_tool_args(schema, args);
@@ -174,7 +175,8 @@ TEST(ToolValidationTest, AcceptsWhenRequiredParamPresent) {
       .params = {{.name = "key",
                   .type = ParamType::String,
                   .description = "k",
-                  .required = true}},
+                  .required = true,
+                  .default_value = std::nullopt}},
   };
   ParsedArgs args;
   args.values["key"] = "value";
@@ -189,7 +191,8 @@ TEST(ToolValidationTest, OptionalParamAllowedMissing) {
       .params = {{.name = "opt",
                   .type = ParamType::String,
                   .description = "optional",
-                  .required = false}},
+                  .required = false,
+                  .default_value = std::nullopt}},
   };
   ParsedArgs args; // empty — should be fine
   auto result = validate_tool_args(schema, args);
@@ -262,7 +265,8 @@ TEST_F(ToolManagerTest, DispatchValidatesRequiredParams) {
           .params = {{.name = "required_key",
                       .type = ParamType::String,
                       .description = "required",
-                      .required = true}},
+                  .required = true,
+                  .default_value = std::nullopt}},
       },
       [](const ParsedArgs &args) -> ToolResult {
         return ToolResult::ok(args.get("required_key"));

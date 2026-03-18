@@ -16,9 +16,9 @@ TEST(GraphMemoryTest, BasicGraphOperations) {
 
   // Test node addition
   auto n1 =
-      graph.add_node(memory::GraphNode{.id = "EntityA", .type = "Person"});
+      graph.add_node(memory::GraphNode{.id = "EntityA", .type = "Person", .content = ""});
   auto n2 =
-      graph.add_node(memory::GraphNode{.id = "EntityB", .type = "Location"});
+      graph.add_node(memory::GraphNode{.id = "EntityB", .type = "Location", .content = ""});
 
   EXPECT_TRUE(n1.has_value());
   EXPECT_TRUE(n2.has_value());
@@ -86,7 +86,7 @@ TEST(GraphMemoryTest, WALPersistence) {
   {
     // Write to graph
     memory::LocalGraphMemory graph(test_dir);
-    (void)graph.add_node(memory::GraphNode{.id = "Dog", .type = "Animal"});
+    (void)graph.add_node(memory::GraphNode{.id = "Dog", .type = "Animal", .content = ""});
     (void)graph.add_edge(memory::GraphEdge{
         .source_id = "Dog", .target_id = "Cat", .relation = "chases"});
     (void)graph.add_edge(memory::GraphEdge{
@@ -136,8 +136,9 @@ TEST(GraphMemoryTest, WALReplayDeduplicatesEdges) {
     EXPECT_EQ(edges->size(), 2u); // r1（覆盖后1条）+ r2（1条）
     // r1 应被覆盖为 weight=2.0
     for (const auto &e : *edges) {
-      if (e.relation == "r1")
+      if (e.relation == "r1") {
         EXPECT_FLOAT_EQ(e.weight, 2.0f);
+      }
     }
   }
 
