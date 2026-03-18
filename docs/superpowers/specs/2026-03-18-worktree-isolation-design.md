@@ -235,6 +235,8 @@ private:
 
 **Locking strategy:** `remote_transports_` is protected by the existing `mu_` mutex, same as `channels_`. No new mutexes introduced. The `send()` method holds `mu_` to find the target, then releases before calling `transport->send()` (which may block on socket I/O) to avoid holding the bus lock during I/O.
 
+**Note on existing dual-mutex:** `AgentBus` currently has both `mu_` and `channels_mu_` (shared_mutex). The `channels_mu_` is used only by `total_dropped_messages()` and `channel_stats()`. Remote transports do not participate in dropped-message tracking (backpressure is handled by socket flow control), so `channels_mu_` accessors do not need modification. The `channel_stats()` method will only report local channels; remote transport stats can be queried via heartbeat responses if needed in the future.
+
 ---
 
 ## 5. ProcessManager
@@ -471,8 +473,8 @@ private:
         if (security_) {
             security_->grant(id, cfg.security_role);
 
-            // 3. RBAC check using AgentId (matches existing RBAC::check signature)
-            auto perm_result = security_->check(id, Permission::WorktreeCreate);
+            // 3. RBAC check using AgentId (via SecurityManager::rbac() → RBAC::check)
+            auto perm_result = security_->rbac().check(id, Permission::WorktreeCreate);
             if (!perm_result) return perm_result.error();
         }
 
@@ -485,7 +487,7 @@ private:
         // 5. Same-process or independent process
         if (needs_process_isolation(cfg)) {
             if (security_) {
-                auto proc_perm = security_->check(id, Permission::WorktreeProcess);
+                auto proc_perm = security_->rbac().check(id, Permission::WorktreeProcess);
                 if (!proc_perm) return proc_perm.error();
             }
             auto proc_result = process_mgr_->spawn(name, wt.path, id, cfg);
@@ -775,3 +777,9 @@ Issues identified by spec review and how they were addressed:
 12. **Crash recovery** — Resolved: `WorktreeManager::recover()` scans disk on startup.
 13. **Sub-agent log forwarding** — Resolved: `ProcessManager::on_log()` callback for stderr capture.
 14. **Heartbeat detection latency** — Resolved: documented as `heartbeat_interval * max_missed_heartbeats` in `ProcessConfig`.
+
+### Round 2 Fixes
+
+15. **`SecurityManager::check()` does not exist** — Fixed: changed to `security_->rbac().check()` which matches the actual API (`RBAC::check(AgentId, Permission) -> Result<void>`).
+16. **AgentBus dual-mutex for remote transports** — Clarified: remote transports don't participate in dropped-message tracking; `channels_mu_` accessors unchanged.
+17. **Role presets silently adding `AgentObserve`** — Non-issue: existing `make_standard()` already includes `AgentObserve` (security.hpp line 68). Spec matches existing code.
