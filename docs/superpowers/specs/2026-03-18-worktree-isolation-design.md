@@ -1,7 +1,7 @@
 # Worktree Isolation Design Spec
 
 **Date:** 2026-03-18
-**Status:** Draft
+**Status:** Approved (spec review passed)
 **Scope:** Git worktree-based agent isolation for cpp-agent-os
 **Platform:** POSIX only (Darwin/Linux). Uses `pid_t`, Unix domain sockets, `fork+exec`.
 
@@ -235,7 +235,7 @@ private:
 
 **Locking strategy:** `remote_transports_` is protected by the existing `mu_` mutex, same as `channels_`. No new mutexes introduced. The `send()` method holds `mu_` to find the target, then releases before calling `transport->send()` (which may block on socket I/O) to avoid holding the bus lock during I/O.
 
-**Note on existing dual-mutex:** `AgentBus` currently has both `mu_` and `channels_mu_` (shared_mutex). The `channels_mu_` is used only by `total_dropped_messages()` and `channel_stats()`. Remote transports do not participate in dropped-message tracking (backpressure is handled by socket flow control), so `channels_mu_` accessors do not need modification. The `channel_stats()` method will only report local channels; remote transport stats can be queried via heartbeat responses if needed in the future.
+**Note on existing dual-mutex:** `AgentBus` currently has both `mu_` and `channels_mu_` (shared_mutex). The `channels_mu_` is used only by `total_dropped_messages()`; other accessors like `channel_stats()` use `mu_`. Remote transports do not participate in dropped-message tracking (backpressure is handled by socket flow control), so `channels_mu_` accessors do not need modification. The `channel_stats()` method will only report local channels; remote transport stats can be queried via heartbeat responses if needed in the future.
 
 ---
 
