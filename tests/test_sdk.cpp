@@ -334,3 +334,179 @@ TEST_F(SDKBuilderTest, SchedulerDrain) {
   EXPECT_EQ(done.load(), 5);
   EXPECT_EQ(os->scheduler().active_task_count(), 0u);
 }
+
+// ── Coverage boost tests ────────────────────────────────
+
+// Test from_json with all config fields
+TEST_F(SDKBuilderTest, FromJsonAllFields) {
+  auto dir = (fs::temp_directory_path() / "agentos_sdk_test").string();
+  nlohmann::json j = {
+      {"backend", "mock"},
+      {"threads", 2},
+      {"tpm_limit", 50000},
+      {"data_dir", dir},
+      {"security", false},
+      {"log_level", "debug"},
+  };
+
+  auto os = from_json(j);
+  ASSERT_NE(os, nullptr);
+  EXPECT_EQ(os->agent_count(), 0u);
+}
+
+// Test from_json with log_level variants
+TEST_F(SDKBuilderTest, FromJsonLogLevels) {
+  for (const std::string &level : {"info", "warn", "error", "off"}) {
+    nlohmann::json j = {
+        {"backend", "mock"},
+        {"security", false},
+        {"log_level", level},
+    };
+    auto os = from_json(j);
+    ASSERT_NE(os, nullptr);
+  }
+}
+
+// Test from_json with snapshot_dir and ltm_dir separately
+TEST_F(SDKBuilderTest, FromJsonSeparateDirs) {
+  auto dir = fs::temp_directory_path() / "agentos_sdk_test";
+  nlohmann::json j = {
+      {"backend", "mock"},
+      {"security", false},
+      {"snapshot_dir", (dir / "snaps").string()},
+      {"ltm_dir", (dir / "ltm").string()},
+  };
+
+  auto os = from_json(j);
+  ASSERT_NE(os, nullptr);
+}
+
+// Test from_json with openai backend but missing api_key (should throw)
+TEST_F(SDKBuilderTest, FromJsonOpenAIMissingKeyThrows) {
+  // Unset env var to ensure it's not picked up
+  nlohmann::json j = {
+      {"backend", "openai"},
+      // no api_key, and OPENAI_API_KEY probably not set in test env
+  };
+
+  // This may or may not throw depending on whether OPENAI_API_KEY is set
+  // We check the behavior is consistent
+  try {
+    auto os = from_json(j);
+    // If OPENAI_API_KEY is set in env, this succeeds
+    EXPECT_NE(os, nullptr);
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("api_key"), std::string::npos);
+  }
+}
+
+// Test builder with custom backend
+TEST_F(SDKBuilderTest, BuilderWithCustomBackend) {
+  auto custom = std::make_unique<kernel::MockLLMBackend>();
+  auto os = AgentOSBuilder()
+                .backend(std::move(custom))
+                .security(false)
+                .build();
+
+  ASSERT_NE(os, nullptr);
+  EXPECT_EQ(os->agent_count(), 0u);
+}
+
+// Test builder log_level setter
+TEST_F(SDKBuilderTest, BuilderLogLevel) {
+  auto os = AgentOSBuilder()
+                .mock()
+                .log_level(LogLevel::Warn)
+                .security(false)
+                .build();
+  ASSERT_NE(os, nullptr);
+}
+
+// Test AgentBuilder config accessor
+TEST_F(SDKBuilderTest, AgentBuilderConfigAccess) {
+  auto os = quickstart_mock();
+  auto builder = make_agent(*os, "ConfigBot");
+  builder.prompt("test prompt");
+  builder.context(2048);
+  builder.priority(Priority::Low);
+
+  // Access the underlying config
+  auto &cfg = builder.config();
+  EXPECT_EQ(cfg.name, "ConfigBot");
+  EXPECT_EQ(cfg.role_prompt, "test prompt");
+  EXPECT_EQ(cfg.context_limit, 2048u);
+  EXPECT_EQ(cfg.priority, Priority::Low);
+
+  auto agent = builder.create();
+  ASSERT_NE(agent, nullptr);
+}
+
+// Test AgentOSBuilder config accessor
+TEST_F(SDKBuilderTest, AgentOSBuilderConfigAccess) {
+  AgentOSBuilder builder;
+  builder.mock().security(false);
+
+  auto &cfg = builder.config();
+  EXPECT_FALSE(cfg.enable_security);
+
+  auto os = builder.build();
+  ASSERT_NE(os, nullptr);
+}
+
+// Test quickstart without OPENAI_API_KEY throws
+TEST_F(SDKBuilderTest, QuickstartNoApiKeyThrows) {
+  // Save and unset the env var
+  const char *old = std::getenv("OPENAI_API_KEY");
+  if (old) {
+    // If set, skip this test since unsetting is not safe in parallel tests
+    GTEST_SKIP() << "OPENAI_API_KEY is set, skipping quickstart error test";
+  }
+  EXPECT_THROW(quickstart(), std::runtime_error);
+}
+
+// Test snapshot_dir and ltm_dir builder methods
+TEST_F(SDKBuilderTest, BuilderSnapshotAndLtmDirs) {
+  auto dir = fs::temp_directory_path() / "agentos_sdk_test";
+  auto os = AgentOSBuilder()
+                .mock()
+                .snapshot_dir((dir / "custom_snaps").string())
+                .ltm_dir((dir / "custom_ltm").string())
+                .security(false)
+                .build();
+
+  ASSERT_NE(os, nullptr);
+}
+
+// Test version patch level
+TEST(SDKTest, VersionPatch) {
+  auto v = version();
+  EXPECT_GE(v.patch, 0);
+  EXPECT_EQ(v.to_string(), "0.9.0");
+}
+
+// Test multiple agents with find_agent
+TEST_F(SDKBuilderTest, FindMultipleAgents) {
+  auto os = quickstart_mock();
+  auto a1 = make_agent(*os, "Agent1").create();
+  auto a2 = make_agent(*os, "Agent2").create();
+  auto a3 = make_agent(*os, "Agent3").create();
+
+  EXPECT_EQ(os->agent_count(), 3u);
+  EXPECT_NE(os->find_agent(a1->id()), nullptr);
+  EXPECT_NE(os->find_agent(a2->id()), nullptr);
+  EXPECT_NE(os->find_agent(a3->id()), nullptr);
+  EXPECT_EQ(os->find_agent(a1->id())->config().name, "Agent1");
+  EXPECT_EQ(os->find_agent(a3->id())->config().name, "Agent3");
+}
+
+// Test health check fields after shutdown
+TEST_F(SDKBuilderTest, HealthAfterShutdown) {
+  auto os = quickstart_mock();
+  auto h1 = os->health();
+  EXPECT_TRUE(h1.healthy);
+
+  os->graceful_shutdown(Duration{1000});
+  auto h2 = os->health();
+  EXPECT_FALSE(h2.scheduler_running);
+  EXPECT_FALSE(h2.healthy);
+}

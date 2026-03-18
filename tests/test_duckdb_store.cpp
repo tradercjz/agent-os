@@ -410,3 +410,430 @@ TEST_F(DuckDBStoreTest, MemorySystemDuckDBEnumCreatesCorrectBackend) {
 
   fs::remove_all(duckdb_dir);
 }
+
+// ── Helper: normalize embedding in-place ────────────────
+static void normalize_emb_duck(Embedding &e) {
+  float norm = 0;
+  for (float v : e)
+    norm += v * v;
+  norm = std::sqrt(norm);
+  for (float &v : e)
+    v /= norm;
+}
+
+// ── Forget entry that has an HNSW embedding (covers markDelete path) ──
+TEST_F(DuckDBStoreTest, ForgetEntryWithEmbedding) {
+  Embedding emb(128, 0.1f);
+  emb[0] = 0.99f;
+  normalize_emb_duck(emb);
+
+  MemoryEntry entry;
+  entry.content = "Memory with embedding";
+  entry.embedding = emb;
+  entry.user_id = "user_1";
+
+  auto id = store_->write(entry);
+  ASSERT_TRUE(id);
+  EXPECT_EQ(store_->size(), 1u);
+
+  // Forget should remove from both DuckDB and HNSW
+  auto result = store_->forget(*id);
+  ASSERT_TRUE(result);
+  EXPECT_TRUE(*result);
+  EXPECT_EQ(store_->size(), 0u);
+
+  // Search should return empty results after forget
+  MemoryFilter filter;
+  filter.user_id = "user_1";
+  auto results = store_->search(emb, filter, 5);
+  ASSERT_TRUE(results);
+  EXPECT_EQ(results->size(), 0u);
+}
+
+// ── Search with empty embedding triggers linear scan fallback ──
+TEST_F(DuckDBStoreTest, SearchEmptyEmbeddingFallsBackToLinearScan) {
+  MemoryEntry e1;
+  e1.content = "Important thing";
+  e1.user_id = "user_1";
+  e1.importance = 0.9f;
+  (void)store_->write(e1);
+
+  MemoryEntry e2;
+  e2.content = "Less important";
+  e2.user_id = "user_1";
+  e2.importance = 0.3f;
+  (void)store_->write(e2);
+
+  // Empty embedding -> linear scan fallback
+  Embedding empty_emb;
+  MemoryFilter filter;
+  filter.user_id = "user_1";
+
+  auto results = store_->search(empty_emb, filter, 5);
+  ASSERT_TRUE(results);
+  ASSERT_GE(results->size(), 1u);
+  EXPECT_EQ(results->front().entry.content, "Important thing");
+}
+
+// ── Linear scan with all filter fields (agent_id, session_id, type) ──
+TEST_F(DuckDBStoreTest, LinearScanWithAllFilters) {
+  MemoryEntry e1;
+  e1.content = "Match all filters";
+  e1.user_id = "user_1";
+  e1.agent_id = "agent_1";
+  e1.session_id = "sess_1";
+  e1.type = "episodic";
+  e1.importance = 0.9f;
+  (void)store_->write(e1);
+
+  MemoryEntry e2;
+  e2.content = "Wrong agent";
+  e2.user_id = "user_1";
+  e2.agent_id = "agent_2";
+  e2.session_id = "sess_1";
+  e2.type = "episodic";
+  e2.importance = 0.8f;
+  (void)store_->write(e2);
+
+  MemoryEntry e3;
+  e3.content = "Wrong type";
+  e3.user_id = "user_1";
+  e3.agent_id = "agent_1";
+  e3.session_id = "sess_1";
+  e3.type = "semantic";
+  e3.importance = 0.7f;
+  (void)store_->write(e3);
+
+  Embedding empty_emb;
+  MemoryFilter filter;
+  filter.user_id = "user_1";
+  filter.agent_id = "agent_1";
+  filter.session_id = "sess_1";
+  filter.type = "episodic";
+
+  auto results = store_->search(empty_emb, filter, 5);
+  ASSERT_TRUE(results);
+  ASSERT_EQ(results->size(), 1u);
+  EXPECT_EQ(results->front().entry.content, "Match all filters");
+}
+
+// ── Search with dimension mismatch ──
+TEST_F(DuckDBStoreTest, SearchDimMismatchReturnsError) {
+  Embedding emb128(128, 0.1f);
+  emb128[0] = 0.99f;
+  normalize_emb_duck(emb128);
+
+  MemoryEntry e;
+  e.content = "Some memory";
+  e.embedding = emb128;
+  e.user_id = "user_1";
+  (void)store_->write(e);
+
+  Embedding query64(64, 0.5f);
+  normalize_emb_duck(query64);
+
+  MemoryFilter filter;
+  auto results = store_->search(query64, filter, 5);
+  EXPECT_FALSE(results);
+}
+
+// ── Search with top_k smaller than results triggers resize ──
+TEST_F(DuckDBStoreTest, SearchResultsTruncatedToTopK) {
+  auto normalize = [](Embedding &e) {
+    float norm = 0;
+    for (float v : e) norm += v * v;
+    norm = std::sqrt(norm);
+    for (float &v : e) v /= norm;
+  };
+
+  for (int i = 0; i < 5; ++i) {
+    Embedding emb(64, 0.1f);
+    emb[i % 64] = 0.99f;
+    normalize(emb);
+
+    MemoryEntry e;
+    e.content = "Entry " + std::to_string(i);
+    e.embedding = emb;
+    e.user_id = "user_1";
+    e.importance = 0.5f + 0.1f * i;
+    (void)store_->write(e);
+  }
+
+  Embedding query(64, 0.1f);
+  query[0] = 0.95f;
+  normalize(query);
+
+  MemoryFilter filter;
+  filter.user_id = "user_1";
+
+  auto results = store_->search(query, filter, 2);
+  ASSERT_TRUE(results);
+  EXPECT_LE(results->size(), 2u);
+}
+
+// ── HNSW search with agent_id/session_id/type filters ──
+TEST_F(DuckDBStoreTest, HNSWSearchWithMultipleFilterFields) {
+  auto normalize = [](Embedding &e) {
+    float norm = 0;
+    for (float v : e) norm += v * v;
+    norm = std::sqrt(norm);
+    for (float &v : e) v /= norm;
+  };
+
+  Embedding emb(64, 0.1f);
+  emb[0] = 0.99f;
+  normalize(emb);
+
+  MemoryEntry e1;
+  e1.content = "Target entry";
+  e1.embedding = emb;
+  e1.user_id = "user_1";
+  e1.agent_id = "agent_A";
+  e1.session_id = "sess_X";
+  e1.type = "episodic";
+  e1.importance = 0.9f;
+  (void)store_->write(e1);
+
+  Embedding emb2(64, 0.1f);
+  emb2[1] = 0.99f;
+  normalize(emb2);
+
+  MemoryEntry e2;
+  e2.content = "Wrong agent entry";
+  e2.embedding = emb2;
+  e2.user_id = "user_1";
+  e2.agent_id = "agent_B";
+  e2.session_id = "sess_X";
+  e2.type = "episodic";
+  e2.importance = 0.9f;
+  (void)store_->write(e2);
+
+  Embedding query(64, 0.1f);
+  query[0] = 0.95f;
+  normalize(query);
+
+  MemoryFilter filter;
+  filter.user_id = "user_1";
+  filter.agent_id = "agent_A";
+
+  auto results = store_->search(query, filter, 5);
+  ASSERT_TRUE(results);
+  ASSERT_GE(results->size(), 1u);
+  EXPECT_EQ(results->front().entry.agent_id, "agent_A");
+
+  MemoryFilter filter2;
+  filter2.session_id = "sess_X";
+  auto results2 = store_->search(query, filter2, 5);
+  ASSERT_TRUE(results2);
+  ASSERT_GE(results2->size(), 1u);
+
+  MemoryFilter filter3;
+  filter3.type = "episodic";
+  auto results3 = store_->search(query, filter3, 5);
+  ASSERT_TRUE(results3);
+  ASSERT_GE(results3->size(), 1u);
+}
+
+// ── Write with pre-set ID ──
+TEST_F(DuckDBStoreTest, WriteWithCustomId) {
+  MemoryEntry entry;
+  entry.id = "custom_id_123";
+  entry.content = "Custom ID entry";
+
+  auto result = store_->write(entry);
+  ASSERT_TRUE(result);
+  EXPECT_EQ(*result, "custom_id_123");
+
+  auto read = store_->read("custom_id_123");
+  ASSERT_TRUE(read);
+  EXPECT_EQ(read->content, "Custom ID entry");
+}
+
+// ── Overwrite existing entry (DELETE + INSERT path) ──
+TEST_F(DuckDBStoreTest, OverwriteExistingEntry) {
+  Embedding emb(64, 0.1f);
+  emb[0] = 0.99f;
+  normalize_emb_duck(emb);
+
+  MemoryEntry entry;
+  entry.id = "overwrite_me";
+  entry.content = "Version 1";
+  entry.embedding = emb;
+  (void)store_->write(entry);
+
+  entry.content = "Version 2";
+  (void)store_->write(entry);
+
+  EXPECT_EQ(store_->size(), 1u);
+  auto read = store_->read("overwrite_me");
+  ASSERT_TRUE(read);
+  EXPECT_EQ(read->content, "Version 2");
+}
+
+// ── Read non-existent entry ──
+TEST_F(DuckDBStoreTest, ReadNonExistentReturnsError) {
+  auto result = store_->read("nonexistent_id");
+  EXPECT_FALSE(result);
+}
+
+// ── Forget non-existent entry ──
+TEST_F(DuckDBStoreTest, ForgetNonExistentReturnsFalseOrTrue) {
+  // DuckDB DELETE of non-existent row should not error
+  auto result = store_->forget("nonexistent_id");
+  ASSERT_TRUE(result);
+}
+
+// ── SQL query: too short query ──
+TEST_F(DuckDBStoreTest, SQLQueryTooShort) {
+  auto qr = store_->sql_query("SEL");
+  EXPECT_FALSE(qr.ok());
+  EXPECT_EQ(qr.error, "Query too short");
+}
+
+// ── SQL query: case-insensitive SELECT check ──
+TEST_F(DuckDBStoreTest, SQLQueryCaseInsensitiveSelect) {
+  MemoryEntry e;
+  e.content = "test";
+  (void)store_->write(e);
+
+  auto qr = store_->sql_query("  SELECT COUNT(*) FROM entries");
+  ASSERT_TRUE(qr.ok());
+  EXPECT_EQ(qr.rows.size(), 1u);
+}
+
+// ── SQL query: error in DuckDB execution ──
+TEST_F(DuckDBStoreTest, SQLQueryInvalidSQL) {
+  auto qr = store_->sql_query("SELECT nonexistent_col FROM entries");
+  EXPECT_FALSE(qr.ok());
+}
+
+// ── query_by_filter with valid filter ──
+TEST_F(DuckDBStoreTest, QueryByFilterValid) {
+  for (int i = 0; i < 5; ++i) {
+    MemoryEntry e;
+    e.content = "Item " + std::to_string(i);
+    e.user_id = (i < 3) ? "user_a" : "user_b";
+    e.type = (i % 2 == 0) ? "episodic" : "semantic";
+    e.importance = 0.1f * (i + 1);
+    (void)store_->write(e);
+  }
+
+  auto qr = store_->query_by_filter("user_id = 'user_a'", "importance DESC", 10);
+  ASSERT_TRUE(qr.ok());
+  EXPECT_EQ(qr.rows.size(), 3u);
+}
+
+// ── query_by_filter with ordering ──
+TEST_F(DuckDBStoreTest, QueryByFilterOrdering) {
+  for (int i = 0; i < 3; ++i) {
+    MemoryEntry e;
+    e.content = "Item " + std::to_string(i);
+    e.importance = 0.1f * (i + 1);
+    (void)store_->write(e);
+  }
+
+  auto qr = store_->query_by_filter("1=1", "importance ASC", 10);
+  ASSERT_TRUE(qr.ok());
+  EXPECT_EQ(qr.rows.size(), 3u);
+}
+
+// ── aggregate with unsafe SQL (DDL injection) ──
+TEST_F(DuckDBStoreTest, AggregateRejectsUnsafeGroupBy) {
+  auto qr = store_->aggregate("type; DROP TABLE entries --");
+  EXPECT_FALSE(qr.ok());
+  EXPECT_EQ(qr.error, "Unsafe SQL fragment detected");
+}
+
+// ── aggregate with unsafe agg parameter ──
+TEST_F(DuckDBStoreTest, AggregateRejectsUnsafeAgg) {
+  auto qr = store_->aggregate("type", "COUNT(*); DELETE FROM entries");
+  EXPECT_FALSE(qr.ok());
+  EXPECT_EQ(qr.error, "Unsafe SQL fragment detected");
+}
+
+// ── query_by_filter: NUL byte injection in order_by ──
+TEST_F(DuckDBStoreTest, QueryByFilterRejectsNulInOrderBy) {
+  std::string bad_order = "importance DESC";
+  bad_order += '\0';
+  bad_order += "; DROP TABLE entries";
+  auto qr = store_->query_by_filter("1=1", bad_order);
+  EXPECT_FALSE(qr.ok());
+}
+
+// ── Search: no HNSW index built, entries without embeddings ──
+TEST_F(DuckDBStoreTest, SearchNoHNSWFallsBackToLinear) {
+  for (int i = 0; i < 3; ++i) {
+    MemoryEntry e;
+    e.content = "No-emb " + std::to_string(i);
+    e.user_id = "user_1";
+    e.importance = 0.5f + 0.1f * i;
+    (void)store_->write(e);
+  }
+
+  Embedding query(64, 0.5f);
+  normalize_emb_duck(query);
+
+  MemoryFilter filter;
+  filter.user_id = "user_1";
+
+  auto results = store_->search(query, filter, 5);
+  ASSERT_TRUE(results);
+  ASSERT_GE(results->size(), 1u);
+}
+
+// ── SQL query: valid aggregation with multiple columns ──
+TEST_F(DuckDBStoreTest, SQLQueryMultiColumnAgg) {
+  for (int i = 0; i < 6; ++i) {
+    MemoryEntry e;
+    e.content = "M" + std::to_string(i);
+    e.type = (i < 4) ? "episodic" : "semantic";
+    e.importance = 0.5f + 0.1f * i;
+    (void)store_->write(e);
+  }
+
+  auto qr = store_->sql_query(
+      "SELECT type, COUNT(*) as cnt, AVG(importance) as avg_imp "
+      "FROM entries GROUP BY type ORDER BY cnt DESC");
+  ASSERT_TRUE(qr.ok());
+  EXPECT_EQ(qr.columns.size(), 3u);
+  EXPECT_EQ(qr.rows.size(), 2u);
+}
+
+// ── validate_sql_fragment edge cases via query_by_filter ──
+TEST_F(DuckDBStoreTest, QueryByFilterRejectsDDLKeywords) {
+  // Various DDL/DML keywords
+  EXPECT_FALSE(store_->query_by_filter("DROP TABLE entries").ok());
+  EXPECT_FALSE(store_->query_by_filter("alter table entries").ok());
+  EXPECT_FALSE(store_->query_by_filter("CREATE INDEX idx").ok());
+  EXPECT_FALSE(store_->query_by_filter("INSERT INTO entries").ok());
+  EXPECT_FALSE(store_->query_by_filter("UPDATE entries SET x=1").ok());
+  EXPECT_FALSE(store_->query_by_filter("TRUNCATE TABLE entries").ok());
+  EXPECT_FALSE(store_->query_by_filter("exec sp_something").ok());
+  EXPECT_FALSE(store_->query_by_filter("EXECUTE something").ok());
+}
+
+// ── Empty embedding stored and read back correctly ──
+TEST_F(DuckDBStoreTest, EmptyEmbeddingReadBack) {
+  MemoryEntry e;
+  e.content = "No embedding here";
+  auto id = store_->write(e);
+  ASSERT_TRUE(id);
+
+  auto read = store_->read(*id);
+  ASSERT_TRUE(read);
+  EXPECT_TRUE(read->embedding.empty());
+}
+
+// ── query_by_filter with limit ──
+TEST_F(DuckDBStoreTest, QueryByFilterWithLimit) {
+  for (int i = 0; i < 10; ++i) {
+    MemoryEntry e;
+    e.content = "Item " + std::to_string(i);
+    e.importance = 0.1f * (i + 1);
+    (void)store_->write(e);
+  }
+
+  auto qr = store_->query_by_filter("1=1", "importance DESC", 3);
+  ASSERT_TRUE(qr.ok());
+  EXPECT_EQ(qr.rows.size(), 3u);
+}

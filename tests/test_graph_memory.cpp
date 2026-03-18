@@ -323,3 +323,261 @@ TEST(GraphMemoryTest, HighLevelMemoryAPI) {
   EXPECT_TRUE(found_employs);
   EXPECT_TRUE(found_works_on);
 }
+
+// ── Coverage boost tests ────────────────────────────────
+
+// Test corrupt WAL line (bad CRC) is skipped during replay
+TEST(GraphMemoryTest, CorruptWALLineSkipped) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_corrupt_wal";
+  std::filesystem::remove_all(test_dir);
+  std::filesystem::create_directories(test_dir);
+
+  // Write a WAL with one valid and one corrupted line
+  {
+    std::ofstream wal(test_dir / "graph_wal.log");
+    // Valid node line (compute correct CRC manually via LocalGraphMemory internals)
+    // We'll write a line with correct CRC, and one with wrong CRC
+    wal << "N,GoodNode,Person,,12345|CRC:99999999\n"; // wrong CRC
+    wal << "N,ValidNode,Company,,67890|CRC:0\n";       // also wrong CRC
+    wal.close();
+  }
+
+  // Load — both lines should be skipped due to CRC mismatch
+  memory::LocalGraphMemory graph(test_dir);
+  auto edges = graph.get_edges("GoodNode");
+  ASSERT_TRUE(edges.has_value());
+  EXPECT_EQ(edges->size(), 0u);
+
+  // After loading corrupt WAL, graph should still be functional
+  auto r = graph.add_node(memory::GraphNode{.id = "Fresh", .type = "Test"});
+  EXPECT_TRUE(r.has_value());
+
+  std::filesystem::remove_all(test_dir);
+}
+
+// Test WAL with legacy format (no CRC suffix) is accepted
+TEST(GraphMemoryTest, LegacyWALFormatAccepted) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_legacy_wal";
+  std::filesystem::remove_all(test_dir);
+  std::filesystem::create_directories(test_dir);
+
+  // Write legacy WAL without CRC
+  {
+    std::ofstream wal(test_dir / "graph_wal.log");
+    wal << "N,LegacyNode,Person,,12345\n"; // no |CRC: suffix
+    wal.close();
+  }
+
+  memory::LocalGraphMemory graph(test_dir);
+  // Legacy line should be accepted
+  auto res = graph.k_hop_search("LegacyNode", 0);
+  ASSERT_TRUE(res.has_value());
+  EXPECT_EQ(res->nodes.size(), 1u);
+  EXPECT_EQ(res->nodes[0].id, "LegacyNode");
+
+  std::filesystem::remove_all(test_dir);
+}
+
+// Test k_hop_search with nonexistent start node returns error
+TEST(GraphMemoryTest, KHopSearchNonexistentNode) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_khop_missing";
+  std::filesystem::remove_all(test_dir);
+
+  memory::LocalGraphMemory graph(test_dir);
+  auto res = graph.k_hop_search("NonExistent", 1);
+  ASSERT_FALSE(res.has_value());
+  EXPECT_EQ(res.error().code, ErrorCode::NotFound);
+
+  std::filesystem::remove_all(test_dir);
+}
+
+// Test k_hop_search with temporal filtering
+TEST(GraphMemoryTest, KHopTemporalFilter) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_khop_temporal";
+  std::filesystem::remove_all(test_dir);
+
+  memory::LocalGraphMemory graph(test_dir);
+
+  // Edge valid from ts=100 to ts=200
+  (void)graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "B", .relation = "r1",
+      .weight = 1.0f, .start_ts = 100, .end_ts = 200});
+  // Edge valid from ts=300 to indefinite
+  (void)graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "C", .relation = "r2",
+      .weight = 1.0f, .start_ts = 300, .end_ts = UINT64_MAX});
+
+  // Query at ts=150: should only see A->B
+  auto res1 = graph.k_hop_search("A", 1, 150);
+  ASSERT_TRUE(res1.has_value());
+  EXPECT_EQ(res1->edges.size(), 1u);
+  EXPECT_EQ(res1->edges[0].target_id, "B");
+
+  // Query at ts=400: should only see A->C
+  auto res2 = graph.k_hop_search("A", 1, 400);
+  ASSERT_TRUE(res2.has_value());
+  EXPECT_EQ(res2->edges.size(), 1u);
+  EXPECT_EQ(res2->edges[0].target_id, "C");
+
+  std::filesystem::remove_all(test_dir);
+}
+
+// Test save_snapshot produces a compacted WAL
+TEST(GraphMemoryTest, SaveSnapshotCompactsWAL) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_snapshot";
+  std::filesystem::remove_all(test_dir);
+
+  {
+    memory::LocalGraphMemory graph(test_dir);
+    (void)graph.add_node(memory::GraphNode{.id = "N1", .type = "T1"});
+    (void)graph.add_edge(memory::GraphEdge{
+        .source_id = "N1", .target_id = "N2", .relation = "rel"});
+
+    graph.save_snapshot();
+  }
+
+  // Verify data survives snapshot compaction
+  {
+    memory::LocalGraphMemory graph2(test_dir);
+    auto edges = graph2.get_edges("N1");
+    ASSERT_TRUE(edges.has_value());
+    EXPECT_EQ(edges->size(), 1u);
+    EXPECT_EQ(edges.value()[0].target_id, "N2");
+  }
+
+  std::filesystem::remove_all(test_dir);
+}
+
+// Test cleanup_before with no expired edges
+TEST(GraphMemoryTest, CleanupBeforeNoExpired) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_cleanup_none";
+  std::filesystem::remove_all(test_dir);
+
+  memory::LocalGraphMemory graph(test_dir);
+  // All edges indefinite (end_ts = UINT64_MAX)
+  (void)graph.add_edge(memory::GraphEdge{
+      .source_id = "X", .target_id = "Y", .relation = "r1"});
+
+  auto removed = graph.cleanup_before(999999);
+  ASSERT_TRUE(removed.has_value());
+  EXPECT_EQ(*removed, 0u);
+
+  auto edges = graph.get_edges("X");
+  ASSERT_TRUE(edges.has_value());
+  EXPECT_EQ(edges->size(), 1u);
+
+  std::filesystem::remove_all(test_dir);
+}
+
+// Test cleanup_before persists after WAL reload
+TEST(GraphMemoryTest, CleanupBeforePersistsAfterReload) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_cleanup_persist";
+  std::filesystem::remove_all(test_dir);
+
+  {
+    memory::LocalGraphMemory graph(test_dir);
+    (void)graph.add_edge(memory::GraphEdge{
+        .source_id = "A", .target_id = "B", .relation = "expired",
+        .weight = 1.0f, .start_ts = 10, .end_ts = 50});
+    (void)graph.add_edge(memory::GraphEdge{
+        .source_id = "A", .target_id = "C", .relation = "active"});
+    auto removed = graph.cleanup_before(100);
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_EQ(*removed, 1u);
+    graph.save_snapshot(); // compact WAL
+  }
+
+  {
+    memory::LocalGraphMemory graph2(test_dir);
+    auto edges = graph2.get_edges("A");
+    ASSERT_TRUE(edges.has_value());
+    EXPECT_EQ(edges->size(), 1u);
+    EXPECT_EQ(edges.value()[0].relation, "active");
+  }
+
+  std::filesystem::remove_all(test_dir);
+}
+
+// Test escape/unescape roundtrip with special characters
+TEST(GraphMemoryTest, EscapeSpecialCharsInWAL) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_escape";
+  std::filesystem::remove_all(test_dir);
+
+  {
+    memory::LocalGraphMemory graph(test_dir);
+    // Node with commas, newlines, backslashes in content
+    (void)graph.add_node(memory::GraphNode{
+        .id = "special", .type = "Type", .content = "a,b\\c\nd"});
+  }
+
+  {
+    memory::LocalGraphMemory graph2(test_dir);
+    auto res = graph2.k_hop_search("special", 0);
+    ASSERT_TRUE(res.has_value());
+    ASSERT_EQ(res->nodes.size(), 1u);
+    EXPECT_EQ(res->nodes[0].content, "a,b\\c\nd");
+  }
+
+  std::filesystem::remove_all(test_dir);
+}
+
+// Test pending WAL file is cleaned up on load
+TEST(GraphMemoryTest, PendingWALCleanedUp) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_pending";
+  std::filesystem::remove_all(test_dir);
+  std::filesystem::create_directories(test_dir);
+
+  // Create a pending file (simulating interrupted write)
+  {
+    std::ofstream pending(test_dir / "graph_wal.log.pending");
+    pending << "N,Ghost,Phantom,,0\n";
+    pending.close();
+    // Also create a main WAL
+    std::ofstream wal(test_dir / "graph_wal.log");
+    wal.close();
+  }
+
+  // Loading should remove the pending file
+  memory::LocalGraphMemory graph(test_dir);
+  EXPECT_FALSE(std::filesystem::exists(test_dir / "graph_wal.log.pending"));
+
+  // Ghost node should NOT be in graph (pending was discarded)
+  auto res = graph.k_hop_search("Ghost", 0);
+  EXPECT_FALSE(res.has_value()); // not found
+
+  std::filesystem::remove_all(test_dir);
+}
+
+// Test get_edges_by_relation with multiple relations
+TEST(GraphMemoryTest, GetEdgesByRelationFilters) {
+  std::filesystem::path test_dir = "/tmp/agentos_test_graph_edges_rel";
+  std::filesystem::remove_all(test_dir);
+
+  memory::LocalGraphMemory graph(test_dir);
+  (void)graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "B", .relation = "likes"});
+  (void)graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "C", .relation = "hates"});
+  (void)graph.add_edge(memory::GraphEdge{
+      .source_id = "A", .target_id = "D", .relation = "likes"});
+
+  auto likes = graph.get_edges_by_relation("A", "likes");
+  ASSERT_TRUE(likes.has_value());
+  EXPECT_EQ(likes->size(), 2u);
+
+  auto hates = graph.get_edges_by_relation("A", "hates");
+  ASSERT_TRUE(hates.has_value());
+  EXPECT_EQ(hates->size(), 1u);
+
+  // Non-existent relation
+  auto none = graph.get_edges_by_relation("A", "unknown");
+  ASSERT_TRUE(none.has_value());
+  EXPECT_EQ(none->size(), 0u);
+
+  // Non-existent node
+  auto missing = graph.get_edges_by_relation("Z", "likes");
+  ASSERT_TRUE(missing.has_value());
+  EXPECT_EQ(missing->size(), 0u);
+
+  std::filesystem::remove_all(test_dir);
+}

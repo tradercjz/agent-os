@@ -160,9 +160,12 @@ set(AGENTOS_SOURCES
     src/scheduler/scheduler.cpp
     src/context/context.cpp
     src/memory/memory.cpp
+    src/memory/consolidator.cpp
     src/tools/tool_manager.cpp
+    src/tools/tool_learner.cpp
     src/security/security.cpp
     src/bus/agent_bus.cpp
+    src/tracing/tracer.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -244,6 +247,12 @@ set(TEST_SOURCES
   tests/test_logger.cpp
   tests/test_api_fluent.cpp
   tests/test_compile_safety.cpp
+  tests/test_consolidator.cpp
+  tests/test_planning.cpp
+  tests/test_tracing.cpp
+  tests/test_tool_learner.cpp
+  tests/test_memory_coverage.cpp
+  tests/test_coverage_boost.cpp
 )
 if(NOT AGENTOS_NO_DUCKDB)
   list(APPEND TEST_SOURCES tests/test_duckdb_store.cpp)

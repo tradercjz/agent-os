@@ -8,9 +8,12 @@
 #include <agentos/core/types.hpp>
 #include <agentos/kernel/llm_kernel.hpp>
 #include <agentos/memory/memory.hpp>
+#include <agentos/memory/consolidator.hpp>
 #include <agentos/scheduler/scheduler.hpp>
 #include <agentos/security/security.hpp>
 #include <agentos/tools/tool_manager.hpp>
+#include <agentos/tools/tool_learner.hpp>
+#include <agentos/tracing.hpp>
 #include <atomic>
 #include <cassert>
 #include <concepts>
@@ -301,10 +304,18 @@ public:
                     ? std::make_unique<security::SecurityManager>()
                     : nullptr;
     bus_ = std::make_unique<bus::AgentBus>(security_.get());
+    consolidator_ = std::make_unique<memory::MemoryConsolidator>(*memory_);
+    consolidator_->start();
+    tracer_ = std::make_unique<tracing::Tracer>();
+    tool_learner_ = std::make_unique<tools::ToolLearner>(*kernel_);
     scheduler_->start();
   }
 
-  ~AgentOS() { scheduler_->shutdown(); }
+  ~AgentOS() {
+    os_alive_->store(false, std::memory_order_release);
+    consolidator_->stop();
+    scheduler_->shutdown();
+  }
 
   // ── Agent 工厂 ─────────────────────────────────────────
   template <AgentConcept AgentT = ReActAgent, typename... Args>
@@ -330,11 +341,13 @@ public:
       agents_[id] = agent;
     }
 
+    consolidator_->register_agent(id);
     agent->on_start();
     return agent;
   }
 
   void destroy_agent(AgentId id) {
+    consolidator_->on_agent_destroyed(id);
     std::lock_guard lk(agents_mu_);
     auto it = agents_.find(id);
     if (it == agents_.end())
@@ -378,6 +391,9 @@ public:
 
   security::SecurityManager *security() { return security_.get(); }
   bus::AgentBus &bus() { return *bus_; }
+  memory::MemoryConsolidator &consolidator() { return *consolidator_; }
+  tracing::Tracer &tracer() { return *tracer_; }
+  tools::ToolLearner &tool_learner() { return *tool_learner_; }
 
   // ── Agent 数量查询 ──────────────────────────────────────
   size_t agent_count() const {
@@ -469,6 +485,10 @@ private:
   std::unique_ptr<tools::ToolManager> tool_mgr_;
   std::unique_ptr<security::SecurityManager> security_;
   std::unique_ptr<bus::AgentBus> bus_;
+  std::unique_ptr<memory::MemoryConsolidator> consolidator_;
+  std::unique_ptr<tracing::Tracer> tracer_;
+  std::unique_ptr<tools::ToolLearner> tool_learner_;
+  std::shared_ptr<std::atomic<bool>> os_alive_ = std::make_shared<std::atomic<bool>>(true);
 
   mutable std::mutex agents_mu_;
   std::unordered_map<AgentId, std::shared_ptr<Agent>> agents_;
@@ -523,7 +543,28 @@ AgentBase<Derived>::act(const kernel::ToolCallRequest &call) {
     auto check = this->os_->security()->authorize_tool(this->id_, call.name, call.args_json);
     if (!check) return make_error(check.error().code, check.error().message);
   }
-  auto result = this->os_->tools().dispatch(call);
+
+  // Tool Learning: inject prompt hints and apply parameter fixes
+  auto& learner = this->os_->tool_learner();
+  std::string corrected_args = call.args_json;
+  if (learner.enabled()) {
+    auto hints = learner.get_prompt_hints(call.name);
+    if (!hints.empty()) {
+      this->os_->ctx().append(this->id_, kernel::Message::system(hints));
+    }
+    corrected_args = learner.apply_param_fixes(call.name, call.args_json);
+  }
+
+  kernel::ToolCallRequest corrected_call{call.id, call.name, corrected_args};
+  auto result = this->os_->tools().dispatch(corrected_call);
+
+  // Tool Learning: record failure and analyze
+  if (!result.success && learner.enabled()) {
+    tools::ToolFailureRecord record{call.name, call.args_json, result.error, now(), this->id_};
+    learner.record_failure(record);
+    learner.analyze_failure(record);
+  }
+
   this->run_after_hooks(act_ctx);
   return result;
 }

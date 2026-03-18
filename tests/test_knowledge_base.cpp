@@ -299,3 +299,426 @@ TEST(KnowledgeBaseTest, DocumentAndChunkCounts) {
   EXPECT_EQ(kb.document_count(), 2u);
   EXPECT_GE(kb.chunk_count(), 2u);
 }
+
+// ── Coverage boost tests ────────────────────────────────
+
+// Test chunking with empty text
+TEST(KnowledgeBaseTest, IngestEmptyText) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  auto result = kb.ingest_text("empty_doc", "");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, 0u);
+  EXPECT_EQ(kb.document_count(), 0u);
+  EXPECT_EQ(kb.chunk_count(), 0u);
+}
+
+// Test chunk deduplication: re-ingesting same doc_id skips duplicates
+TEST(KnowledgeBaseTest, IngestDeduplication) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  (void)kb.ingest_text("dup_doc", "Apple is great.");
+  auto count_before = kb.chunk_count();
+  // Re-ingest same doc_id — chunks should be skipped
+  (void)kb.ingest_text("dup_doc", "Apple is great.");
+  EXPECT_EQ(kb.chunk_count(), count_before);
+}
+
+// Test search with empty knowledge base
+TEST(KnowledgeBaseTest, SearchEmptyKB) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  auto results = kb.search("anything", 5);
+  EXPECT_TRUE(results.empty());
+}
+
+// Test search returns top_k results when more are available
+TEST(KnowledgeBaseTest, SearchRespectsTopK) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  (void)kb.ingest_text("d1", "Apple product one.");
+  (void)kb.ingest_text("d2", "Apple product two.");
+  (void)kb.ingest_text("d3", "Apple product three.");
+
+  auto results = kb.search("apple", 1);
+  EXPECT_LE(results.size(), 1u);
+
+  auto results2 = kb.search("apple", 10);
+  EXPECT_GE(results2.size(), 1u);
+}
+
+// Test ingest_text with very long text triggers chunking overlap
+TEST(KnowledgeBaseTest, LongTextChunkingWithOverlap) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+  kb.set_chunk_params(50, 10);
+
+  // Generate a long multi-sentence text
+  std::string long_text;
+  for (int i = 0; i < 20; ++i) {
+    long_text += "Sentence number " + std::to_string(i) + " about apple products. ";
+  }
+
+  auto result = kb.ingest_text("long_doc", long_text);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_GT(*result, 1u); // Should produce multiple chunks
+  EXPECT_GT(kb.chunk_count(), 1u);
+}
+
+// Test sentence splitting with Chinese/CJK punctuation
+TEST(KnowledgeBaseTest, SentenceSplitCJK) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+  kb.set_chunk_params(30, 5);
+
+  // Use CJK sentence terminators (。！？)
+  std::string cjk_text = "Apple is great\xe3\x80\x82"
+                          "Banana is good\xef\xbc\x81"
+                          "Cherry is nice\xef\xbc\x9f"
+                          "Date is sweet\xef\xbc\x9b";
+
+  auto result = kb.ingest_text("cjk_doc", cjk_text);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_GE(*result, 1u);
+}
+
+// Test ingest_directory with nonexistent directory
+TEST(KnowledgeBaseTest, IngestDirectoryNonexistent) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  // Should not crash, just log error
+  kb.ingest_directory("/tmp/nonexistent_kb_dir_9999");
+  EXPECT_EQ(kb.document_count(), 0u);
+}
+
+// Test ingest_directory with actual files
+TEST(KnowledgeBaseTest, IngestDirectoryWithFiles) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  fs::path test_dir = "/tmp/agentos_kb_ingest_dir_test";
+  fs::remove_all(test_dir);
+  fs::create_directories(test_dir);
+
+  // Create .txt and .md files
+  {
+    std::ofstream(test_dir / "a.txt") << "Apple is a great fruit.";
+    std::ofstream(test_dir / "b.md") << "Banana is yellow.";
+    std::ofstream(test_dir / "c.cpp") << "This should be ignored.";
+  }
+
+  kb.ingest_directory(test_dir);
+  EXPECT_GE(kb.document_count(), 2u);
+
+  fs::remove_all(test_dir);
+}
+
+// Test save/load roundtrip preserves embedding model name
+TEST(KnowledgeBaseTest, SaveLoadPreservesEmbeddingModel) {
+  fs::path kb_dir = "/tmp/agentos_kb_model_test";
+  fs::remove_all(kb_dir);
+
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+
+  {
+    KnowledgeBase kb(mock_llm, 1536, 100000, "custom-embed-v3");
+    (void)kb.ingest_text("d1", "Content about apple.");
+    ASSERT_TRUE(kb.save(kb_dir));
+  }
+  {
+    KnowledgeBase kb2(mock_llm, 1536);
+    ASSERT_TRUE(kb2.load(kb_dir));
+    // DuckDB persists the embedding model name
+    EXPECT_EQ(kb2.embedding_model(), "custom-embed-v3");
+  }
+
+  fs::remove_all(kb_dir);
+}
+
+// Test search result includes correct content and doc_id fields
+TEST(KnowledgeBaseTest, SearchResultFields) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  (void)kb.ingest_text("doc_apple", "Apple is delicious and red.");
+  auto results = kb.search("apple delicious", 1);
+  ASSERT_FALSE(results.empty());
+  EXPECT_EQ(results[0].doc_id, "doc_apple");
+  EXPECT_FALSE(results[0].content.empty());
+  EXPECT_GT(results[0].score, 0.0);
+  EXPECT_TRUE(results[0].graph_context.empty()); // no graph attached
+}
+
+// Test remove all documents leaves KB empty
+TEST(KnowledgeBaseTest, RemoveAllDocuments) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  (void)kb.ingest_text("d1", "Apple content.");
+  (void)kb.ingest_text("d2", "Banana content.");
+
+  EXPECT_TRUE(kb.remove_document("d1"));
+  EXPECT_TRUE(kb.remove_document("d2"));
+  EXPECT_EQ(kb.document_count(), 0u);
+  EXPECT_EQ(kb.chunk_count(), 0u);
+
+  auto results = kb.search("apple", 5);
+  EXPECT_TRUE(results.empty());
+}
+
+// Test search with graph_hops=0 does not add graph context even if graph attached
+TEST(KnowledgeBaseTest, SearchWithGraphHopsZero) {
+  fs::path graph_dir = "/tmp/agentos_kb_graph_hops0_test";
+  fs::remove_all(graph_dir);
+
+  {
+    graph_engine::builder::GraphBuilder builder(graph_dir);
+    builder.add_edge("Apple", "Tim_Cook", "ceo_of");
+    ASSERT_TRUE(builder.build());
+  }
+
+  auto graph =
+      std::make_shared<graph_engine::core::ImmutableGraph>(graph_dir);
+  ASSERT_TRUE(graph->load());
+
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+  kb.attach_graph(graph);
+
+  (void)kb.ingest_text("n1", "Apple announced new iPhone today.");
+  auto results = kb.search("Apple iPhone", 2, /*graph_hops=*/0);
+  ASSERT_FALSE(results.empty());
+  EXPECT_TRUE(results[0].graph_context.empty()); // hops=0 means no graph expansion
+
+  fs::remove_all(graph_dir);
+}
+
+// Test single very long sentence that exceeds chunk_size (super-long sentence edge case)
+TEST(KnowledgeBaseTest, SingleLongSentenceChunk) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+  kb.set_chunk_params(20, 5);
+
+  // One sentence with no sentence boundaries, longer than chunk_size
+  std::string long_sentence(200, 'a');
+  auto result = kb.ingest_text("long_sent", long_sentence);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_GE(*result, 1u);
+}
+
+// ── Coverage boost: legacy binary format load ──────────────────
+TEST(KnowledgeBaseTest, LoadFromLegacyBin) {
+  fs::path kb_dir = "/tmp/agentos_kb_legacy_test";
+  fs::remove_all(kb_dir);
+  fs::create_directories(kb_dir);
+
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+
+  // Step 1: Save using DuckDB format, then also create a legacy binary
+  {
+    KnowledgeBase kb(mock_llm, 1536);
+    (void)kb.ingest_text("legacy_doc", "Apple is a great company.");
+    ASSERT_TRUE(kb.save(kb_dir));
+  }
+
+  // Step 2: Remove the DuckDB file but keep BM25 — then create a legacy .bin
+  fs::remove(kb_dir / "kb_meta.duckdb");
+  fs::remove(kb_dir / "kb_meta.duckdb.wal");
+  {
+    // Write a valid legacy binary file
+    std::ofstream ofs(kb_dir / "kb_meta.bin", std::ios::binary);
+    uint32_t magic = 0x4B424D54;
+    ofs.write(reinterpret_cast<const char *>(&magic), 4);
+
+    uint32_t dim = 1536;
+    ofs.write(reinterpret_cast<const char *>(&dim), sizeof(dim));
+
+    size_t max_chunks = 100000;
+    ofs.write(reinterpret_cast<const char *>(&max_chunks), sizeof(max_chunks));
+
+    // embedding_model string
+    auto write_str = [&](const std::string &s) {
+      uint32_t len = static_cast<uint32_t>(s.size());
+      ofs.write(reinterpret_cast<const char *>(&len), 4);
+      ofs.write(s.data(), len);
+    };
+    write_str("text-embedding-3-small");
+
+    // n_chunks = 1
+    uint32_t n_chunks = 1;
+    ofs.write(reinterpret_cast<const char *>(&n_chunks), 4);
+    write_str("legacy_doc_chunk_0");
+    write_str("Apple is a great company.");
+
+    // n_docs = 1
+    uint32_t n_docs = 1;
+    ofs.write(reinterpret_cast<const char *>(&n_docs), 4);
+    write_str("legacy_doc_chunk_0");
+    write_str("legacy_doc");
+
+    // next_hnsw_id
+    hnswlib::labeltype next_id = 0;
+    ofs.write(reinterpret_cast<const char *>(&next_id), sizeof(next_id));
+
+    // n_hnsw = 0
+    uint32_t n_hnsw = 0;
+    ofs.write(reinterpret_cast<const char *>(&n_hnsw), 4);
+  }
+
+  // Step 3: Load from legacy format
+  {
+    KnowledgeBase kb2(mock_llm, 1536);
+    ASSERT_TRUE(kb2.load(kb_dir));
+    EXPECT_GE(kb2.chunk_count(), 1u);
+    EXPECT_GE(kb2.document_count(), 1u);
+  }
+
+  fs::remove_all(kb_dir);
+}
+
+// Test loading legacy bin with bad magic returns false
+TEST(KnowledgeBaseTest, LoadLegacyBinBadMagic) {
+  fs::path kb_dir = "/tmp/agentos_kb_legacy_bad_magic";
+  fs::remove_all(kb_dir);
+  fs::create_directories(kb_dir);
+
+  // Write BM25 index (empty)
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  {
+    KnowledgeBase kb(mock_llm, 1536);
+    ASSERT_TRUE(kb.save(kb_dir));
+  }
+  // Remove DuckDB, write bad magic legacy bin
+  fs::remove(kb_dir / "kb_meta.duckdb");
+  fs::remove(kb_dir / "kb_meta.duckdb.wal");
+  {
+    std::ofstream ofs(kb_dir / "kb_meta.bin", std::ios::binary);
+    uint32_t bad_magic = 0xDEADBEEF;
+    ofs.write(reinterpret_cast<const char *>(&bad_magic), 4);
+  }
+
+  {
+    KnowledgeBase kb2(mock_llm, 1536);
+    EXPECT_FALSE(kb2.load(kb_dir));
+  }
+
+  fs::remove_all(kb_dir);
+}
+
+// Test UTF-8 multi-byte character handling in split_sentences
+TEST(KnowledgeBaseTest, UTF8MultiByteSplitting) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+  kb.set_chunk_params(30, 5);
+
+  // 4-byte UTF-8 characters (emoji: U+1F600 = \xF0\x9F\x98\x80)
+  std::string text_with_emoji = "Apple is great\xF0\x9F\x98\x80. Banana is good. Cherry!";
+  auto result = kb.ingest_text("emoji_doc", text_with_emoji);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_GE(*result, 1u);
+
+  // 2-byte UTF-8 characters (e.g., U+00E9 = \xC3\xA9 = e-acute)
+  std::string text_with_accents = "Caf\xC3\xA9 is nice. R\xC3\xA9sum\xC3\xA9 is ready.";
+  auto result2 = kb.ingest_text("accent_doc", text_with_accents);
+  ASSERT_TRUE(result2.has_value());
+  EXPECT_GE(*result2, 1u);
+
+  // Truncated UTF-8 sequence at end of string (clen=1 fallback)
+  std::string truncated = "Apple test\xC3"; // 2-byte start but only 1 byte
+  auto result3 = kb.ingest_text("trunc_doc", truncated);
+  ASSERT_TRUE(result3.has_value());
+}
+
+// Test RRF fusion skips deleted chunks
+TEST(KnowledgeBaseTest, RRFFusionSkipsDeletedChunks) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  (void)kb.ingest_text("doc_a", "Apple product announcement today.");
+  (void)kb.ingest_text("doc_b", "Banana smoothie recipe.");
+
+  // Remove doc_a, then search — RRF should skip deleted chunks from BM25
+  EXPECT_TRUE(kb.remove_document("doc_a"));
+
+  auto results = kb.search("Apple product", 5);
+  for (const auto &r : results) {
+    EXPECT_NE(r.doc_id, "doc_a");
+  }
+}
+
+// Test GraphRAG with entity not found in graph (empty triples)
+TEST(KnowledgeBaseTest, GraphRAGEntityNotInGraph) {
+  fs::path graph_dir = "/tmp/agentos_kb_graph_notfound_test";
+  fs::remove_all(graph_dir);
+
+  {
+    graph_engine::builder::GraphBuilder builder(graph_dir);
+    builder.add_edge("Apple", "Tim_Cook", "ceo_of");
+    ASSERT_TRUE(builder.build());
+  }
+
+  auto graph =
+      std::make_shared<graph_engine::core::ImmutableGraph>(graph_dir);
+  ASSERT_TRUE(graph->load());
+
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+  kb.attach_graph(graph);
+
+  // Ingest text with entity "Google" which is NOT in the graph
+  (void)kb.ingest_text("n1", "Google launched a new product today.");
+
+  auto results = kb.search("Google product", 2, /*graph_hops=*/1);
+  // Should still get results, but graph_context may be empty (entity not in graph)
+  // This exercises the "matched_entities.empty()" and "sub.triples.empty()" paths
+  ASSERT_FALSE(results.empty());
+
+  fs::remove_all(graph_dir);
+}
+
+// Test GraphRAG with no graph attached but hops > 0 (should be no-op)
+TEST(KnowledgeBaseTest, GraphRAGNoGraphAttached) {
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+  KnowledgeBase kb(mock_llm, 1536);
+
+  (void)kb.ingest_text("n1", "Apple product launch today.");
+  auto results = kb.search("Apple", 2, /*graph_hops=*/2);
+  ASSERT_FALSE(results.empty());
+  // No graph attached, so graph_context should be empty
+  EXPECT_TRUE(results[0].graph_context.empty());
+}
+
+// Test search with HNSW unavailable (BM25-only fallback)
+// This is tested implicitly since MockEmbeddingBackend always returns embeddings,
+// but we can test by searching after save/load without HNSW file
+TEST(KnowledgeBaseTest, SearchBM25FallbackNoHNSW) {
+  fs::path kb_dir = "/tmp/agentos_kb_bm25only_test";
+  fs::remove_all(kb_dir);
+
+  auto mock_llm = std::make_shared<MockEmbeddingBackend>();
+
+  {
+    KnowledgeBase kb(mock_llm, 1536);
+    (void)kb.ingest_text("d1", "Apple is a technology company.");
+    (void)kb.ingest_text("d2", "Banana is a tropical fruit.");
+    ASSERT_TRUE(kb.save(kb_dir));
+  }
+
+  // Remove HNSW file so load will use BM25-only
+  fs::remove(kb_dir / "hnsw_index.bin");
+
+  {
+    KnowledgeBase kb2(mock_llm, 1536);
+    ASSERT_TRUE(kb2.load(kb_dir));
+    auto results = kb2.search("Apple technology", 2);
+    ASSERT_FALSE(results.empty());
+    EXPECT_EQ(results[0].doc_id, "d1");
+  }
+
+  fs::remove_all(kb_dir);
+}
