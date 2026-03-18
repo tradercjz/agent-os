@@ -253,6 +253,7 @@ set(TEST_SOURCES
   tests/test_tool_learner.cpp
   tests/test_memory_coverage.cpp
   tests/test_coverage_boost.cpp
+  tests/test_supervisor.cpp
 )
 if(NOT AGENTOS_NO_DUCKDB)
   list(APPEND TEST_SOURCES tests/test_duckdb_store.cpp)

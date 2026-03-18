@@ -17,6 +17,7 @@
 
 // ── Core modules ────────────────────────────────────────────
 #include <agentos/agent.hpp>
+#include <agentos/supervisor_agent.hpp>
 #include <agentos/knowledge/knowledge_base.hpp>
 
 // ── Version info ────────────────────────────────────────────
