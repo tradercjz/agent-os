@@ -1,0 +1,61 @@
+// ============================================================
+// 场景六：跨会话对话 — 保存和恢复 Agent 状态
+// ============================================================
+// 适合：需要长期记忆的场景（研报写作、持续跟踪）
+// 核心：save() 保存 → 重启 DolphinDB → resume() 恢复
+
+loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
+agentOS::init('{"api_key":"sk-xxx","model":"deepseek-chat"}')
+
+// ────────────────────────────────────
+// 第一天：创建 Agent，开始研究
+// ────────────────────────────────────
+
+analyst = agentOS::createAgent(
+    name = "report-writer",
+    prompt = "你是一个金融研报撰写员。用户会分多次给你信息，你需要记住所有内容，最终整理成完整研报。",
+    contextLimit = 16384
+)
+
+// 第一轮：基本面
+agentOS::ask(analyst, "我们要写一份关于新能源汽车行业的研报。先记录下宏观环境：2026年全球电动车渗透率预计达到35%，中国市场领先全球。")
+
+// 第二轮：竞争格局
+agentOS::ask(analyst, "补充竞争格局：比亚迪市占率第一，特斯拉第二，理想第三。传统车企加速转型。")
+
+// 第三轮：政策面
+agentOS::ask(analyst, "政策方面：国补退坡但地方补贴延续，碳积分交易持续推进，充电桩纳入新基建。")
+
+// 保存会话
+sid = agentOS::save(analyst, metadata="新能源研报-进行中")
+print("会话ID: " + sid)
+// 把这个 sid 记下来，明天用
+
+agentOS::destroy(analyst)
+
+// ────────────────────────────────────
+// 第二天：恢复会话，继续写作
+// ────────────────────────────────────
+
+// 查看所有保存的会话
+sessions = agentOS::sessions()
+select * from sessions
+// sessionId        | agentName     | messageCount
+// 1_155957921_0    | report-writer | 8
+
+// 恢复（用第一天保存的 sid）
+analyst2 = agentOS::resume(sid)
+
+// Agent 记得之前所有内容
+agentOS::ask(analyst2, "补充技术路线：磷酸铁锂占主流，固态电池2027年量产。智能驾驶L3级开始商用。")
+
+// 让 agent 整理研报
+report = agentOS::ask(analyst2, "根据前面所有信息，写一份完整的研报，包括：摘要、宏观环境、竞争格局、政策分析、技术路线、投资建议。")
+print(report)
+
+// 再次保存（更新版本）
+sid2 = agentOS::save(analyst2, metadata="新能源研报-初稿完成")
+print("更新会话: " + sid2)
+
+agentOS::destroy(analyst2)
+agentOS::close()

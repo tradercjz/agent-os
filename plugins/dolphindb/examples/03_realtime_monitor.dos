@@ -1,0 +1,102 @@
+// ============================================================
+// 场景三：实时监控告警 Agent — 流计算 + AI 分析
+// ============================================================
+// 适合：运维/风控场景，DolphinDB 流计算触发 Agent 分析告警
+// 核心：流计算引擎检测异常 → Agent 分析原因 → 生成报告
+
+loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
+agentOS::init('{"api_key":"sk-xxx","model":"deepseek-chat"}')
+
+// ────────────────────────────────────
+// 注册数据查询工具
+// ────────────────────────────────────
+
+def queryRecentTrades(paramsJson) {
+    params = parseExpr(paramsJson).eval()
+    ticker = params["ticker"]
+    minutes = int(params["minutes"])
+    cutoff = now() - minutes * 60 * 1000
+    result = select timestamp, price, volume, side
+             from loadTable("dfs://market", "trades")
+             where symbol = ticker, timestamp > cutoff
+             order by timestamp desc
+             limit 100
+    return result.toStdJson()
+}
+
+def queryOrderBook(paramsJson) {
+    params = parseExpr(paramsJson).eval()
+    ticker = params["ticker"]
+    result = select * from loadTable("dfs://market", "orderbook")
+             where symbol = ticker
+             order by timestamp desc limit 1
+    return result.toStdJson()
+}
+
+agentOS::registerTool(
+    '{"id":"recent_trades","description":"查询最近N分钟的成交记录","params":[{"name":"ticker","type":"string","description":"股票代码"},{"name":"minutes","type":"integer","description":"最近几分钟"}]}',
+    "queryRecentTrades"
+)
+
+agentOS::registerTool(
+    '{"id":"order_book","description":"查询最新盘口数据","params":[{"name":"ticker","type":"string","description":"股票代码"}]}',
+    "queryOrderBook"
+)
+
+// ────────────────────────────────────
+// 创建监控 Agent
+// ────────────────────────────────────
+
+monitor = agentOS::createAgent(
+    name = "risk-monitor",
+    prompt = "你是实时风控监控员。当收到异常告警时，查询最近交易数据和盘口，分析异常原因，评估风险等级（低/中/高/紧急），给出处置建议。格式：\n1. 异常概述\n2. 数据分析\n3. 风险等级\n4. 处置建议",
+    tools = ["recent_trades", "order_book"],
+    contextLimit = 8192
+)
+
+// ────────────────────────────────────
+// 模拟告警处理（实际场景由流计算引擎触发）
+// ────────────────────────────────────
+
+// 告警 1：价格异常波动
+alert1 = "【告警】600519.SH 1分钟内价格下跌超过 2%，当前价 1680.5，跌幅 2.3%"
+result1 = agentOS::run(monitor, alert1, timeout=30000)
+if (result1["success"]) {
+    print("=== 告警分析报告 ===")
+    print(result1["output"])
+    print("耗时: " + string(result1["durationMs"]) + "ms")
+}
+
+// 告警 2：成交量异常
+alert2 = "【告警】002594.SZ 最近5分钟成交量突增300%，远超历史均值"
+result2 = agentOS::run(monitor, alert2, timeout=30000)
+if (result2["success"]) {
+    print("=== 告警分析报告 ===")
+    print(result2["output"])
+}
+
+// ────────────────────────────────────
+// 实际集成：流计算引擎回调
+// ────────────────────────────────────
+
+// 定义告警处理函数，由 DolphinDB 流计算引擎调用
+def handleAlert(msg) {
+    ticker = msg.symbol
+    alertType = msg.alertType
+    alertMsg = "【" + alertType + "】" + ticker + " " + msg.description
+
+    // Agent 分析（同步，带超时）
+    result = agentOS::run(monitor, alertMsg, timeout=15000)
+
+    if (result["success"]) {
+        // 将分析结果写入告警表
+        insert into alertResults
+            values(now(), ticker, alertType, result["output"], result["durationMs"])
+    }
+}
+
+// 订阅告警流表（示例，需要预先创建流表）
+// subscribeTable(, "alertStream", "agentHandler", 0, handleAlert, msgAsTable=false)
+
+agentOS::destroy(monitor)
+agentOS::close()

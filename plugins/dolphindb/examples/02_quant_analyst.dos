@@ -1,0 +1,111 @@
+// ============================================================
+// 场景二：量化研究助手 — Agent 调用 DolphinDB 数据分析
+// ============================================================
+// 适合：量化研究员，需要 agent 自动查询行情、分析趋势
+// 核心：将 DolphinDB 查询函数注册为 Agent 工具
+
+loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
+agentOS::init('{"api_key":"sk-xxx","base_url":"https://api.siliconflow.cn/v1","model":"deepseek-chat"}')
+
+// ────────────────────────────────────
+// 第一步：定义数据查询工具
+// ────────────────────────────────────
+
+// 工具 1：查询最新价格
+def queryLatestPrice(paramsJson) {
+    params = parseExpr(paramsJson).eval()
+    ticker = params["ticker"]
+    result = exec last(price) as price, last(timestamp) as time
+             from loadTable("dfs://market", "trades")
+             where symbol = ticker
+    return result.toStdJson()
+}
+
+// 工具 2：查询 K 线数据
+def queryKLine(paramsJson) {
+    params = parseExpr(paramsJson).eval()
+    ticker = params["ticker"]
+    days = int(params["days"])
+    result = select date, open, high, low, close, volume
+             from loadTable("dfs://market", "kline")
+             where symbol = ticker, date > today() - days
+             order by date
+    return result.toStdJson()
+}
+
+// 工具 3：计算技术指标
+def calcIndicators(paramsJson) {
+    params = parseExpr(paramsJson).eval()
+    ticker = params["ticker"]
+    t = select date, close from loadTable("dfs://market", "kline")
+        where symbol = ticker, date > today() - 60
+        order by date
+    ma5 = mavg(t.close, 5)
+    ma20 = mavg(t.close, 20)
+    lastMa5 = last(ma5)
+    lastMa20 = last(ma20)
+    signal = iif(lastMa5 > lastMa20, "金叉（看多）", "死叉（看空）")
+    return '{"ma5":' + string(lastMa5) + ',"ma20":' + string(lastMa20) + ',"signal":"' + signal + '"}'
+}
+
+// ────────────────────────────────────
+// 第二步：注册工具
+// ────────────────────────────────────
+
+agentOS::registerTool(
+    '{"id":"query_price","description":"查询某只股票的最新价格","params":[{"name":"ticker","type":"string","description":"股票代码，如 600519"}]}',
+    "queryLatestPrice"
+)
+
+agentOS::registerTool(
+    '{"id":"query_kline","description":"查询某只股票的K线数据","params":[{"name":"ticker","type":"string","description":"股票代码"},{"name":"days","type":"integer","description":"查询最近多少天"}]}',
+    "queryKLine"
+)
+
+agentOS::registerTool(
+    '{"id":"calc_indicators","description":"计算股票技术指标(MA5/MA20/金叉死叉)","params":[{"name":"ticker","type":"string","description":"股票代码"}]}',
+    "calcIndicators"
+)
+
+// ────────────────────────────────────
+// 第三步：注册技能包
+// ────────────────────────────────────
+
+agentOS::registerSkill("行情分析",
+    ["股票", "行情", "K线", "价格", "涨跌", "茅台", "比亚迪"],
+    prompt="你是量化分析师，可以通过 query_price 查实时价格、query_kline 查K线、calc_indicators 算技术指标。分析时先查数据再给结论。",
+    tools=["query_price", "query_kline", "calc_indicators"])
+
+// ────────────────────────────────────
+// 第四步：创建 Agent 并使用
+// ────────────────────────────────────
+
+analyst = agentOS::createAgent(
+    name = "quant-analyst",
+    prompt = "你是一位资深量化研究员。分析股票时，先用工具查询数据，再基于数据给出专业判断。用中文回答，数据用表格展示。",
+    skills = ["行情分析"],
+    blockTools = ["shell"],       // 禁止执行 shell 命令
+    contextLimit = 16384
+)
+
+// 分析
+print(agentOS::ask(analyst, "帮我看下贵州茅台（600519）的最新价格"))
+print(agentOS::ask(analyst, "最近30天的K线走势如何？"))
+print(agentOS::ask(analyst, "技术指标给出什么信号？是否建议买入？"))
+
+// 对比分析（agent 记住了上文）
+print(agentOS::ask(analyst, "再帮我查下比亚迪（002594）的情况，跟茅台对比一下"))
+
+// ────────────────────────────────────
+// 第五步：保存会话，明天继续
+// ────────────────────────────────────
+
+sid = agentOS::save(analyst)
+print("会话已保存: " + sid)
+
+// ... 第二天 ...
+// analyst = agentOS::resume(sid)
+// print(agentOS::ask(analyst, "昨天的技术信号今天验证了吗？"))
+
+agentOS::destroy(analyst)
+agentOS::close()

@@ -1,0 +1,126 @@
+// ============================================================
+// 场景五：多 Agent 协作工作流
+// ============================================================
+// 适合：复杂业务流程，多个专业 Agent 分工协作
+// 核心：不同 Agent 各司其职，通过 DolphinDB 脚本编排
+
+loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
+agentOS::init('{"api_key":"sk-xxx","model":"deepseek-chat"}')
+
+// ────────────────────────────────────
+// 注册业务工具
+// ────────────────────────────────────
+
+def queryPortfolio(paramsJson) {
+    // 查询持仓
+    result = select symbol, shares, avgCost, marketValue
+             from loadTable("dfs://portfolio", "positions")
+             where accountId = "ACC001"
+    return result.toStdJson()
+}
+
+def queryMarketData(paramsJson) {
+    params = parseExpr(paramsJson).eval()
+    symbols = params["symbols"]
+    result = select symbol, last(price) as price, last(change_pct) as changePct
+             from loadTable("dfs://market", "snapshot")
+             where symbol in symbols
+    return result.toStdJson()
+}
+
+def executeOrder(paramsJson) {
+    params = parseExpr(paramsJson).eval()
+    // 模拟下单（实际对接交易系统）
+    return '{"orderId":"ORD' + string(rand(10000, 1)[0]) + '","status":"submitted","symbol":"' + params["symbol"] + '","side":"' + params["side"] + '","qty":' + string(params["qty"]) + '}'
+}
+
+agentOS::registerTool(
+    '{"id":"query_portfolio","description":"查询当前持仓"}',
+    "queryPortfolio")
+
+agentOS::registerTool(
+    '{"id":"query_market","description":"查询股票实时行情","params":[{"name":"symbols","type":"array","description":"股票代码列表"}]}',
+    "queryMarketData")
+
+agentOS::registerTool(
+    '{"id":"execute_order","description":"提交交易委托","params":[{"name":"symbol","type":"string","description":"股票代码"},{"name":"side","type":"string","description":"buy或sell"},{"name":"qty","type":"integer","description":"数量"}]}',
+    "executeOrder")
+
+// ────────────────────────────────────
+// 创建专业 Agent 团队
+// ────────────────────────────────────
+
+// Agent 1：研究员 — 负责市场分析
+researcher = agentOS::createAgent(
+    name = "researcher",
+    prompt = "你是资深量化研究员。分析市场行情，给出看多/看空/中性的判断和理由。只做分析，不做交易决策。",
+    tools = ["query_market"],
+    contextLimit = 8192
+)
+
+// Agent 2：风控员 — 负责风险评估
+risk_mgr = agentOS::createAgent(
+    name = "risk-manager",
+    prompt = "你是风控经理。评估交易建议的风险，检查持仓集中度、回撤风险。输出：风险等级（低/中/高）和约束条件。",
+    tools = ["query_portfolio", "query_market"],
+    contextLimit = 8192
+)
+
+// Agent 3：交易员 — 负责执行（受限工具）
+trader = agentOS::createAgent(
+    name = "trader",
+    prompt = "你是交易执行员。根据研究建议和风控约束，决定具体的交易参数（品种、方向、数量），执行下单。",
+    tools = ["execute_order", "query_portfolio"],
+    blockTools = ["shell"],     // 禁止 shell
+    contextLimit = 8192
+)
+
+// ────────────────────────────────────
+// 工作流编排
+// ────────────────────────────────────
+
+// 步骤 1：研究员分析
+print(">>> 步骤 1: 研究员分析市场 <<<")
+analysis = agentOS::run(researcher,
+    "分析以下股票的近期走势和投资机会：600519（茅台）、002594（比亚迪）、000858（五粮液）",
+    timeout = 30000)
+
+if (!analysis["success"]) {
+    print("研究分析失败: " + analysis["error"])
+    goto cleanup
+}
+print(analysis["output"])
+
+// 步骤 2：风控评估
+print(">>> 步骤 2: 风控评估 <<<")
+riskAssessment = agentOS::run(risk_mgr,
+    "研究员的分析如下：\n" + analysis["output"] + "\n\n请评估风险，给出仓位约束。",
+    timeout = 30000)
+
+if (!riskAssessment["success"]) {
+    print("风控评估失败: " + riskAssessment["error"])
+    goto cleanup
+}
+print(riskAssessment["output"])
+
+// 步骤 3：交易执行
+print(">>> 步骤 3: 交易执行 <<<")
+execution = agentOS::run(trader,
+    "研究建议：\n" + analysis["output"] +
+    "\n\n风控约束：\n" + riskAssessment["output"] +
+    "\n\n请根据以上信息执行交易。",
+    timeout = 30000)
+
+print(execution["output"])
+print("总耗时: " + string(analysis["durationMs"] + riskAssessment["durationMs"] + execution["durationMs"]) + "ms")
+print("总 token: " + string(analysis["tokensUsed"] + riskAssessment["tokensUsed"] + execution["tokensUsed"]))
+
+// ────────────────────────────────────
+// 清理
+// ────────────────────────────────────
+
+cleanup:
+agentOS::destroy(researcher)
+agentOS::destroy(risk_mgr)
+agentOS::destroy(trader)
+agentOS::close()

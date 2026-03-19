@@ -1,0 +1,30 @@
+// ============================================================
+// 场景一：快速上手 — 5 分钟创建你的第一个 Agent
+// ============================================================
+// 适合：初次接触 AgentOS 的 DolphinDB 用户
+// 前提：插件已部署到 plugins/AgentOS/
+
+// 1. 加载插件
+loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
+
+// 2. 初始化（Mock 模式，无需 API Key）
+agentOS::init()
+
+// 3. 创建 Agent — 一行搞定
+agent = agentOS::createAgent("my-first-agent")
+
+// 4. 对话
+print(agentOS::ask(agent, "你好！你是谁？"))
+print(agentOS::ask(agent, "DolphinDB 是什么？"))
+
+// 5. 多轮对话 — 同一个 agent 自动保持上下文
+print(agentOS::ask(agent, "它有什么特点？"))       // agent 记得"它"指 DolphinDB
+print(agentOS::ask(agent, "跟 MySQL 比有什么优势？"))
+
+// 6. 查看 agent 状态
+agentOS::info(agent)
+// → dict: {name: "my-first-agent", messageCount: 8, isolation: "thread", ...}
+
+// 7. 清理
+agentOS::destroy(agent)
+agentOS::close()

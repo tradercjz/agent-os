@@ -1,0 +1,103 @@
+// ============================================================
+// 场景四：企业知识库 — RAG 智能问答
+// ============================================================
+// 适合：内部知识管理，让 Agent 基于文档回答问题
+// 核心：灌入文档 → 自动分块+向量化 → 检索增强生成
+
+loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
+agentOS::init('{"api_key":"sk-xxx","model":"deepseek-chat"}')
+
+// ────────────────────────────────────
+// 第一步：创建知识库
+// ────────────────────────────────────
+
+kb = agentOS::createKB('{"chunk_size":500,"chunk_overlap":50}')
+
+// ────────────────────────────────────
+// 第二步：灌入知识
+// ────────────────────────────────────
+
+// 方式 A：逐条灌入文本
+agentOS::ingest(kb, "ddb_intro",
+    "DolphinDB 是一款高性能分布式时序数据库。" +
+    "支持流计算、内存计算和分布式计算。" +
+    "广泛应用于金融量化、物联网和工业互联网场景。" +
+    "采用列式存储，查询性能极高。")
+
+agentOS::ingest(kb, "ddb_sql",
+    "DolphinDB 使用类 SQL 语法进行数据查询。" +
+    "支持 select、exec、pivot by、context by 等丰富的查询子句。" +
+    "还支持向量化计算和窗口函数。" +
+    "与标准 SQL 相比，增加了 context by 用于面板数据处理。")
+
+agentOS::ingest(kb, "ddb_stream",
+    "DolphinDB 流计算引擎支持实时数据处理。" +
+    "提供时间序列聚合引擎、横截面引擎、异常检测引擎等内置引擎。" +
+    "可用于实时行情处理、实时风控和实时指标计算。" +
+    "支持多级流水线处理和自动状态管理。")
+
+agentOS::ingest(kb, "ddb_api",
+    "DolphinDB 提供 Python API、Java API、C++ API 等多语言接口。" +
+    "Python 用户可以通过 dolphindb 包连接数据库。" +
+    "支持连接池、异步请求和流订阅。")
+
+// 方式 B：批量灌入目录下的文件
+// agentOS::ingestDir(kb, "/data/company_docs/")
+
+// 查看知识库状态
+print(agentOS::kbInfo(kb))
+// → {chunk_count: 8, doc_count: 4, ...}
+
+// ────────────────────────────────────
+// 第三步：检索测试
+// ────────────────────────────────────
+
+results = agentOS::search(kb, "DolphinDB 有哪些编程接口？", 3)
+select * from results
+// 展示最相关的文档片段
+
+// ────────────────────────────────────
+// 第四步：RAG 问答
+// ────────────────────────────────────
+
+// 简单问答 — agent 自动检索知识库，拼接上下文后回答
+print(agentOS::askWithKB(kb, "DolphinDB 有哪些流计算引擎？"))
+
+// 深入问答 — 带自定义 prompt
+print(agentOS::askWithKB(kb,
+    "如何用 DolphinDB 搭建一个实时风控系统？请给出架构设计和关键步骤。",
+    5,    // topK: 检索 5 个最相关片段
+    "你是一个 DolphinDB 技术顾问，基于知识库内容回答，如果知识库没有相关信息要如实说明。"))
+
+// 对比性问题
+print(agentOS::askWithKB(kb, "DolphinDB 的 SQL 语法跟标准 SQL 有什么区别？"))
+
+// ────────────────────────────────────
+// 第五步：知识库持久化
+// ────────────────────────────────────
+
+// 保存到磁盘
+agentOS::saveKB(kb, "/data/agentos_kb/ddb_docs/")
+
+// 后续可以直接加载（无需重新灌入）
+// kb2 = agentOS::createKB()
+// agentOS::loadKB(kb2, "/data/agentos_kb/ddb_docs/")
+
+// ────────────────────────────────────
+// 第六步：知识库 + Agent 结合
+// ────────────────────────────────────
+
+// 创建一个绑定知识库的 agent，同时具有数据查询能力
+agent = agentOS::createAgent(
+    name = "ddb-expert",
+    prompt = "你是 DolphinDB 技术专家。回答问题时，优先参考知识库内容，用中文回答。"
+)
+
+// Agent 既能查知识库，也能做多轮对话
+print(agentOS::ask(agent, "DolphinDB 的流计算有什么特点？"))
+print(agentOS::ask(agent, "给我写个流计算的示例代码"))
+print(agentOS::ask(agent, "这段代码怎么部署到生产环境？"))
+
+agentOS::destroy(agent)
+agentOS::destroyKB(kb)
+agentOS::close()
