@@ -5,7 +5,7 @@
 // 核心：灌入文档 → 自动分块+向量化 → 检索增强生成
 
 loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
-agentOS::init("sk-xxx", model="deepseek-chat")
+agentOS::init("sk-xxx", "", "deepseek-chat")
 
 // ────────────────────────────────────
 // 第一步：创建知识库

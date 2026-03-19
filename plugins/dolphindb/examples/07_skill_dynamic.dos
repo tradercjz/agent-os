@@ -6,7 +6,7 @@
 //       运行时 activateSkill/deactivateSkill 动态切换
 
 loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
-agentOS::init("sk-xxx", model="deepseek-chat")
+agentOS::init("sk-xxx", "", "deepseek-chat")
 
 // ────────────────────────────────────
 // 注册工具
@@ -71,11 +71,6 @@ assistant = agentOS::createAgent(
 // ────────────────────────────────────
 
 print("=== 场景 A: 数据查询 ===")
-
-// 检查匹配
-matches = agentOS::matchSkills("帮我查下最近一周的交易量统计")
-select * from matches
-// → name: "数据查询", hitCount: 2
 
 // 激活
 agentOS::activateSkill(assistant, "数据查询")

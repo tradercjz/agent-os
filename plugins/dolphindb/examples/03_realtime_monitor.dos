@@ -5,7 +5,7 @@
 // 核心：流计算引擎检测异常 → Agent 分析原因 → 生成报告
 
 loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
-agentOS::init("sk-xxx", model="deepseek-chat")
+agentOS::init("sk-xxx", "", "deepseek-chat")
 
 // ────────────────────────────────────
 // 注册数据查询工具

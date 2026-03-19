@@ -5,7 +5,7 @@
 // 核心：不同 Agent 各司其职，通过 DolphinDB 脚本编排
 
 loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
-agentOS::init("sk-xxx", model="deepseek-chat")
+agentOS::init("sk-xxx", "", "deepseek-chat")
 
 // ────────────────────────────────────
 // 注册业务工具
