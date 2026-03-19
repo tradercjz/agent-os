@@ -196,7 +196,8 @@ TableSP search_results_to_table(
     vector<ConstantSP> cols{colContent, colScore, colSource, colCreatedAt};
     INDEX insertedRows;
     string errMsg;
-    table->append(cols, insertedRows, errMsg);
+    if (!table->append(cols, insertedRows, errMsg))
+        throw RuntimeException("search_results_to_table: append failed: " + errMsg);
 
     return table;
 }
@@ -551,7 +552,8 @@ ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args) {
     vector<ConstantSP> cols{cRole, cContent, cToolName, cToolArgs, cToolResult};
     INDEX insertedRows;
     string errMsg;
-    table->append(cols, insertedRows, errMsg);
+    if (!table->append(cols, insertedRows, errMsg))
+        throw RuntimeException("agentOS::askTable: append failed: " + errMsg);
 
     return table;
     DDB_SAFE_END("agentOS::askTable")
@@ -807,7 +809,8 @@ ConstantSP agentOSGraphQuery(Heap* heap, vector<ConstantSP>& args) {
     vector<ConstantSP> cols{cSrc, cRel, cTgt, cWeight};
     INDEX insertedRows;
     string errMsg;
-    table->append(cols, insertedRows, errMsg);
+    if (!table->append(cols, insertedRows, errMsg))
+        throw RuntimeException("agentOS::graphQuery: append failed: " + errMsg);
 
     return table;
     DDB_SAFE_END("agentOS::graphQuery")
@@ -1915,6 +1918,8 @@ ConstantSP agentOSSave(Heap* heap, vector<ConstantSP>& args) {
     std::string filename = path.filename().string();
     // Remove "session_" prefix and ".bin" suffix
     std::string prefix = "session_" + std::to_string(agent->id()) + "_";
+    if (filename.size() <= prefix.size() + 4)
+        throw RuntimeException("agentOS::save: unexpected session filename: " + filename);
     std::string sid = filename.substr(prefix.size(), filename.size() - prefix.size() - 4);
 
     return new String(sid);
@@ -2205,6 +2210,7 @@ ConstantSP agentOSSessions(Heap* heap, vector<ConstantSP>& args) {
             if (!fname.starts_with("session_") || !fname.ends_with(".bin")) continue;
 
             // Parse: session_{agentId}_{sessionId}.bin
+            if (fname.size() <= 12) continue;
             std::string body = fname.substr(8, fname.size() - 12); // remove "session_" and ".bin"
             auto first_us = body.find('_');
             if (first_us == std::string::npos) continue;
