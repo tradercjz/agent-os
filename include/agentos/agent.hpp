@@ -34,10 +34,15 @@ namespace agentos {
 /// Hook context passed to middleware callbacks
 struct HookContext {
   AgentId agent_id;
-  std::string operation;      // "think", "act", "remember", "recall"
+  std::string operation;      // "think", "act", "remember", "recall",
+                              // "pre_tool_use", "post_tool_use", "stop"
   std::string input;          // operation input (user msg, tool name, etc.)
+  Json args;                  // tool call arguments (for pre/post_tool_use)
   bool cancelled{false};      // set true in pre-hook to skip operation
   std::string cancel_reason;
+
+  // Post-hook result injection (only for post_tool_use)
+  tools::ToolResult* result{nullptr};  // mutable pointer to tool result
 };
 
 /// Middleware: pre/post callbacks around agent operations
@@ -506,7 +511,7 @@ AgentBase<Derived>::think(std::string user_msg, kernel::ILLMBackend::TokenCallba
   if (!os) return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
   if (user_msg.empty()) return make_error(ErrorCode::InvalidArgument, "think: user_msg must not be empty");
 
-  HookContext hook_ctx{this->id_, "think", user_msg, false, {}};
+  HookContext hook_ctx{this->id_, "think", user_msg, {}, false, {}, nullptr};
   if (!this->run_before_hooks(hook_ctx)) return make_error(ErrorCode::Cancelled, hook_ctx.cancel_reason);
 
   os->ctx().append(this->id_, kernel::Message::user(user_msg));
@@ -536,8 +541,16 @@ Result<tools::ToolResult>
 AgentBase<Derived>::act(const kernel::ToolCallRequest &call) {
   if (!this->os_) return make_error(ErrorCode::InvalidArgument, "Agent not attached to AgentOS");
 
-  HookContext act_ctx{this->id_, "act", call.name, false, {}};
+  HookContext act_ctx{this->id_, "act", call.name, {}, false, {}, nullptr};
   if (!this->run_before_hooks(act_ctx)) return make_error(ErrorCode::Cancelled, act_ctx.cancel_reason);
+
+  // Parse args for tool-level hooks
+  Json parsed_args;
+  try { parsed_args = Json::parse(call.args_json); } catch (...) { parsed_args = Json::object(); }
+
+  // Pre-tool-use hook: can cancel specific tool calls
+  HookContext pre_tool_ctx{this->id_, "pre_tool_use", call.name, parsed_args, false, {}, nullptr};
+  if (!this->run_before_hooks(pre_tool_ctx)) return make_error(ErrorCode::Cancelled, pre_tool_ctx.cancel_reason);
 
   if (this->os_->security()) {
     auto check = this->os_->security()->authorize_tool(this->id_, call.name, call.args_json);
@@ -564,6 +577,10 @@ AgentBase<Derived>::act(const kernel::ToolCallRequest &call) {
     learner.record_failure(record);
     learner.analyze_failure(record);
   }
+
+  // Post-tool-use hook: can mutate result
+  HookContext post_tool_ctx{this->id_, "post_tool_use", call.name, parsed_args, false, {}, &result};
+  this->run_after_hooks(post_tool_ctx);
 
   this->run_after_hooks(act_ctx);
   return result;
@@ -648,6 +665,12 @@ inline Result<std::string> ReActAgent::run(std::string user_input) {
     if (!resp) return make_unexpected(resp.error());
 
     if (!resp->wants_tool_call()) {
+      // Stop hook: middleware can force the agent to continue
+      HookContext stop_ctx{this->id_, "stop", resp->content, {}, false, {}, nullptr};
+      if (!this->run_before_hooks(stop_ctx)) {
+        // cancelled = true means "don't stop, keep going"
+        continue;
+      }
       (void)this->remember(fmt::format("Q: {} → A: {}", user_input, resp->content), 0.6f);
       return resp->content;
     }

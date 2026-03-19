@@ -275,6 +275,9 @@ set(TEST_SOURCES
   tests/test_agentos.cpp
   tests/test_dolphindb_adapter.cpp
   tests/test_worktree_manager.cpp
+  tests/test_hooks.cpp
+  tests/test_session.cpp
+  tests/test_skill_registry.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target

@@ -209,4 +209,186 @@ Result<void> ContextManager::restore(AgentId agent_id) {
   return {};
 }
 
+// ─────────────────────────────────────────────────────────────
+// SessionState
+// ─────────────────────────────────────────────────────────────
+
+std::vector<uint8_t> SessionState::serialize_binary() const {
+  std::vector<uint8_t> buf;
+  auto append_u32 = [&](uint32_t v) {
+    uint8_t b[4];
+    std::memcpy(b, &v, 4);
+    buf.insert(buf.end(), b, b + 4);
+  };
+  auto append_str = [&](const std::string &s) {
+    append_u32(static_cast<uint32_t>(s.size()));
+    buf.insert(buf.end(), s.begin(), s.end());
+  };
+
+  // Magic + version
+  buf.push_back('S'); buf.push_back('E'); buf.push_back('S'); buf.push_back('S');
+  append_u32(1); // version
+
+  append_u32(static_cast<uint32_t>(agent_id));
+  append_str(session_id);
+  append_u32(static_cast<uint32_t>(saved_at.time_since_epoch().count() / 1000000));
+
+  // Config JSON
+  append_str(config_json);
+
+  // Middleware names
+  append_u32(static_cast<uint32_t>(middleware_names.size()));
+  for (const auto& name : middleware_names) {
+    append_str(name);
+  }
+
+  // Embedded context snapshot
+  auto ctx_bin = context.serialize_binary();
+  append_u32(static_cast<uint32_t>(ctx_bin.size()));
+  buf.insert(buf.end(), ctx_bin.begin(), ctx_bin.end());
+
+  // Metadata
+  append_str(metadata_json);
+
+  return buf;
+}
+
+std::optional<SessionState> SessionState::deserialize_binary(std::span<const uint8_t> data) {
+  if (data.size() < 16) return std::nullopt;
+  if (data.size() > 50 * 1024 * 1024) return std::nullopt;
+
+  // Check magic
+  if (data[0] != 'S' || data[1] != 'E' || data[2] != 'S' || data[3] != 'S')
+    return std::nullopt;
+
+  size_t pos = 4;
+  auto read_u32 = [&]() -> uint32_t {
+    uint32_t v;
+    if (pos + 4 > data.size()) return 0;
+    std::memcpy(&v, &data[pos], 4);
+    pos += 4;
+    return v;
+  };
+  auto read_str = [&]() -> std::string {
+    uint32_t len = read_u32();
+    if (len > 10 * 1024 * 1024) return "";
+    if (pos + len > data.size()) return "";
+    std::string s(reinterpret_cast<const char*>(&data[pos]), len);
+    pos += len;
+    return s;
+  };
+
+  uint32_t version = read_u32();
+  if (version != 1) return std::nullopt;
+
+  SessionState state;
+  state.agent_id = read_u32();
+  state.session_id = read_str();
+  uint32_t ms = read_u32();
+  state.saved_at = TimePoint(Duration(ms));
+
+  state.config_json = read_str();
+
+  uint32_t mw_count = read_u32();
+  if (mw_count > 1000) return std::nullopt;
+  for (uint32_t i = 0; i < mw_count; ++i) {
+    state.middleware_names.push_back(read_str());
+  }
+
+  // Embedded context snapshot
+  uint32_t ctx_len = read_u32();
+  if (ctx_len > 50 * 1024 * 1024 || pos + ctx_len > data.size()) return std::nullopt;
+  std::span<const uint8_t> ctx_data(data.data() + pos, ctx_len);
+  auto ctx_snap = ContextSnapshot::deserialize_binary(ctx_data);
+  if (!ctx_snap) return std::nullopt;
+  state.context = std::move(*ctx_snap);
+  pos += ctx_len;
+
+  state.metadata_json = read_str();
+  return state;
+}
+
+// ─────────────────────────────────────────────────────────────
+// ContextManager — Session methods
+// ─────────────────────────────────────────────────────────────
+
+Result<fs::path> ContextManager::save_session(AgentId agent_id, const std::string& config_json,
+                                               const std::vector<std::string>& middleware_names,
+                                               const std::string& metadata) {
+  SessionState state;
+  {
+    auto &win = get_window(agent_id);
+    std::lock_guard win_lk(win.mu);
+    state.agent_id = agent_id;
+    state.session_id = fmt::format("{}_{}_{}", agent_id,
+        std::chrono::duration_cast<Duration>(now().time_since_epoch()).count(),
+        session_seq_.fetch_add(1, std::memory_order_relaxed));
+    state.saved_at = now();
+    state.config_json = config_json;
+    state.middleware_names = middleware_names;
+    state.context.agent_id = agent_id;
+    state.context.session_id = state.session_id;
+    state.context.captured_at = state.saved_at;
+    for (const auto &m : win.messages()) state.context.messages.push_back(m);
+    state.context.metadata_json = metadata;
+    state.metadata_json = metadata;
+  }
+
+  auto binary = state.serialize_binary();
+  fs::path path = snapshot_dir_ / fmt::format("session_{}_{}.bin", agent_id, state.session_id);
+
+  // Atomic write: temp file + rename
+  fs::path tmp_path = path;
+  tmp_path += ".tmp";
+  {
+    std::ofstream ofs(tmp_path, std::ios::binary);
+    if (!ofs) return make_error(ErrorCode::MemoryWriteFailed, "Cannot write session file");
+    ofs.write(reinterpret_cast<const char*>(binary.data()),
+              static_cast<std::streamsize>(binary.size()));
+    if (!ofs.good()) return make_error(ErrorCode::MemoryWriteFailed, "Session write incomplete");
+  }
+  std::error_code ec;
+  fs::rename(tmp_path, path, ec);
+  if (ec) return make_error(ErrorCode::MemoryWriteFailed, "Session rename failed: " + ec.message());
+
+  return path;
+}
+
+Result<SessionState> ContextManager::load_session(AgentId agent_id, const SessionId& session_id) {
+  fs::path path = snapshot_dir_ / fmt::format("session_{}_{}.bin", agent_id, session_id);
+  if (!fs::exists(path)) return make_error(ErrorCode::NotFound, "Session not found");
+
+  std::ifstream ifs(path, std::ios::binary | std::ios::ate);
+  if (!ifs) return make_error(ErrorCode::MemoryReadFailed, "Cannot open session file");
+
+  auto size = ifs.tellg();
+  ifs.seekg(0, std::ios::beg);
+  std::vector<uint8_t> buffer(static_cast<size_t>(size));
+  if (!ifs.read(reinterpret_cast<char*>(buffer.data()), size))
+    return make_error(ErrorCode::MemoryReadFailed, "Session read failed");
+
+  auto state = SessionState::deserialize_binary(buffer);
+  if (!state) return make_error(ErrorCode::MemoryReadFailed, "Session parse failed");
+  return std::move(*state);
+}
+
+Result<std::vector<SessionId>> ContextManager::list_sessions(AgentId agent_id) const {
+  std::vector<SessionId> sessions;
+  std::string prefix = fmt::format("session_{}_", agent_id);
+
+  if (!fs::exists(snapshot_dir_)) return sessions;
+
+  for (const auto& entry : fs::directory_iterator(snapshot_dir_)) {
+    if (!entry.is_regular_file()) continue;
+    std::string name = entry.path().filename().string();
+    if (name.starts_with(prefix) && name.ends_with(".bin")) {
+      // Extract session_id: "session_{agent_id}_{session_id}.bin"
+      std::string session_id = name.substr(prefix.size(),
+                                           name.size() - prefix.size() - 4);
+      sessions.push_back(session_id);
+    }
+  }
+  return sessions;
+}
+
 } // namespace agentos::context

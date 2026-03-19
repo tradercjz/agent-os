@@ -94,6 +94,23 @@ struct ContextSnapshot {
 };
 
 // ─────────────────────────────────────────────────────────────
+// § 3.2b SessionState — 完整会话状态（用于 save/resume）
+// ─────────────────────────────────────────────────────────────
+
+struct SessionState {
+  AgentId agent_id;
+  SessionId session_id;
+  TimePoint saved_at;
+  std::string config_json;                    // AgentConfig serialized as JSON
+  std::vector<std::string> middleware_names;   // for re-registration by application
+  ContextSnapshot context;
+  std::string metadata_json;
+
+  std::vector<uint8_t> serialize_binary() const;
+  static std::optional<SessionState> deserialize_binary(std::span<const uint8_t> data);
+};
+
+// ─────────────────────────────────────────────────────────────
 // § 3.3  ContextManager
 // ─────────────────────────────────────────────────────────────
 
@@ -123,6 +140,13 @@ public:
   Result<fs::path> snapshot(AgentId agent_id, const std::string &metadata = "{}");
   Result<void> restore(AgentId agent_id);
 
+  // Session persistence
+  Result<fs::path> save_session(AgentId agent_id, const std::string& config_json,
+                                const std::vector<std::string>& middleware_names,
+                                const std::string& metadata = "{}");
+  Result<SessionState> load_session(AgentId agent_id, const SessionId& session_id);
+  Result<std::vector<SessionId>> list_sessions(AgentId agent_id) const;
+
   void clear(AgentId agent_id) {
     std::lock_guard lk(map_mu_);
     windows_.erase(agent_id);
@@ -132,6 +156,7 @@ private:
   mutable std::shared_mutex map_mu_;
   std::unordered_map<AgentId, std::unique_ptr<ContextWindow>> windows_;
   fs::path snapshot_dir_;
+  std::atomic<uint64_t> session_seq_{0};
 };
 
 } // namespace agentos::context
