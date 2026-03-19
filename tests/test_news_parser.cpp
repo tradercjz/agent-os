@@ -89,7 +89,7 @@ TEST(NewsParserTest, INewsParserInterface) {
 
     auto result_valid = parser.parse("valid");
     ASSERT_TRUE(result_valid.has_value());
-    EXPECT_EQ(result_valid.value().size(), 1);
+    EXPECT_EQ(result_valid.value().size(), 1u);
     EXPECT_EQ(result_valid.value()[0].id, "mock_id");
 
     auto result_invalid = parser.parse("invalid");

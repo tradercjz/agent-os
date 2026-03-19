@@ -8,7 +8,7 @@ using namespace agentos::memory;
 TEST(HindsightStoreTest, BasicInstantiation) {
     HindsightMemoryStore store("http://localhost:8888", "test_bank", "test_key");
     EXPECT_EQ(store.name(), "HindsightMemoryStore");
-    EXPECT_EQ(store.size(), 0);
+    EXPECT_EQ(store.size(), 0u);
 }
 
 TEST(HindsightStoreTest, ReadForgetSearchNotSupported) {

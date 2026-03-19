@@ -274,7 +274,7 @@ static std::string extract_hostname(const std::string &url) {
   return url.substr(host_start, host_end - host_start);
 }
 
-static int curl_progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+static int curl_progress_callback(void *clientp, curl_off_t /*dltotal*/, curl_off_t /*dlnow*/, curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
   auto *st = static_cast<std::stop_token *>(clientp);
   if (st && st->stop_requested()) {
     return 1; // Return non-zero to abort the transfer

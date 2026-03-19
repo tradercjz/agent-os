@@ -239,7 +239,7 @@ public:
     };
   }
 
-  ToolResult execute(const ParsedArgs &args, std::stop_token st = {}) override {
+  ToolResult execute(const ParsedArgs &args, std::stop_token /*st*/ = {}) override {
     auto op = args.get("op");
     auto key = args.get("key");
     if (op == "set") {

@@ -48,7 +48,7 @@ TEST(TokenizerTest, FallbackWhitespaceAndPunctuation) {
   std::vector<std::string> tokens = tokenizer.cut(text);
 
   // Should have exactly 11 tokens: a, b, c, d, e, f, g, h, i, j, k
-  EXPECT_EQ(tokens.size(), 11);
+  EXPECT_EQ(tokens.size(), 11u);
   EXPECT_EQ(tokens[0], "a");
   EXPECT_EQ(tokens[1], "b");
   EXPECT_EQ(tokens[2], "c");

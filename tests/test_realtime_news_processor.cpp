@@ -7,13 +7,13 @@ using namespace agentos::news;
 
 TEST(RealtimeNewsProcessorTest, ProcessingStatsInstantiation) {
     ProcessingStats stats;
-    EXPECT_EQ(stats.total_articles_processed.load(), 0);
-    EXPECT_EQ(stats.articles_per_second.load(), 0);
-    EXPECT_EQ(stats.entities_extracted.load(), 0);
+    EXPECT_EQ(stats.total_articles_processed.load(), 0u);
+    EXPECT_EQ(stats.articles_per_second.load(), 0u);
+    EXPECT_EQ(stats.entities_extracted.load(), 0u);
 
     stats.total_articles_processed = 10;
     stats.reset();
-    EXPECT_EQ(stats.total_articles_processed.load(), 0);
+    EXPECT_EQ(stats.total_articles_processed.load(), 0u);
 }
 
 TEST(RealtimeNewsProcessorTest, ProcessingStatsUpdateArticlesPerSecond) {
@@ -22,14 +22,14 @@ TEST(RealtimeNewsProcessorTest, ProcessingStatsUpdateArticlesPerSecond) {
     // Sleep to ensure duration > 0
     std::this_thread::sleep_for(std::chrono::seconds(1));
     stats.update_articles_per_second();
-    EXPECT_GT(stats.articles_per_second.load(), 0);
-    EXPECT_LE(stats.articles_per_second.load(), 10);
+    EXPECT_GT(stats.articles_per_second.load(), 0u);
+    EXPECT_LE(stats.articles_per_second.load(), 10u);
 }
 
 TEST(RealtimeNewsProcessorTest, RealtimeConfigDefaults) {
     RealtimeConfig config;
-    EXPECT_EQ(config.parser_threads, 2);
-    EXPECT_EQ(config.max_queue_size, 10000);
+    EXPECT_EQ(config.parser_threads, 2u);
+    EXPECT_EQ(config.max_queue_size, 10000u);
     EXPECT_TRUE(config.enable_batch_processing);
 }
 

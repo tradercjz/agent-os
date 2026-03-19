@@ -35,9 +35,8 @@ TEST(DocumentTest, DocumentInstantiationAndFieldAccess) {
   EXPECT_EQ(doc.id, "/path/to/doc.txt");
   EXPECT_EQ(doc.title, "Test Document");
   EXPECT_EQ(doc.content, "This is a test document full content.");
-  EXPECT_EQ(doc.content_hash, 123456789);
-
-  ASSERT_EQ(doc.chunks.size(), 2);
+  EXPECT_EQ(doc.content_hash, 123456789ULL);
+  ASSERT_EQ(doc.chunks.size(), 2u);
   EXPECT_EQ(doc.chunks[0].id, "doc_c1");
   EXPECT_EQ(doc.chunks[1].content, " a test");
 
