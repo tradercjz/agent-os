@@ -27,6 +27,7 @@
 #include <condition_variable>
 #include <random>
 #include <chrono>
+#include <future>
 
 // SSE 服务：通过 cmake -DAGENTOS_ENABLE_SSE=ON 开启
 // 需要 cpp-httplib（header-only）: third_party/httplib/httplib.h

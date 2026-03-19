@@ -1617,7 +1617,7 @@ ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
                 auto& os = PluginRuntime::instance().os();
                 os.ctx().append(agent->id(), kernel::Message::system(prompt_text));
             }
-            (void)sr.activate(skill_name, os.tools().registry(), agent->id());
+            (void)sr.activate(skill_name, PluginRuntime::instance().os().tools().registry(), agent->id());
         }
     }
 
@@ -1740,29 +1740,21 @@ ConstantSP agentOSRun(Heap* heap, vector<ConstantSP>& args) {
     uint64_t tokens_before = PluginRuntime::instance().os().kernel().metrics().total_tokens.load();
 
     // Run with timeout
-    auto future = agent->run_async(task);
-    auto status = future.wait_for(std::chrono::milliseconds(timeout_ms));
-
-    auto elapsed = std::chrono::duration_cast<Duration>(Clock::now() - start);
+    auto start_run = Clock::now();
+    auto result = agent->run(task);
+    auto elapsed = std::chrono::duration_cast<Duration>(Clock::now() - start_run);
     uint64_t tokens_after = PluginRuntime::instance().os().kernel().metrics().total_tokens.load();
 
     DictionarySP dict = Util::createDictionary(DT_STRING, nullptr, DT_ANY, nullptr);
 
-    if (status == std::future_status::timeout) {
+    if (result.has_value()) {
+        dict->set(new String("success"), new Bool(true));
+        dict->set(new String("output"), new String(result.value()));
+        dict->set(new String("error"), new String(""));
+    } else {
         dict->set(new String("success"), new Bool(false));
         dict->set(new String("output"), new String(""));
-        dict->set(new String("error"), new String("Task timed out"));
-    } else {
-        auto result = future.get();
-        if (result) {
-            dict->set(new String("success"), new Bool(true));
-            dict->set(new String("output"), new String(result.value()));
-            dict->set(new String("error"), new String(""));
-        } else {
-            dict->set(new String("success"), new Bool(false));
-            dict->set(new String("output"), new String(""));
-            dict->set(new String("error"), new String(result.error().message));
-        }
+        dict->set(new String("error"), new String(result.error().message));
     }
 
     dict->set(new String("durationMs"), new Long(static_cast<long long>(elapsed.count())));
@@ -1912,7 +1904,8 @@ ConstantSP agentOSInfo(Heap* heap, vector<ConstantSP>& args) {
     auto active = skill_registry().active_skills(agent->id());
     VectorSP skills_vec = Util::createVector(DT_STRING, 0, static_cast<int>(active.size()));
     for (const auto& s : active) {
-        skills_vec->appendString(const_cast<char*>(s.c_str()), 1);
+        const char* skill_name = s.c_str();
+        skills_vec->appendString(&skill_name, 1);
     }
     dict->set(new String("skills"), skills_vec);
 
@@ -1920,7 +1913,8 @@ ConstantSP agentOSInfo(Heap* heap, vector<ConstantSP>& args) {
     auto blocked = AgentHookManager::instance().get_blocked(handle);
     VectorSP blocked_vec = Util::createVector(DT_STRING, 0, static_cast<int>(blocked.size()));
     for (const auto& t : blocked) {
-        blocked_vec->appendString(const_cast<char*>(t.c_str()), 1);
+        const char* tool_name = t.c_str();
+        blocked_vec->appendString(&tool_name, 1);
     }
     dict->set(new String("blockTools"), blocked_vec);
 
@@ -2122,8 +2116,10 @@ ConstantSP agentOSSessions(Heap* heap, vector<ConstantSP>& args) {
     VectorSP col_msgs = Util::createVector(DT_LONG, 0, n);
 
     for (int i = 0; i < n; ++i) {
-        col_sid->appendString(const_cast<char*>(session_ids[i].c_str()), 1);
-        col_name->appendString(const_cast<char*>(agent_names[i].c_str()), 1);
+        const char* sid = session_ids[i].c_str();
+        const char* name = agent_names[i].c_str();
+        col_sid->appendString(&sid, 1);
+        col_name->appendString(&name, 1);
         col_msgs->appendLong(&message_counts[i], 1);
     }
 
