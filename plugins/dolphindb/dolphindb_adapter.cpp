@@ -1524,6 +1524,616 @@ ConstantSP agentOSAskWithKBAsync(Heap* heap, vector<ConstantSP>& args) {
     DDB_SAFE_END("agentOS::askWithKBAsync")
 }
 
+// ═════════════════════════════════════════════════════════════
+// § V2 API — 用户中心的 Agent 接口
+// ═════════════════════════════════════════════════════════════
+
+/// 从 DolphinDB STRING VECTOR 提取 std::vector<std::string>
+static std::vector<std::string> extract_string_vector(const ConstantSP& val) {
+    std::vector<std::string> result;
+    if (!val || val->getType() == DT_VOID || val->isNull()) return result;
+    if (val->isScalar() && val->getType() == DT_STRING) {
+        result.push_back(val->getString());
+        return result;
+    }
+    if (val->isVector()) {
+        int n = val->size();
+        for (int i = 0; i < n; ++i) {
+            result.push_back(val->getString(i));
+        }
+    }
+    return result;
+}
+
+// ─── agentOS::createAgent(name, [prompt], [tools], [skills],
+//         [blockTools], [contextLimit], [isolation], [securityRole]) ──
+
+ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::createAgent(name, [prompt], [tools], [skills], "
+                         "[blockTools], [contextLimit], [isolation], [securityRole])";
+    if (args.empty()) throw IllegalArgumentException("agentOS::createAgent", usage);
+
+    std::string name = extract_string(args[0]);
+    if (name.empty()) throw IllegalArgumentException("agentOS::createAgent", "name must not be empty");
+
+    std::string prompt = args.size() > 1 ? extract_string(args[1]) : "";
+    auto tools = args.size() > 2 ? extract_string_vector(args[2]) : std::vector<std::string>{};
+    auto skill_names = args.size() > 3 ? extract_string_vector(args[3]) : std::vector<std::string>{};
+    auto block_tools = args.size() > 4 ? extract_string_vector(args[4]) : std::vector<std::string>{};
+    int ctx_limit = args.size() > 5 ? extract_int(args[5]) : 8192;
+    std::string isolation = args.size() > 6 ? extract_string(args[6]) : "thread";
+    std::string sec_role = args.size() > 7 ? extract_string(args[7]) : "standard";
+
+    if (ctx_limit <= 0) ctx_limit = 8192;
+
+    DDB_SAFE_BEGIN
+    AgentConfig cfg;
+    cfg.name = name;
+    cfg.role_prompt = prompt.empty()
+        ? "You are a helpful AI assistant integrated with DolphinDB."
+        : prompt;
+    cfg.allowed_tools = tools;
+    cfg.context_limit = static_cast<TokenCount>(ctx_limit);
+    cfg.security_role = sec_role;
+    cfg.isolation = (isolation == "worktree")
+        ? worktree::IsolationMode::Worktree
+        : worktree::IsolationMode::Thread;
+
+    long long handle = PluginRuntime::instance().create_agent(cfg);
+
+    // Register blockTool hooks
+    if (!block_tools.empty()) {
+        AgentHookManager::instance().set_blocked(handle, block_tools);
+
+        auto agent = PluginRuntime::instance().find_agent(handle);
+        if (agent) {
+            agent->use(Middleware{
+                .name = "__block_tools__",
+                .before = [handle](HookContext& ctx) {
+                    if (ctx.operation == "pre_tool_use") {
+                        auto blocked = AgentHookManager::instance().get_blocked(handle);
+                        for (const auto& t : blocked) {
+                            if (ctx.input == t) {
+                                ctx.cancelled = true;
+                                ctx.cancel_reason = "Tool '" + t + "' is blocked by policy";
+                                return;
+                            }
+                        }
+                    }
+                },
+                .after = nullptr,
+            });
+        }
+    }
+
+    // Activate skills
+    for (const auto& skill_name : skill_names) {
+        auto agent = PluginRuntime::instance().find_agent(handle);
+        if (agent) {
+            auto& sr = skill_registry();
+            auto prompt_text = sr.get_prompt(skill_name);
+            if (!prompt_text.empty()) {
+                auto& os = PluginRuntime::instance().os();
+                os.ctx().append(agent->id(), kernel::Message::system(prompt_text));
+            }
+            (void)sr.activate(skill_name, os.tools().registry(), agent->id());
+        }
+    }
+
+    return new Long(handle);
+    DDB_SAFE_END("agentOS::createAgent")
+}
+
+// ─── agentOS::ask(agent, question, [prompt]) ─────────────────
+
+ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::ask(agent, question, [prompt])";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::ask", usage);
+
+    long long handle = extract_long(args[0]);
+    std::string question = extract_string(args[1]);
+    std::string prompt = args.size() > 2 ? extract_string(args[2]) : "";
+
+    if (question.empty())
+        throw IllegalArgumentException("agentOS::ask", "question must not be empty");
+
+    DDB_SAFE_BEGIN
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (!agent) throw RuntimeException("agentOS::ask: invalid agent handle");
+
+    // Inject prompt if provided (one-time)
+    if (!prompt.empty()) {
+        auto& os = PluginRuntime::instance().os();
+        os.ctx().append(agent->id(), kernel::Message::system(prompt));
+    }
+
+    auto result = agent->run(question);
+    return new String(unwrap_or_throw("agentOS::ask", std::move(result)));
+    DDB_SAFE_END("agentOS::ask")
+}
+
+// ─── agentOS::askStream(agent, question, [prompt], [callback]) ──
+
+ConstantSP agentOSAskStream2(Heap* heap, vector<ConstantSP>& args) {
+    const string usage = "Usage: agentOS::askStream(agent, question, [prompt], [callback])";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::askStream", usage);
+
+    long long handle = extract_long(args[0]);
+    std::string question = extract_string(args[1]);
+    std::string prompt = args.size() > 2 ? extract_string(args[2]) : "";
+
+    // Check for callback function
+    FunctionDefSP callback;
+    if (args.size() > 3 && args[3]->getType() == DT_FUNCTIONDEF) {
+        callback = args[3];
+    }
+
+    DDB_SAFE_BEGIN
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (!agent) throw RuntimeException("agentOS::askStream: invalid agent handle");
+
+    if (!prompt.empty()) {
+        auto& os = PluginRuntime::instance().os();
+        os.ctx().append(agent->id(), kernel::Message::system(prompt));
+    }
+
+    // For streaming, use think() directly with token callback
+    auto& os = PluginRuntime::instance().os();
+    std::string full_response;
+
+    kernel::ILLMBackend::TokenCallback token_cb = nullptr;
+    SessionSP session;
+    if (callback) {
+        session = heap->currentSession()->copy();
+        session->setUser(heap->currentSession()->getUser());
+        token_cb = [&callback, &session, &full_response](std::string_view token) {
+            full_response += std::string(token);
+            vector<ConstantSP> cb_args = {new String(std::string(token))};
+            callback->call(session->getHeap().get(), cb_args);
+        };
+    }
+
+    auto result = std::dynamic_pointer_cast<AgentBase<ReActAgent>>(agent);
+    if (result) {
+        auto resp = result->think(question, token_cb);
+        if (resp && !token_cb) {
+            full_response = resp->content;
+        }
+    } else {
+        // Fallback: run() without streaming
+        auto resp = agent->run(question);
+        if (resp) full_response = resp.value();
+    }
+
+    return new String(full_response);
+    DDB_SAFE_END("agentOS::askStream")
+}
+
+// ─── agentOS::run(agent, task, [prompt], [timeout], [contextLimit]) ──
+
+ConstantSP agentOSRun(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::run(agent, task, [prompt], [timeout], [contextLimit])";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::run", usage);
+
+    long long handle = extract_long(args[0]);
+    std::string task = extract_string(args[1]);
+    std::string prompt = args.size() > 2 ? extract_string(args[2]) : "";
+    int timeout_ms = args.size() > 3 ? extract_int(args[3]) : 60000;
+
+    if (task.empty())
+        throw IllegalArgumentException("agentOS::run", "task must not be empty");
+    if (timeout_ms <= 0) timeout_ms = 60000;
+
+    DDB_SAFE_BEGIN
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (!agent) throw RuntimeException("agentOS::run: invalid agent handle");
+
+    if (!prompt.empty()) {
+        auto& os = PluginRuntime::instance().os();
+        os.ctx().append(agent->id(), kernel::Message::system(prompt));
+    }
+
+    auto start = Clock::now();
+    uint64_t tokens_before = PluginRuntime::instance().os().kernel().metrics().total_tokens.load();
+
+    // Run with timeout
+    auto future = agent->run_async(task);
+    auto status = future.wait_for(std::chrono::milliseconds(timeout_ms));
+
+    auto elapsed = std::chrono::duration_cast<Duration>(Clock::now() - start);
+    uint64_t tokens_after = PluginRuntime::instance().os().kernel().metrics().total_tokens.load();
+
+    DictionarySP dict = Util::createDictionary(DT_STRING, nullptr, DT_ANY, nullptr);
+
+    if (status == std::future_status::timeout) {
+        dict->set(new String("success"), new Bool(false));
+        dict->set(new String("output"), new String(""));
+        dict->set(new String("error"), new String("Task timed out"));
+    } else {
+        auto result = future.get();
+        if (result) {
+            dict->set(new String("success"), new Bool(true));
+            dict->set(new String("output"), new String(result.value()));
+            dict->set(new String("error"), new String(""));
+        } else {
+            dict->set(new String("success"), new Bool(false));
+            dict->set(new String("output"), new String(""));
+            dict->set(new String("error"), new String(result.error().message));
+        }
+    }
+
+    dict->set(new String("durationMs"), new Long(static_cast<long long>(elapsed.count())));
+    dict->set(new String("tokensUsed"), new Long(static_cast<long long>(tokens_after - tokens_before)));
+
+    return dict;
+    DDB_SAFE_END("agentOS::run")
+}
+
+// ─── agentOS::save(agent, [metadata]) ────────────────────────
+
+ConstantSP agentOSSave(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::save(agent, [metadata])";
+    if (args.empty()) throw IllegalArgumentException("agentOS::save", usage);
+
+    long long handle = extract_long(args[0]);
+    std::string metadata = args.size() > 1 ? extract_string(args[1]) : "";
+
+    DDB_SAFE_BEGIN
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (!agent) throw RuntimeException("agentOS::save: invalid agent handle");
+
+    auto& os = PluginRuntime::instance().os();
+
+    // Collect middleware names
+    std::vector<std::string> mw_names; // Middleware names not easily extractable; leave empty
+
+    // Serialize config as JSON
+    nlohmann::json cfg_json;
+    cfg_json["name"] = agent->config().name;
+    cfg_json["role_prompt"] = agent->config().role_prompt;
+    cfg_json["context_limit"] = agent->config().context_limit;
+    cfg_json["security_role"] = agent->config().security_role;
+
+    auto result = os.ctx().save_session(agent->id(), cfg_json.dump(), mw_names, metadata);
+    auto path = unwrap_or_throw("agentOS::save", std::move(result));
+
+    // Extract session ID from path: "session_{agentId}_{sessionId}.bin"
+    std::string filename = path.filename().string();
+    // Remove "session_" prefix and ".bin" suffix
+    std::string prefix = "session_" + std::to_string(agent->id()) + "_";
+    std::string sid = filename.substr(prefix.size(), filename.size() - prefix.size() - 4);
+
+    return new String(sid);
+    DDB_SAFE_END("agentOS::save")
+}
+
+// ─── agentOS::resume(sessionId) ──────────────────────────────
+
+ConstantSP agentOSResume(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::resume(sessionId)";
+    if (args.empty()) throw IllegalArgumentException("agentOS::resume", usage);
+
+    std::string session_id = extract_string(args[0]);
+    if (session_id.empty())
+        throw IllegalArgumentException("agentOS::resume", "sessionId must not be empty");
+
+    DDB_SAFE_BEGIN
+    auto& os = PluginRuntime::instance().os();
+
+    // Try to find the session by scanning all agent IDs
+    // Session ID format: "{agentId}_{timestamp}_{seq}"
+    // Extract agent ID from session ID
+    auto underscore = session_id.find('_');
+    if (underscore == std::string::npos)
+        throw RuntimeException("agentOS::resume: invalid sessionId format");
+
+    AgentId original_agent_id = std::stoull(session_id.substr(0, underscore));
+
+    auto state = os.ctx().load_session(original_agent_id, session_id);
+    auto session_state = unwrap_or_throw("agentOS::resume", std::move(state));
+
+    // Recreate agent from saved config
+    AgentConfig cfg;
+    try {
+        auto cfg_json = nlohmann::json::parse(session_state.config_json);
+        cfg.name = cfg_json.value("name", "resumed_agent");
+        cfg.role_prompt = cfg_json.value("role_prompt", "");
+        cfg.context_limit = cfg_json.value("context_limit", 8192u);
+        cfg.security_role = cfg_json.value("security_role", "standard");
+    } catch (...) {
+        cfg.name = "resumed_agent";
+    }
+
+    long long handle = PluginRuntime::instance().create_agent(cfg);
+
+    // Restore context messages
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (agent) {
+        auto& win = os.ctx().get_window(agent->id(), cfg.context_limit);
+        win.reset();
+        for (const auto& msg : session_state.context.messages) {
+            win.try_add(msg);
+        }
+    }
+
+    return new Long(handle);
+    DDB_SAFE_END("agentOS::resume")
+}
+
+// ─── agentOS::destroy(agent) ─────────────────────────────────
+
+ConstantSP agentOSDestroy(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::destroy(agent)";
+    if (args.empty()) throw IllegalArgumentException("agentOS::destroy", usage);
+
+    long long handle = extract_long(args[0]);
+
+    DDB_SAFE_BEGIN
+    AgentHookManager::instance().remove_agent(handle);
+    bool ok = PluginRuntime::instance().destroy_agent(handle);
+    return new Bool(ok);
+    DDB_SAFE_END("agentOS::destroy")
+}
+
+// ─── agentOS::info(agent) ────────────────────────────────────
+
+ConstantSP agentOSInfo(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::info(agent)";
+    if (args.empty()) throw IllegalArgumentException("agentOS::info", usage);
+
+    long long handle = extract_long(args[0]);
+
+    DDB_SAFE_BEGIN
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (!agent) throw RuntimeException("agentOS::info: invalid agent handle");
+
+    auto& os = PluginRuntime::instance().os();
+    auto& win = os.ctx().get_window(agent->id(), agent->config().context_limit);
+
+    DictionarySP dict = Util::createDictionary(DT_STRING, nullptr, DT_ANY, nullptr);
+    dict->set(new String("name"), new String(agent->config().name));
+    dict->set(new String("prompt"), new String(agent->config().role_prompt));
+    dict->set(new String("contextLimit"), new Int(static_cast<int>(agent->config().context_limit)));
+    dict->set(new String("securityRole"), new String(agent->config().security_role));
+    dict->set(new String("messageCount"), new Int(static_cast<int>(win.message_count())));
+    dict->set(new String("workDir"), new String(agent->work_dir().string()));
+    dict->set(new String("isolation"),
+        new String(agent->config().isolation == worktree::IsolationMode::Worktree
+                   ? "worktree" : "thread"));
+
+    // Active skills
+    auto active = skill_registry().active_skills(agent->id());
+    VectorSP skills_vec = Util::createVector(DT_STRING, 0, static_cast<int>(active.size()));
+    for (const auto& s : active) {
+        skills_vec->appendString(const_cast<char*>(s.c_str()), 1);
+    }
+    dict->set(new String("skills"), skills_vec);
+
+    // Blocked tools
+    auto blocked = AgentHookManager::instance().get_blocked(handle);
+    VectorSP blocked_vec = Util::createVector(DT_STRING, 0, static_cast<int>(blocked.size()));
+    for (const auto& t : blocked) {
+        blocked_vec->appendString(const_cast<char*>(t.c_str()), 1);
+    }
+    dict->set(new String("blockTools"), blocked_vec);
+
+    return dict;
+    DDB_SAFE_END("agentOS::info")
+}
+
+// ─── agentOS::registerSkill(name, keywords, [prompt], [tools]) ──
+
+ConstantSP agentOSRegisterSkill(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::registerSkill(name, keywords, [prompt], [tools])";
+    if (args.size() < 2)
+        throw IllegalArgumentException("agentOS::registerSkill", usage);
+
+    std::string name = extract_string(args[0]);
+    auto keywords = extract_string_vector(args[1]);
+    std::string prompt = args.size() > 2 ? extract_string(args[2]) : "";
+    auto tool_names = args.size() > 3 ? extract_string_vector(args[3]) : std::vector<std::string>{};
+
+    if (name.empty())
+        throw IllegalArgumentException("agentOS::registerSkill", "name must not be empty");
+    if (keywords.empty())
+        throw IllegalArgumentException("agentOS::registerSkill", "keywords must not be empty");
+
+    DDB_SAFE_BEGIN
+    skills::SkillDef skill;
+    skill.name = name;
+    skill.description = prompt.empty() ? ("Skill: " + name) : prompt;
+    skill.keywords = keywords;
+    skill.prompt_injection = prompt;
+
+    // Link existing registered tools by name
+    auto& os = PluginRuntime::instance().os();
+    for (const auto& tn : tool_names) {
+        auto tool = os.tools().registry().find(tn);
+        if (tool) {
+            skill.tools.push_back(tool->schema());
+            // Wrap the tool's execute as a ToolFn
+            auto tool_ptr = tool;
+            skill.tool_fns.push_back(
+                [tool_ptr](const tools::ParsedArgs& pa, std::stop_token st) {
+                    return tool_ptr->execute(pa, st);
+                });
+        }
+    }
+
+    skill_registry().register_skill(std::move(skill));
+    return new Bool(true);
+    DDB_SAFE_END("agentOS::registerSkill")
+}
+
+// ─── agentOS::blockTool(agent, tool, [reason]) ───────────────
+
+ConstantSP agentOSBlockTool(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::blockTool(agent, tool, [reason])";
+    if (args.size() < 2)
+        throw IllegalArgumentException("agentOS::blockTool", usage);
+
+    long long handle = extract_long(args[0]);
+    std::string tool = extract_string(args[1]);
+
+    DDB_SAFE_BEGIN
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (!agent) throw RuntimeException("agentOS::blockTool: invalid agent handle");
+
+    AgentHookManager::instance().add_blocked(handle, tool);
+    return new Bool(true);
+    DDB_SAFE_END("agentOS::blockTool")
+}
+
+// ─── agentOS::unblockTool(agent, tool) ───────────────────────
+
+ConstantSP agentOSUnblockTool(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::unblockTool(agent, tool)";
+    if (args.size() < 2)
+        throw IllegalArgumentException("agentOS::unblockTool", usage);
+
+    long long handle = extract_long(args[0]);
+    std::string tool = extract_string(args[1]);
+
+    DDB_SAFE_BEGIN
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (!agent) throw RuntimeException("agentOS::unblockTool: invalid agent handle");
+
+    AgentHookManager::instance().remove_blocked(handle, tool);
+    return new Bool(true);
+    DDB_SAFE_END("agentOS::unblockTool")
+}
+
+// ─── agentOS::activateSkill(agent, skillName) ────────────────
+
+ConstantSP agentOSActivateSkill(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::activateSkill(agent, skillName)";
+    if (args.size() < 2)
+        throw IllegalArgumentException("agentOS::activateSkill", usage);
+
+    long long handle = extract_long(args[0]);
+    std::string skill_name = extract_string(args[1]);
+
+    DDB_SAFE_BEGIN
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (!agent) throw RuntimeException("agentOS::activateSkill: invalid agent handle");
+
+    auto& os = PluginRuntime::instance().os();
+    auto& sr = skill_registry();
+
+    // Inject prompt
+    auto prompt = sr.get_prompt(skill_name);
+    if (!prompt.empty()) {
+        os.ctx().append(agent->id(), kernel::Message::system(prompt));
+    }
+
+    unwrap_void_or_throw("agentOS::activateSkill",
+        sr.activate(skill_name, os.tools().registry(), agent->id()));
+
+    return new Bool(true);
+    DDB_SAFE_END("agentOS::activateSkill")
+}
+
+// ─── agentOS::deactivateSkill(agent, skillName) ──────────────
+
+ConstantSP agentOSDeactivateSkill(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    const string usage = "Usage: agentOS::deactivateSkill(agent, skillName)";
+    if (args.size() < 2)
+        throw IllegalArgumentException("agentOS::deactivateSkill", usage);
+
+    long long handle = extract_long(args[0]);
+    std::string skill_name = extract_string(args[1]);
+
+    DDB_SAFE_BEGIN
+    auto agent = PluginRuntime::instance().find_agent(handle);
+    if (!agent) throw RuntimeException("agentOS::deactivateSkill: invalid agent handle");
+
+    auto& os = PluginRuntime::instance().os();
+    unwrap_void_or_throw("agentOS::deactivateSkill",
+        skill_registry().deactivate(skill_name, os.tools().registry(), agent->id()));
+
+    return new Bool(true);
+    DDB_SAFE_END("agentOS::deactivateSkill")
+}
+
+// ─── agentOS::sessions() ────────────────────────────────────
+
+ConstantSP agentOSSessions(Heap* heap, vector<ConstantSP>& args) {
+    (void)heap;
+    (void)args;
+
+    DDB_SAFE_BEGIN
+    auto& os = PluginRuntime::instance().os();
+
+    // Scan snapshot directory for session files
+    std::vector<std::string> session_ids;
+    std::vector<std::string> agent_names;
+    std::vector<long long> message_counts;
+
+    auto& ctx = os.ctx();
+    // Get snapshot dir by listing sessions for a range of agent IDs
+    // Simplified: scan all files matching "session_*.bin"
+    std::string snap_dir = os.config_.snapshot_dir;
+    namespace fs = std::filesystem;
+
+    if (fs::exists(snap_dir)) {
+        for (const auto& entry : fs::directory_iterator(snap_dir)) {
+            if (!entry.is_regular_file()) continue;
+            std::string fname = entry.path().filename().string();
+            if (!fname.starts_with("session_") || !fname.ends_with(".bin")) continue;
+
+            // Parse: session_{agentId}_{sessionId}.bin
+            std::string body = fname.substr(8, fname.size() - 12); // remove "session_" and ".bin"
+            auto first_us = body.find('_');
+            if (first_us == std::string::npos) continue;
+
+            AgentId aid = std::stoull(body.substr(0, first_us));
+            std::string sid = body.substr(first_us + 1);
+
+            // Load to get details
+            auto state = ctx.load_session(aid, sid);
+            if (state) {
+                session_ids.push_back(sid);
+                try {
+                    auto cfg = nlohmann::json::parse(state->config_json);
+                    agent_names.push_back(cfg.value("name", "unknown"));
+                } catch (...) {
+                    agent_names.push_back("unknown");
+                }
+                message_counts.push_back(static_cast<long long>(state->context.messages.size()));
+            }
+        }
+    }
+
+    // Build table
+    int n = static_cast<int>(session_ids.size());
+    VectorSP col_sid = Util::createVector(DT_STRING, 0, n);
+    VectorSP col_name = Util::createVector(DT_STRING, 0, n);
+    VectorSP col_msgs = Util::createVector(DT_LONG, 0, n);
+
+    for (int i = 0; i < n; ++i) {
+        col_sid->appendString(const_cast<char*>(session_ids[i].c_str()), 1);
+        col_name->appendString(const_cast<char*>(agent_names[i].c_str()), 1);
+        col_msgs->appendLong(&message_counts[i], 1);
+    }
+
+    vector<string> col_names = {"sessionId", "agentName", "messageCount"};
+    vector<ConstantSP> cols = {col_sid, col_name, col_msgs};
+    return Util::createTable(col_names, cols);
+    DDB_SAFE_END("agentOS::sessions")
+}
+
 } // extern "C"
 
 } // namespace agentos::dolphindb

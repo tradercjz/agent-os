@@ -1,0 +1,152 @@
+// ============================================================
+// AgentOS DolphinDB Plugin — V2 用户中心 API 使用示例
+// 核心理念：创建 Agent → 执行任务 → 管理生命周期
+// ============================================================
+
+// ── 1. 加载与初始化 ──
+loadPlugin("/path/to/plugins/AgentOS/PluginAgentOS.txt")
+
+// Mock 模式（开发测试）
+agentOS::init()
+
+// 或连接真实 LLM
+// agentOS::init(apiKey="sk-xxx", baseUrl="https://api.openai.com/v1", model="gpt-4o-mini")
+
+// ── 2. 注册工具（DolphinDB 函数作为 Agent 工具）──
+def queryPrice(ticker) {
+    return exec last price from loadTable("dfs://market", "trades")
+           where symbol = ticker
+}
+agentOS::registerTool("query_price", "查询最新股价", queryPrice)
+
+def queryKLine(ticker, period) {
+    return select date, open, high, low, close, volume
+           from loadTable("dfs://market", "kline")
+           where symbol = ticker, date > today() - period
+}
+agentOS::registerTool("query_kline", "查询K线数据", queryKLine)
+
+// ── 3. 注册技能（关键词触发的能力包）──
+agentOS::registerSkill("行情分析",
+    ["股票", "行情", "K线", "价格", "涨跌"],
+    prompt="你可以通过 query_price 和 query_kline 工具查询实时行情和K线。",
+    tools=["query_price", "query_kline"])
+
+agentOS::registerSkill("风险评估",
+    ["风险", "回撤", "波动", "VaR", "风控"],
+    prompt="你可以评估投资组合的风险指标。")
+
+// ── 4. 创建 Agent ──
+
+// 最简形式
+agent = agentOS::createAgent("小助手")
+
+// 完整形式 — 声明所有能力
+agent = agentOS::createAgent(
+    name = "金融分析师",
+    prompt = "你是一个量化研究员，善于用数据分析市场趋势，用中文回答",
+    tools = ["query_price", "query_kline"],
+    skills = ["行情分析"],
+    blockTools = ["shell", "deploy"],
+    contextLimit = 16384
+)
+
+// 带工作目录隔离（每个 agent 独立 git 分支）
+worker = agentOS::createAgent(
+    name = "code-worker",
+    prompt = "你是一个代码修复专家",
+    isolation = "worktree"
+)
+
+// ── 5. 执行任务 ──
+
+// 单轮问答
+answer = agentOS::ask(agent, "帮我看下贵州茅台今天的价格")
+
+// 多轮对话 — 同一个 agent 自动记住上下文
+agentOS::ask(agent, "最近30天的K线走势如何？")
+agentOS::ask(agent, "跟五粮液对比一下")
+agentOS::ask(agent, "综合来看你推荐买入吗？")
+
+// 流式输出（实时显示）
+agentOS::askStream(agent, "详细分析下半导体板块", callback=print)
+
+// 结构化执行（带超时，返回 dict）
+result = agentOS::run(agent, "分析今天的市场走势，写一份报告", timeout=30000)
+// result → dict: {success: true, output: "...", durationMs: 2500, tokensUsed: 1200}
+
+if (result["success"]) {
+    print("报告:")
+    print(result["output"])
+} else {
+    print("执行失败: " + result["error"])
+}
+
+// ── 6. 查看 Agent 状态 ──
+agentOS::info(agent)
+// → dict: {name: "金融分析师", prompt: "...", skills: ["行情分析"],
+//           blockTools: ["shell", "deploy"], messageCount: 8, isolation: "thread"}
+
+// ── 7. 运行时调整 ──
+
+// 临时禁用某个工具
+agentOS::blockTool(agent, "query_kline", "K线接口维护中")
+
+// 恢复
+agentOS::unblockTool(agent, "query_kline")
+
+// 动态激活新技能
+agentOS::activateSkill(agent, "风险评估")
+agentOS::ask(agent, "评估一下当前组合的VaR")
+
+// 去激活
+agentOS::deactivateSkill(agent, "风险评估")
+
+// ── 8. 会话保存与恢复 ──
+
+// 保存当前对话状态
+sid = agentOS::save(agent)
+// sid = "1_155957921_0"
+
+// 查看所有已保存的会话
+sessions = agentOS::sessions()
+select * from sessions
+// sessionId | agentName | messageCount
+// 1_155...  | 金融分析师 | 8
+
+// 恢复（比如第二天继续）
+agent2 = agentOS::resume(sid)
+agentOS::ask(agent2, "昨天你分析的那些技术信号，今天验证了吗？")
+
+// ── 9. 销毁 ──
+agentOS::destroy(agent)
+agentOS::destroy(agent2)
+agentOS::destroy(worker)
+agentOS::close()
+
+// ════════════════════════════════════
+// 典型场景示例
+// ════════════════════════════════════
+
+// 场景 A：一行代码搞定简单问答
+agentOS::init()
+agent = agentOS::createAgent("bot")
+print(agentOS::ask(agent, "什么是 DolphinDB？"))
+agentOS::destroy(agent)
+
+// 场景 B：量化研究工作流
+agentOS::init(apiKey="sk-xxx", model="gpt-4o-mini")
+agentOS::registerTool("query_price", "查询股价", queryPrice)
+agentOS::registerSkill("行情", ["股票", "价格"], tools=["query_price"])
+analyst = agentOS::createAgent("analyst", prompt="你是量化研究员", skills=["行情"])
+result = agentOS::run(analyst, "分析茅台近期走势并给出交易建议", timeout=30000)
+agentOS::destroy(analyst)
+
+// 场景 C：自动化修复 agent
+agentOS::init()
+fixer = agentOS::createAgent("fixer", prompt="你是代码修复专家", isolation="worktree")
+result = agentOS::run(fixer, "修复 #1234: 登录时 token 未刷新", timeout=60000)
+if (result["success"]) {
+    print("修复成功，工作目录: " + agentOS::info(fixer)["workDir"])
+}
+agentOS::destroy(fixer)

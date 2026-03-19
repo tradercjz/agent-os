@@ -28,3 +28,17 @@ agentOSSearch,search,system,2,4,0
 agentOSAskWithKB,askWithKB,system,2,4,0
 agentOSKBInfo,kbInfo,system,1,1,0
 agentOSAskWithKBAsync,askWithKBAsync,system,2,4,0
+agentOSCreateAgent2,createAgent2,system,1,8,0
+agentOSAsk2,ask2,system,2,3,0
+agentOSAskStream2,askStream2,system,2,4,0
+agentOSRun,run,system,2,5,0
+agentOSSave,save,system,1,2,0
+agentOSResume,resume,system,1,1,0
+agentOSDestroy,destroy,system,1,1,0
+agentOSInfo,info,system,1,1,0
+agentOSRegisterSkill,registerSkill,system,2,4,0
+agentOSBlockTool,blockTool,system,2,3,0
+agentOSUnblockTool,unblockTool,system,2,2,0
+agentOSActivateSkill,activateSkill,system,2,2,0
+agentOSDeactivateSkill,deactivateSkill,system,2,2,0
+agentOSSessions,sessions,system,0,0,0

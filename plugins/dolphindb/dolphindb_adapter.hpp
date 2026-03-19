@@ -19,6 +19,7 @@
 
 // AgentOS 头文件（通过 cmake -DAGENTOS_NO_DUCKDB=ON 排除 DuckDB 依赖）
 #include <agentos/agentos.hpp>
+#include <agentos/skills/skill_registry.hpp>
 
 #include <atomic>
 #include <thread>
@@ -653,6 +654,60 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────
+// § D.1f  Skill 注册表（进程级单例）
+// ─────────────────────────────────────────────────────────────
+
+/// 进程级 SkillRegistry，被新版 API 使用
+inline skills::SkillRegistry& skill_registry() {
+    static skills::SkillRegistry reg;
+    return reg;
+}
+
+/// Agent 级 hook 数据：记录每个 agent 的 blockTools 列表
+class AgentHookManager {
+public:
+    static AgentHookManager& instance() {
+        static AgentHookManager inst;
+        return inst;
+    }
+
+    void set_blocked(long long handle, std::vector<std::string> tools) {
+        std::lock_guard lk(mu_);
+        blocked_tools_[handle] = std::move(tools);
+    }
+
+    std::vector<std::string> get_blocked(long long handle) const {
+        std::lock_guard lk(mu_);
+        auto it = blocked_tools_.find(handle);
+        return it != blocked_tools_.end() ? it->second : std::vector<std::string>{};
+    }
+
+    void add_blocked(long long handle, const std::string& tool) {
+        std::lock_guard lk(mu_);
+        auto& v = blocked_tools_[handle];
+        if (std::find(v.begin(), v.end(), tool) == v.end()) {
+            v.push_back(tool);
+        }
+    }
+
+    void remove_blocked(long long handle, const std::string& tool) {
+        std::lock_guard lk(mu_);
+        auto& v = blocked_tools_[handle];
+        v.erase(std::remove(v.begin(), v.end(), tool), v.end());
+    }
+
+    void remove_agent(long long handle) {
+        std::lock_guard lk(mu_);
+        blocked_tools_.erase(handle);
+    }
+
+private:
+    AgentHookManager() = default;
+    mutable std::mutex mu_;
+    std::unordered_map<long long, std::vector<std::string>> blocked_tools_;
+};
+
+// ─────────────────────────────────────────────────────────────
 // § D.2  类型转换工具
 // ─────────────────────────────────────────────────────────────
 
@@ -860,6 +915,79 @@ ConstantSP agentOSKBInfo(Heap* heap, vector<ConstantSP>& args);
 /// 异步 RAG 对话：检索知识库 + 流式 LLM 生成
 /// 返回 dict: {__stream__: true, requestId, status, sseUrl?, token?}
 ConstantSP agentOSAskWithKBAsync(Heap* heap, vector<ConstantSP>& args);
+
+// ─── 新版用户中心 API（V2）──────────────────────────────────
+
+/// agentOS::createAgent(name, [prompt], [tools], [skills], [blockTools],
+///                      [contextLimit], [isolation], [securityRole])
+/// 原生参数风格创建 Agent
+/// @return LONG — agent handle
+ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::ask(agent, question, [prompt])
+/// 单轮/多轮对话（保持上下文）
+/// @return STRING — LLM 回答
+ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::askStream(agent, question, [prompt], [callback])
+/// 流式对话
+/// @return STRING — 完整回答
+ConstantSP agentOSAskStream2(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::run(agent, task, [prompt], [timeout], [contextLimit])
+/// 结构化执行任务
+/// @return DICTIONARY — {success, output, error, durationMs, tokensUsed}
+ConstantSP agentOSRun(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::save(agent, [metadata])
+/// 保存 agent 会话
+/// @return STRING — sessionId
+ConstantSP agentOSSave(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::resume(sessionId)
+/// 恢复已保存的会话，返回新 agent handle
+/// @return LONG — agent handle
+ConstantSP agentOSResume(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::destroy(agent)
+/// 销毁 agent
+/// @return BOOL
+ConstantSP agentOSDestroy(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::info(agent)
+/// 查看 agent 状态
+/// @return DICTIONARY — {name, prompt, tools, skills, workDir, ...}
+ConstantSP agentOSInfo(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::registerSkill(name, keywords, [prompt], [tools])
+/// 注册技能
+/// @return BOOL
+ConstantSP agentOSRegisterSkill(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::blockTool(agent, tool, [reason])
+/// 运行时禁用工具
+/// @return BOOL
+ConstantSP agentOSBlockTool(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::unblockTool(agent, tool)
+/// 运行时启用工具
+/// @return BOOL
+ConstantSP agentOSUnblockTool(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::activateSkill(agent, skillName)
+/// 运行时激活技能
+/// @return BOOL
+ConstantSP agentOSActivateSkill(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::deactivateSkill(agent, skillName)
+/// 运行时去激活技能
+/// @return BOOL
+ConstantSP agentOSDeactivateSkill(Heap* heap, vector<ConstantSP>& args);
+
+/// agentOS::sessions()
+/// 列出所有已保存的会话
+/// @return TABLE — columns: sessionId, agentName, savedAt, messageCount
+ConstantSP agentOSSessions(Heap* heap, vector<ConstantSP>& args);
 
 } // extern "C"
 
