@@ -341,19 +341,25 @@ public:
       FnTool(ToolSchema s, std::function<ToolResult(const ParsedArgs &, std::stop_token)> f)
           : schema_(std::move(s)), fn_(std::move(f)) {}
       ToolSchema schema() const override { return schema_; }
-      ToolResult execute(const ParsedArgs &a, std::stop_token /*st*/ = {}) override { return fn_(a); }
+      ToolResult execute(const ParsedArgs &a, std::stop_token st = {}) override { return fn_(a, st); }
 
     private:
       ToolSchema schema_;
       std::function<ToolResult(const ParsedArgs &, std::stop_token)> fn_;
     };
+
+    auto wrapped = [f = std::forward<Fn>(fn)](const ParsedArgs& args, std::stop_token st) mutable -> ToolResult {
+        if constexpr (std::is_invocable_v<Fn, const ParsedArgs&, std::stop_token>) {
+            return f(args, st);
+        } else {
+            return f(args);
+        }
+    };
+
     register_tool(std::make_shared<FnTool>(
         std::move(schema),
-        std::function<ToolResult(const ParsedArgs &, std::stop_token)>(
-            [f = std::forward<Fn>(fn)](const ParsedArgs& args, std::stop_token /*st*/) mutable {
-                return f(args);
-            }
-        )));
+        std::function<ToolResult(const ParsedArgs &, std::stop_token)>(std::move(wrapped))
+    ));
   }
 
   std::shared_ptr<ITool> find(const std::string &id) const {
@@ -496,7 +502,7 @@ private:
 
 class ToolManager : private NonCopyable {
 public:
-  ToolManager(memory::MemorySystem *memory = nullptr) : memory_(memory), thread_pool_(4) {
+  ToolManager(memory::MemorySystem *memory = nullptr) : memory_(memory) {
     // 注册内置工具
     registry_.register_tool(std::make_shared<KVStoreTool>());
     registry_.register_tool(std::make_shared<ShellTool>());
@@ -647,9 +653,8 @@ public:
 
 private:
   ToolRegistry registry_;
-  ToolThreadPool thread_pool_{4};
   memory::MemorySystem *memory_{nullptr};
-  ToolThreadPool thread_pool_;
+  ToolThreadPool thread_pool_{4};
 };
 
 } // namespace agentos::tools

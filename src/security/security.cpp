@@ -110,6 +110,40 @@ InjectionDetector::InjectionDetector() {
         "现在你是",
         "扮演",
     };
+    trie_dirty_ = true;
+}
+
+void InjectionDetector::add_pattern(std::string pat) {
+    std::lock_guard lk(mu_);
+    patterns_.push_back(std::move(pat));
+    trie_dirty_ = true;
+}
+
+bool InjectionDetector::remove_pattern(const std::string &pat) {
+    std::lock_guard lk(mu_);
+    auto it = std::find(patterns_.begin(), patterns_.end(), pat);
+    if (it != patterns_.end()) {
+        patterns_.erase(it);
+        trie_dirty_ = true;
+        return true;
+    }
+    return false;
+}
+
+void InjectionDetector::set_patterns(std::vector<std::string> pats) {
+    std::lock_guard lk(mu_);
+    patterns_ = std::move(pats);
+    trie_dirty_ = true;
+}
+
+size_t InjectionDetector::pattern_count() const noexcept {
+    std::lock_guard lk(mu_);
+    return patterns_.size();
+}
+
+void InjectionDetector::build_trie() const {
+    // Stub or implementation of AC trie
+    // For now we use the O(n*m) scan below which doesn't use the trie.
 }
 
 InjectionDetector::DetectionResult InjectionDetector::scan(std::string_view text) const {
@@ -195,26 +229,6 @@ InjectionDetector::DetectionResult InjectionDetector::scan(std::string_view text
     }
 
     return {false, "", 0.0f};
-}
-
-void InjectionDetector::add_pattern(std::string pat) {
-    std::lock_guard lk(mu_);
-    patterns_.push_back(std::move(pat));
-}
-
-bool InjectionDetector::remove_pattern(const std::string &pat) {
-    std::lock_guard lk(mu_);
-    auto it = std::find(patterns_.begin(), patterns_.end(), pat);
-    if (it != patterns_.end()) {
-        patterns_.erase(it);
-        return true;
-    }
-    return false;
-}
-
-void InjectionDetector::set_patterns(std::vector<std::string> pats) {
-    std::lock_guard lk(mu_);
-    patterns_ = std::move(pats);
 }
 
 // ─────────────────────────────────────────────────────────────
