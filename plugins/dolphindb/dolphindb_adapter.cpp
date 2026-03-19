@@ -236,37 +236,53 @@ ConstantSP pluginInfo(Heap* heap, vector<ConstantSP>& args) {
     return info;
 }
 
-// ─── agentOS::init([configJson]) ─────────────────────────────
+// ─── agentOS::init([apiKey], [baseUrl], [model], [threads], [tpmLimit]) ──
 
 ConstantSP agentOSInit(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
-    std::string config_json;
-    if (!args.empty()) {
-        if (!args[0]->isScalar() || args[0]->getType() != DT_STRING)
-            throw IllegalArgumentException("agentOS::init",
-                "Usage: agentOS::init([configJson]). configJson must be a string.");
-        config_json = args[0]->getString();
+
+    // 兼容旧 JSON 格式：如果第一个参数以 '{' 开头，走旧逻辑
+    if (!args.empty() && args[0]->getType() == DT_STRING) {
+        std::string first = args[0]->getString();
+        if (!first.empty() && first[0] == '{') {
+            bool is_new = PluginRuntime::instance().init(first);
+            if (is_new) LOG_INFO("AgentOS initialized via DolphinDB plugin.");
+#ifdef AGENTOS_ENABLE_SSE
+            try {
+                auto cfg = nlohmann::json::parse(first);
+                int sse_port = cfg.value("sse_port", 8849);
+                std::string sse_cors = cfg.value("sse_cors", std::string("*"));
+                SSEServer::instance().start(sse_port, sse_cors);
+            } catch (...) { SSEServer::instance().start(8849, "*"); }
+#endif
+            return new Bool(true);
+        }
     }
 
-    bool is_new = PluginRuntime::instance().init(config_json);
-    if (is_new) {
-        LOG_INFO("AgentOS initialized via DolphinDB plugin.");
-    }
+    // 原生参数模式
+    std::string api_key   = !args.empty()     ? extract_string(args[0]) : "";
+    std::string base_url  = args.size() > 1   ? extract_string(args[1]) : "";
+    std::string model     = args.size() > 2   ? extract_string(args[2]) : "";
+    int threads           = args.size() > 3   ? extract_int(args[3])    : 4;
+    int tpm_limit         = args.size() > 4   ? extract_int(args[4])    : 100000;
+
+    if (threads <= 0) threads = 4;
+    if (tpm_limit <= 0) tpm_limit = 100000;
+
+    // 构造 JSON 传给 PluginRuntime（内部仍然用 JSON 初始化）
+    nlohmann::json cfg;
+    if (!api_key.empty())  cfg["api_key"]  = api_key;
+    if (!base_url.empty()) cfg["base_url"] = base_url;
+    if (!model.empty())    cfg["model"]    = model;
+    cfg["scheduler_threads"] = threads;
+    cfg["tpm_limit"]         = tpm_limit;
+
+    bool is_new = PluginRuntime::instance().init(cfg.dump());
+    if (is_new) LOG_INFO("AgentOS initialized via DolphinDB plugin.");
 
 #ifdef AGENTOS_ENABLE_SSE
-    // 启动内嵌 SSE 服务（幂等）
-    // 可通过 config_json 中的 "sse_port" 和 "sse_cors" 配置
-    int sse_port = 8849;
-    std::string sse_cors = "*";
-    if (!config_json.empty()) {
-        try {
-            auto cfg = nlohmann::json::parse(config_json);
-            if (cfg.contains("sse_port")) sse_port = cfg["sse_port"].get<int>();
-            if (cfg.contains("sse_cors")) sse_cors = cfg["sse_cors"].get<std::string>();
-        } catch (...) { /* 忽略解析错误 */ }
-    }
-    SSEServer::instance().start(sse_port, sse_cors);
-    LOG_INFO("AgentOS SSE server started on port " + std::to_string(sse_port));
+    SSEServer::instance().start(8849, "*");
+    LOG_INFO("AgentOS SSE server started on port 8849");
 #endif
 
     return new Bool(true);
@@ -391,12 +407,12 @@ static ConstantSP agentOSAskStream_v1(Heap* heap, vector<ConstantSP>& args) {
     DDB_SAFE_END("agentOS::askStream")
 }
 
-// ─── agentOS::askTable(question, [configJson], [agentHandle]) ─
+// ─── agentOS::askTable(question, [prompt], [maxSteps], [agentHandle]) ──
 
 ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
     const string usage =
-        "Usage: agentOS::askTable(question, [configJson], [agentHandle])";
+        "Usage: agentOS::askTable(question, [prompt], [maxSteps], [agentHandle])";
     if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
         throw IllegalArgumentException("agentOS::askTable", usage);
 
@@ -405,21 +421,34 @@ ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args) {
         throw IllegalArgumentException("agentOS::askTable", usage);
 
   DDB_SAFE_BEGIN
-    // 解析可选配置
     std::string system_prompt = "You are a helpful AI assistant integrated with DolphinDB.";
     int max_steps = 10;
     long long agent_handle = 0;
 
+    // 兼容旧 JSON 格式: askTable(question, configJson, handle)
     if (args.size() >= 2 && args[1]->getType() == DT_STRING) {
-        std::string cfg_str = args[1]->getString();
-        if (!cfg_str.empty()) {
-            auto opts = parse_json(cfg_str);
+        std::string second = args[1]->getString();
+        if (!second.empty() && second[0] == '{') {
+            auto opts = parse_json(second);
             system_prompt = opts.value("system_prompt", system_prompt);
             max_steps = opts.value("max_steps", max_steps);
+        } else if (!second.empty()) {
+            system_prompt = second;  // 原生参数：直接是 prompt 字符串
         }
     }
     if (args.size() >= 3 && args[2]->getType() != DT_VOID) {
-        agent_handle = args[2]->getLong();
+        if (args[2]->getType() == DT_INT || args[2]->getType() == DT_LONG) {
+            // 第三个参数：可能是 maxSteps（int）或 agentHandle（long）
+            long long val = args[2]->getLong();
+            if (val <= 100) {
+                max_steps = static_cast<int>(val);  // 小数字 → maxSteps
+            } else {
+                agent_handle = val;  // 大数字 → agentHandle
+            }
+        }
+    }
+    if (args.size() >= 4 && args[3]->getType() != DT_VOID) {
+        agent_handle = args[3]->getLong();
     }
 
     auto& os = PluginRuntime::instance().os();
@@ -608,77 +637,113 @@ ConstantSP agentOSRecall(Heap* heap, vector<ConstantSP>& args) {
     DDB_SAFE_END("agentOS::recall")
 }
 
-// ─── agentOS::graphAddNode(nodeJson) ─────────────────────────
+// ─── agentOS::graphAddNode(id, [type], [content]) ────────────
 
 ConstantSP agentOSGraphAddNode(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
-    const string usage = "Usage: agentOS::graphAddNode(nodeJson)";
-    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+    const string usage = "Usage: agentOS::graphAddNode(id, [type], [content])";
+    if (args.empty())
         throw IllegalArgumentException("agentOS::graphAddNode", usage);
 
-    auto j = parse_json(args[0]->getString());
+    // 兼容旧 JSON 格式
+    if (args.size() == 1 && args[0]->getType() == DT_STRING) {
+        std::string first = args[0]->getString();
+        if (!first.empty() && first[0] == '{') {
+            auto j = parse_json(first);
+            std::string node_id = j.value("id", "");
+            if (node_id.empty())
+                throw IllegalArgumentException("agentOS::graphAddNode", "'id' is required");
+            std::string node_type = j.value("type", "entity");
+            std::string content_str;
+            if (j.contains("properties") && j["properties"].is_object())
+                content_str = j["properties"].dump();
+            else
+                content_str = j.value("content", "");
 
-    std::string node_id = j.value("id", "");
-    if (node_id.empty())
-        throw IllegalArgumentException("agentOS::graphAddNode", "'id' is required");
-
-    std::string node_type = j.value("type", "entity");
-
-    // properties → content (JSON 序列化)
-    std::string content_str;
-    if (j.contains("properties") && j["properties"].is_object()) {
-        content_str = j["properties"].dump();
-    } else {
-        content_str = j.value("content", "");
+            DDB_SAFE_BEGIN
+            auto& graph = PluginRuntime::instance().os().memory().graph();
+            memory::GraphNode node;
+            node.id = node_id; node.type = node_type; node.content = std::move(content_str);
+            unwrap_or_throw("agentOS::graphAddNode", graph.add_node(std::move(node)));
+            return new String(node_id);
+            DDB_SAFE_END("agentOS::graphAddNode")
+        }
     }
 
-    DDB_SAFE_BEGIN
-    auto& os = PluginRuntime::instance().os();
-    auto& graph = os.memory().graph();
+    // 原生参数: graphAddNode(id, [type], [content])
+    std::string node_id = extract_string(args[0]);
+    if (node_id.empty())
+        throw IllegalArgumentException("agentOS::graphAddNode", "id must not be empty");
 
+    std::string node_type = args.size() > 1 ? extract_string(args[1]) : "entity";
+    std::string content   = args.size() > 2 ? extract_string(args[2]) : "";
+
+    if (node_type.empty()) node_type = "entity";
+
+    DDB_SAFE_BEGIN
+    auto& graph = PluginRuntime::instance().os().memory().graph();
     memory::GraphNode node;
     node.id = node_id;
     node.type = node_type;
-    node.content = std::move(content_str);
+    node.content = content;
 
-    auto result = graph.add_node(std::move(node));
-    unwrap_or_throw("agentOS::graphAddNode", std::move(result));
-
+    unwrap_or_throw("agentOS::graphAddNode", graph.add_node(std::move(node)));
     return new String(node_id);
     DDB_SAFE_END("agentOS::graphAddNode")
 }
 
-// ─── agentOS::graphAddEdge(edgeJson) ─────────────────────────
+// ─── agentOS::graphAddEdge(source, target, [relation], [weight]) ──
 
 ConstantSP agentOSGraphAddEdge(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
-    const string usage = "Usage: agentOS::graphAddEdge(edgeJson)";
-    if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
+    const string usage = "Usage: agentOS::graphAddEdge(source, target, [relation], [weight])";
+    if (args.empty())
         throw IllegalArgumentException("agentOS::graphAddEdge", usage);
 
-    auto j = parse_json(args[0]->getString());
+    // 兼容旧 JSON 格式
+    if (args.size() == 1 && args[0]->getType() == DT_STRING) {
+        std::string first = args[0]->getString();
+        if (!first.empty() && first[0] == '{') {
+            auto j = parse_json(first);
+            std::string source = j.value("source", "");
+            std::string target = j.value("target", "");
+            if (source.empty() || target.empty())
+                throw IllegalArgumentException("agentOS::graphAddEdge", "source and target required");
 
-    std::string source = j.value("source", "");
-    std::string target = j.value("target", "");
-    std::string relation = j.value("relation", "related_to");
+            DDB_SAFE_BEGIN
+            auto& graph = PluginRuntime::instance().os().memory().graph();
+            memory::GraphEdge edge;
+            edge.source_id = source; edge.target_id = target;
+            edge.relation = j.value("relation", "related_to");
+            edge.weight = j.value("weight", 1.0f);
+            unwrap_or_throw("agentOS::graphAddEdge", graph.add_edge(std::move(edge)));
+            return new Bool(true);
+            DDB_SAFE_END("agentOS::graphAddEdge")
+        }
+    }
+
+    // 原生参数: graphAddEdge(source, target, [relation], [weight])
+    if (args.size() < 2)
+        throw IllegalArgumentException("agentOS::graphAddEdge", usage);
+
+    std::string source   = extract_string(args[0]);
+    std::string target   = extract_string(args[1]);
+    std::string relation = args.size() > 2 ? extract_string(args[2]) : "related_to";
+    float weight         = args.size() > 3 ? extract_float(args[3])  : 1.0f;
 
     if (source.empty() || target.empty())
-        throw IllegalArgumentException("agentOS::graphAddEdge",
-            "'source' and 'target' are required");
+        throw IllegalArgumentException("agentOS::graphAddEdge", "source and target must not be empty");
+    if (relation.empty()) relation = "related_to";
 
     DDB_SAFE_BEGIN
-    auto& os = PluginRuntime::instance().os();
-    auto& graph = os.memory().graph();
-
+    auto& graph = PluginRuntime::instance().os().memory().graph();
     memory::GraphEdge edge;
     edge.source_id = source;
     edge.target_id = target;
     edge.relation = relation;
-    edge.weight = j.value("weight", 1.0f);
+    edge.weight = weight;
 
-    auto result = graph.add_edge(std::move(edge));
-    unwrap_or_throw("agentOS::graphAddEdge", std::move(result));
-
+    unwrap_or_throw("agentOS::graphAddEdge", graph.add_edge(std::move(edge)));
     return new Bool(true);
     DDB_SAFE_END("agentOS::graphAddEdge")
 }
@@ -781,97 +846,115 @@ ConstantSP agentOSStatus(Heap* heap, vector<ConstantSP>& args) {
     DDB_SAFE_END("agentOS::status")
 }
 
-// ─── agentOS::registerTool(schemaJson, callbackName) ─────────
+// ─── agentOS::registerTool(name, description, handler, [params]) ──
 
 ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args) {
-    const string usage = "Usage: agentOS::registerTool(schemaJson, callbackFuncName)";
-    if (args.size() < 2)
+    const string usage = "Usage: agentOS::registerTool(name, description, handler, [params])";
+    if (args.size() < 3)
         throw IllegalArgumentException("agentOS::registerTool", usage);
-    if (!args[0]->isScalar() || args[0]->getType() != DT_STRING)
-        throw IllegalArgumentException("agentOS::registerTool", usage + " schemaJson must be a string.");
-    if (!args[1]->isScalar() || args[1]->getType() != DT_STRING)
-        throw IllegalArgumentException("agentOS::registerTool", usage + " callbackFuncName must be a string.");
 
-    auto schema_json = parse_json(args[0]->getString());
-    std::string callback_name = args[1]->getString();
+    // 兼容旧 JSON 格式: registerTool(schemaJson, callbackName)
+    // 检测：如果只有 2 个参数且第一个以 '{' 开头
+    if (args.size() == 2 && args[0]->getType() == DT_STRING) {
+        std::string first = args[0]->getString();
+        if (!first.empty() && first[0] == '{') {
+            // 旧 JSON 模式
+            auto schema_json = parse_json(first);
+            std::string callback_name = extract_string(args[1]);
 
-    if (callback_name.empty())
-        throw IllegalArgumentException("agentOS::registerTool", "callbackFuncName must not be empty.");
+            tools::ToolSchema schema;
+            schema.id = schema_json.value("id", "");
+            schema.description = schema_json.value("description", "");
+            if (schema.id.empty())
+                throw IllegalArgumentException("agentOS::registerTool", "'id' is required");
 
-    tools::ToolSchema schema;
-    schema.id = schema_json.value("id", "");
-    schema.description = schema_json.value("description", "");
-
-    if (schema.id.empty())
-        throw IllegalArgumentException("agentOS::registerTool", "'id' is required in schema.");
-
-    if (schema_json.contains("params") && schema_json["params"].is_array()) {
-        for (const auto& p : schema_json["params"]) {
-            tools::ParamDef param;
-            param.name = p.value("name", "");
-            param.description = p.value("description", "");
-            param.required = p.value("required", true);
-
-            std::string type_str = p.value("type", "string");
-            if (type_str == "int" || type_str == "integer") {
-                param.type = tools::ParamType::Integer;
-            } else if (type_str == "float" || type_str == "number") {
-                param.type = tools::ParamType::Float;
-            } else if (type_str == "bool" || type_str == "boolean") {
-                param.type = tools::ParamType::Boolean;
-            } else {
-                param.type = tools::ParamType::String;
+            if (schema_json.contains("params") && schema_json["params"].is_array()) {
+                for (const auto& p : schema_json["params"]) {
+                    tools::ParamDef param;
+                    param.name = p.value("name", "");
+                    param.description = p.value("description", "");
+                    param.required = p.value("required", true);
+                    std::string type_str = p.value("type", "string");
+                    if (type_str == "int" || type_str == "integer") param.type = tools::ParamType::Integer;
+                    else if (type_str == "float" || type_str == "number") param.type = tools::ParamType::Float;
+                    else if (type_str == "bool" || type_str == "boolean") param.type = tools::ParamType::Boolean;
+                    else param.type = tools::ParamType::String;
+                    schema.params.push_back(std::move(param));
+                }
             }
-            schema.params.push_back(std::move(param));
+            schema.timeout_ms = schema_json.value("timeout_ms", 30000u);
+
+            // 注册（复用下面的回调逻辑）
+            DDB_SAFE_BEGIN
+            auto& os = PluginRuntime::instance().os();
+            SessionSP session = heap->currentSession()->copy();
+            session->setUser(heap->currentSession()->getUser());
+            os.register_tool(std::move(schema),
+                [callback_name, session](const tools::ParsedArgs& pargs) -> tools::ToolResult {
+                    try {
+                        nlohmann::json args_json;
+                        for (const auto& [key, value] : pargs.values) args_json[key] = value;
+                        FunctionDefSP func = session->getFunctionDef(callback_name);
+                        if (func.isNull()) return tools::ToolResult{false, "", "Function '" + callback_name + "' not found"};
+                        vector<ConstantSP> ddb_args = {new String(args_json.dump())};
+                        ConstantSP result = func->call(session->getHeap().get(), ddb_args);
+                        return tools::ToolResult{true, result->getString(), ""};
+                    } catch (const std::exception& e) {
+                        return tools::ToolResult{false, "", std::string("Callback error: ") + e.what()};
+                    }
+                });
+            return new Bool(true);
+            DDB_SAFE_END("agentOS::registerTool")
         }
     }
 
-    schema.timeout_ms = schema_json.value("timeout_ms", 30000u);
-    schema.is_dangerous = schema_json.value("is_dangerous", false);
+    // 新原生参数模式: registerTool(name, description, handler, [params])
+    std::string name = extract_string(args[0]);
+    std::string description = extract_string(args[1]);
+
+    if (name.empty())
+        throw IllegalArgumentException("agentOS::registerTool", "name must not be empty");
+
+    // args[2] 是 DolphinDB 函数引用（FunctionDef）或函数名字符串
+    std::string callback_name;
+    FunctionDefSP callback_func;
+    if (args[2]->getType() == DT_FUNCTIONDEF) {
+        callback_func = args[2];
+    } else if (args[2]->getType() == DT_STRING) {
+        callback_name = args[2]->getString();
+    } else {
+        throw IllegalArgumentException("agentOS::registerTool", "handler must be a function or function name string");
+    }
+
+    tools::ToolSchema schema;
+    schema.id = name;
+    schema.description = description;
 
     DDB_SAFE_BEGIN
     auto& os = PluginRuntime::instance().os();
 
-    // 捕获 heap 和 callback_name，通过 Session 执行 DolphinDB 函数
-    // NOTE: heap 指针在当前调用栈有效；长期使用需 copy Session
     SessionSP session = heap->currentSession()->copy();
     session->setUser(heap->currentSession()->getUser());
 
     os.register_tool(std::move(schema),
-        [callback_name, session](const tools::ParsedArgs& args) -> tools::ToolResult {
+        [callback_name, callback_func, session](const tools::ParsedArgs& pargs) -> tools::ToolResult {
             try {
-                // 解析参数为 JSON
                 nlohmann::json args_json;
-                for (const auto& [key, value] : args.values) {
-                    args_json[key] = value;
-                }
+                for (const auto& [key, value] : pargs.values) args_json[key] = value;
 
-                // 通过 Session 解析并调用 DolphinDB 端定义的函数
-                FunctionDefSP func = session->getFunctionDef(callback_name);
+                FunctionDefSP func = callback_func;
+                if (func.isNull() && !callback_name.empty()) {
+                    func = session->getFunctionDef(callback_name);
+                }
                 if (func.isNull()) {
-                    return tools::ToolResult{
-                        .success = false,
-                        .output = "",
-                        .error = "DolphinDB function '" + callback_name + "' not found"
-                    };
+                    return tools::ToolResult{false, "", "Handler function not found"};
                 }
 
-                // 将 JSON args 转换为 DolphinDB String 参数
-                vector<ConstantSP> ddb_args;
-                ddb_args.push_back(new String(args_json.dump()));
-
+                vector<ConstantSP> ddb_args = {new String(args_json.dump())};
                 ConstantSP result = func->call(session->getHeap().get(), ddb_args);
-                return tools::ToolResult{
-                    .success = true,
-                    .output = result->getString(),
-                    .error = ""
-                };
+                return tools::ToolResult{true, result->getString(), ""};
             } catch (const std::exception& e) {
-                return tools::ToolResult{
-                    .success = false,
-                    .output = "",
-                    .error = std::string("DolphinDB callback error: ") + e.what()
-                };
+                return tools::ToolResult{false, "", std::string("Callback error: ") + e.what()};
             }
         });
 
@@ -1095,15 +1178,7 @@ ConstantSP agentOSCancelAsync(Heap* heap, vector<ConstantSP>& args) {
 // RAG: KnowledgeBase 系列函数
 // ═══════════════════════════════════════════════════════════════
 
-// ─── agentOS::createKB([configJson]) ─────────────────────────
-//
-// 创建知识库实例，返回 handle (LONG)。
-// configJson 可选字段:
-//   vector_dim       : INT    (默认 1536)
-//   max_chunks       : INT    (默认 100000)
-//   embedding_model  : STRING (默认 "text-embedding-3-small")
-//   chunk_size       : INT    (默认 500)
-//   chunk_overlap    : INT    (默认 50)
+// ─── agentOS::createKB([chunkSize], [chunkOverlap], [embeddingModel]) ──
 
 ConstantSP agentOSCreateKB(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
@@ -1111,17 +1186,16 @@ ConstantSP agentOSCreateKB(Heap* heap, vector<ConstantSP>& args) {
 
     auto& os = PluginRuntime::instance().os();
 
-    // 默认参数
     uint32_t vector_dim = 1536;
     size_t max_chunks = 100000;
     std::string embedding_model = "text-embedding-3-small";
     size_t chunk_size = 500;
     size_t chunk_overlap = 50;
 
-    // 解析可选 configJson
+    // 兼容旧 JSON 格式
     if (!args.empty() && !args[0]->isNull() && args[0]->getType() == DT_STRING) {
         std::string cfg_str = args[0]->getString();
-        if (!cfg_str.empty()) {
+        if (!cfg_str.empty() && cfg_str[0] == '{') {
             auto cfg = nlohmann::json::parse(cfg_str, nullptr, false);
             if (!cfg.is_discarded()) {
                 if (cfg.contains("vector_dim"))      vector_dim      = cfg["vector_dim"].get<uint32_t>();
@@ -1130,7 +1204,22 @@ ConstantSP agentOSCreateKB(Heap* heap, vector<ConstantSP>& args) {
                 if (cfg.contains("chunk_size"))      chunk_size      = cfg["chunk_size"].get<size_t>();
                 if (cfg.contains("chunk_overlap"))   chunk_overlap   = cfg["chunk_overlap"].get<size_t>();
             }
+        } else if (!cfg_str.empty()) {
+            // 第一个参数是 embeddingModel 字符串
+            embedding_model = cfg_str;
         }
+    }
+
+    // 原生参数: createKB([chunkSize], [chunkOverlap], [embeddingModel])
+    if (!args.empty() && args[0]->getType() == DT_INT) {
+        chunk_size = static_cast<size_t>(extract_int(args[0]));
+    }
+    if (args.size() > 1 && args[1]->getType() == DT_INT) {
+        chunk_overlap = static_cast<size_t>(extract_int(args[1]));
+    }
+    if (args.size() > 2 && args[2]->getType() == DT_STRING) {
+        std::string em = extract_string(args[2]);
+        if (!em.empty()) embedding_model = em;
     }
 
     // 获取 LLM backend 用于 embedding
