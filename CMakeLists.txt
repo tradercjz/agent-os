@@ -219,6 +219,9 @@ target_link_libraries(csr_graph_demo agentos)
 add_executable(openai_demo examples/openai_demo.cpp)
 target_link_libraries(openai_demo agentos)
 
+add_executable(worktree_demo examples/worktree_demo.cpp)
+target_link_libraries(worktree_demo agentos)
+
 if(NOT AGENTOS_NO_DUCKDB)
     add_executable(rag_agent_demo examples/rag_agent_demo.cpp)
     target_link_libraries(rag_agent_demo agentos)
