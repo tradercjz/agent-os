@@ -166,6 +166,7 @@ set(AGENTOS_SOURCES
     src/security/security.cpp
     src/bus/agent_bus.cpp
     src/tracing/tracer.cpp
+    src/worktree/worktree_manager.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -270,6 +271,7 @@ set(TEST_SOURCES
   tests/test_task.cpp
   tests/test_agentos.cpp
   tests/test_dolphindb_adapter.cpp
+  tests/test_worktree_manager.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target

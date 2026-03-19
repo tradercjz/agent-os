@@ -63,6 +63,12 @@ enum class ErrorCode : int {
   MemoryReadFailed,
   MemoryWriteFailed,
   ResourceExhausted,
+  NotImplemented,
+  WorktreeError,
+  WorktreeCapacityFull,
+  ProcessSpawnFailed,
+  ProcessDied,
+  HandshakeFailed,
 };
 
 struct Error {
