@@ -14,6 +14,7 @@
 #include <agentos/tools/tool_manager.hpp>
 #include <agentos/tools/tool_learner.hpp>
 #include <agentos/tracing.hpp>
+#include <agentos/worktree/worktree_manager.hpp>
 #include <atomic>
 #include <cassert>
 #include <concepts>
@@ -66,6 +67,7 @@ struct AgentConfig {
   TokenCount context_limit{8192};
   std::vector<std::string> allowed_tools{}; // Default: empty (空 = 全部允许)
   bool persist_memory{false};             // 是否使用长期记忆
+  worktree::IsolationMode isolation{worktree::IsolationMode::Thread};
 
   static AgentConfigBuilder builder();
 };
@@ -98,6 +100,10 @@ public:
   }
   AgentConfigBuilder& persist_memory(bool p) {
     cfg_.persist_memory = p;
+    return *this;
+  }
+  AgentConfigBuilder& isolation(worktree::IsolationMode m) {
+    cfg_.isolation = m;
     return *this;
   }
   AgentConfig build() { return std::move(cfg_); }
@@ -133,6 +139,7 @@ public:
 
   AgentId id() const { return id_; }
   const AgentConfig &config() const { return config_; }
+  const std::filesystem::path& work_dir() const { return work_dir_; }
 
   void use(Middleware mw) {
     std::lock_guard lk(middleware_mu_);
@@ -147,6 +154,7 @@ protected:
   std::vector<Middleware> middleware_;
   mutable std::shared_mutex middleware_mu_;
   std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
+  std::filesystem::path work_dir_{std::filesystem::current_path()};
 
   // Middleware utilities
   bool run_before_hooks(HookContext &ctx);
@@ -219,6 +227,9 @@ public:
     std::string ltm_dir{
         (std::filesystem::temp_directory_path() / "agentos_ltm").string()};
     bool enable_security{true};
+    std::filesystem::path repo_root{std::filesystem::current_path()};
+    std::filesystem::path worktree_base{".agentos/worktrees"};
+    uint32_t max_worktrees{10};
 
     static ConfigBuilder builder();
   };
@@ -243,6 +254,18 @@ public:
     }
     ConfigBuilder& enable_security(bool e) {
       cfg_.enable_security = e;
+      return *this;
+    }
+    ConfigBuilder& repo_root(std::filesystem::path p) {
+      cfg_.repo_root = std::move(p);
+      return *this;
+    }
+    ConfigBuilder& worktree_base(std::filesystem::path p) {
+      cfg_.worktree_base = std::move(p);
+      return *this;
+    }
+    ConfigBuilder& max_worktrees(uint32_t n) {
+      cfg_.max_worktrees = n;
       return *this;
     }
     Config build() { return std::move(cfg_); }
@@ -313,6 +336,9 @@ public:
     consolidator_->start();
     tracer_ = std::make_unique<tracing::Tracer>();
     tool_learner_ = std::make_unique<tools::ToolLearner>(*kernel_);
+    worktree_mgr_ = std::make_unique<worktree::WorktreeManager>(
+        worktree::WorktreeConfig{config_.repo_root, config_.worktree_base,
+                                  config_.max_worktrees});
     scheduler_->start();
   }
 
@@ -346,6 +372,19 @@ public:
       agents_[id] = agent;
     }
 
+    // Worktree isolation: auto-create worktree for this agent
+    if (agent->config().isolation == worktree::IsolationMode::Worktree) {
+      std::string wt_name = agent->config().name.empty()
+          ? fmt::format("agent-{}", id) : agent->config().name;
+      auto wt_res = worktree_mgr_->create(wt_name);
+      if (wt_res) {
+        agent->work_dir_ = wt_res->path;
+      } else {
+        LOG_WARN(fmt::format("Failed to create worktree for agent {}: {}",
+                             id, wt_res.error().message));
+      }
+    }
+
     consolidator_->register_agent(id);
     agent->on_start();
     return agent;
@@ -357,6 +396,14 @@ public:
     auto it = agents_.find(id);
     if (it == agents_.end())
       return;
+
+    // Worktree cleanup
+    if (it->second->config().isolation == worktree::IsolationMode::Worktree) {
+      std::string wt_name = it->second->config().name.empty()
+          ? fmt::format("agent-{}", id) : it->second->config().name;
+      (void)worktree_mgr_->remove(wt_name, /*force=*/true);
+    }
+
     it->second->on_stop();
     bus_->unregister_agent(id);
     ctx_mgr_->clear(id);
@@ -399,6 +446,7 @@ public:
   memory::MemoryConsolidator &consolidator() { return *consolidator_; }
   tracing::Tracer &tracer() { return *tracer_; }
   tools::ToolLearner &tool_learner() { return *tool_learner_; }
+  worktree::WorktreeManager &worktree_mgr() { return *worktree_mgr_; }
 
   // ── Agent 数量查询 ──────────────────────────────────────
   size_t agent_count() const {
@@ -493,6 +541,7 @@ private:
   std::unique_ptr<memory::MemoryConsolidator> consolidator_;
   std::unique_ptr<tracing::Tracer> tracer_;
   std::unique_ptr<tools::ToolLearner> tool_learner_;
+  std::unique_ptr<worktree::WorktreeManager> worktree_mgr_;
   std::shared_ptr<std::atomic<bool>> os_alive_ = std::make_shared<std::atomic<bool>>(true);
 
   mutable std::mutex agents_mu_;
