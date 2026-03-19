@@ -1554,7 +1554,15 @@ ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
                          "[blockTools], [contextLimit], [isolation], [securityRole])";
     if (args.empty()) throw IllegalArgumentException("agentOS::createAgent", usage);
 
-    std::string name = extract_string(args[0]);
+    std::string first_arg = extract_string(args[0]);
+
+    // 兼容 V1: createAgent('{"name":"xxx",...}') — JSON 字符串
+    if (!first_arg.empty() && first_arg[0] == '{') {
+        return agentOSCreateAgent(heap, args);
+    }
+
+    // V2 模式：createAgent(name, [prompt], ...)
+    std::string name = first_arg;
     if (name.empty()) throw IllegalArgumentException("agentOS::createAgent", "name must not be empty");
 
     std::string prompt = args.size() > 1 ? extract_string(args[1]) : "";
@@ -1629,7 +1637,19 @@ ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
 
 ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
-    const string usage = "Usage: agentOS::ask(agent, question, [prompt])";
+    const string usage = "Usage: agentOS::ask(agent, question, [prompt]) or agentOS::ask(question, [prompt])";
+    if (args.empty()) throw IllegalArgumentException("agentOS::ask", usage);
+
+    // 兼容 V1: ask(question, [prompt]) — 第一个参数是 string
+    // V2: ask(agent, question, [prompt]) — 第一个参数是 long (handle)
+    bool is_v1 = (args[0]->getType() == DT_STRING);
+
+    if (is_v1) {
+        // V1 模式：无 agent handle，转发到旧的 agentOSAsk
+        return agentOSAsk(heap, args);
+    }
+
+    // V2 模式：有 agent handle
     if (args.size() < 2) throw IllegalArgumentException("agentOS::ask", usage);
 
     long long handle = extract_long(args[0]);
@@ -1657,7 +1677,16 @@ ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args) {
 // ─── agentOS::askStream(agent, question, [prompt], [callback]) ──
 
 ConstantSP agentOSAskStream2(Heap* heap, vector<ConstantSP>& args) {
-    const string usage = "Usage: agentOS::askStream(agent, question, [prompt], [callback])";
+    const string usage = "Usage: agentOS::askStream(agent, question, [prompt], [callback]) or agentOS::askStream(question, [prompt], [callback])";
+    if (args.empty()) throw IllegalArgumentException("agentOS::askStream", usage);
+
+    // 兼容 V1: askStream(question, [prompt], [callback])
+    bool is_v1 = (args[0]->getType() == DT_STRING);
+    if (is_v1) {
+        return agentOSAskStream(heap, args);
+    }
+
+    // V2 模式：有 agent handle
     if (args.size() < 2) throw IllegalArgumentException("agentOS::askStream", usage);
 
     long long handle = extract_long(args[0]);
