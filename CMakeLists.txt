@@ -222,6 +222,21 @@ target_link_libraries(openai_demo agentos)
 add_executable(worktree_demo examples/worktree_demo.cpp)
 target_link_libraries(worktree_demo agentos)
 
+add_executable(hooks_demo examples/hooks_demo.cpp)
+target_link_libraries(hooks_demo agentos)
+
+add_executable(session_demo examples/session_demo.cpp)
+target_link_libraries(session_demo agentos)
+
+add_executable(skills_demo examples/skills_demo.cpp)
+target_link_libraries(skills_demo agentos)
+
+add_executable(mcp_demo examples/mcp_demo.cpp)
+target_link_libraries(mcp_demo agentos)
+
+add_executable(headless_demo examples/headless_demo.cpp)
+target_link_libraries(headless_demo agentos)
+
 if(NOT AGENTOS_NO_DUCKDB)
     add_executable(rag_agent_demo examples/rag_agent_demo.cpp)
     target_link_libraries(rag_agent_demo agentos)
