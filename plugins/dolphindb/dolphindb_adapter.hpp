@@ -520,19 +520,19 @@ public:
                 }).detach();
 
                 // SSE 流式推送
+                auto sources_sent = std::make_shared<bool>(false);
                 res.set_chunked_content_provider(
                     "text/event-stream",
-                    [req_ptr, search_results](size_t, httplib::DataSink& sink) {
+                    [req_ptr, search_results, sources_sent](size_t, httplib::DataSink& sink) {
                         // 第一次先推送检索来源
-                        static thread_local bool sources_sent = false;
-                        if (!sources_sent) {
+                        if (!*sources_sent) {
                             nlohmann::json sources = nlohmann::json::array();
                             for (auto& r : search_results) {
                                 sources.push_back({{"doc_id", r.doc_id}, {"score", r.score}});
                             }
                             std::string src_event = "event: sources\ndata: " + sources.dump() + "\n\n";
                             sink.write(src_event.data(), src_event.size());
-                            sources_sent = true;
+                            *sources_sent = true;
                         }
 
                         auto [status, delta, content, error] = req_ptr->poll();
@@ -549,14 +549,12 @@ public:
                         if (status == AsyncRequest::Status::Done) {
                             sink.write("data: {\"done\":true}\n\n", 21);
                             sink.done();
-                            sources_sent = false;
                             return false;
                         }
                         if (status == AsyncRequest::Status::Error) {
                             std::string err_ev = "data: {\"error\":\"" + error + "\"}\n\n";
                             sink.write(err_ev.data(), err_ev.size());
                             sink.done();
-                            sources_sent = false;
                             return false;
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -774,9 +772,9 @@ ConstantSP version(Heap* heap, vector<ConstantSP>& args);
 /// 特殊入口 —— 权限 / 插件信息
 ConstantSP pluginInfo(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS::init([configJson])
+/// agentOS::init([apiKey], [baseUrl], [model], [threads], [tpmLimit])
 /// 初始化 AgentOS 运行时
-/// @param args[0]: STRING — JSON 配置（可选），默认空 = Mock 模式
+/// @param args: 位置参数，全部可选，无参数 = Mock 模式
 /// @return BOOL true
 ConstantSP agentOSInit(Heap* heap, vector<ConstantSP>& args);
 
@@ -784,7 +782,10 @@ ConstantSP agentOSInit(Heap* heap, vector<ConstantSP>& args);
 /// 关闭 AgentOS，释放所有资源 (command: void 返回)
 void agentOSClose(Heap* heap, vector<ConstantSP>& args);
 
-// V1 ask/askStream/askTable 已合并到下方统一声明
+/// agentOS::askTable(question, [prompt], [maxSteps], [agentHandle])
+/// 结构化对话，返回含工具调用记录的表
+/// @return TABLE — columns: role, content, tool_name, tool_args, tool_result
+ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::remember(content, [importance], [source])
 /// 存入长期记忆
@@ -796,11 +797,11 @@ ConstantSP agentOSRemember(Heap* heap, vector<ConstantSP>& args);
 /// @return TABLE — columns: content, score, source, created_at
 ConstantSP agentOSRecall(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS::graphAddNode(nodeJson)
+/// agentOS::graphAddNode(id, type, content)
 /// @return STRING — node ID
 ConstantSP agentOSGraphAddNode(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS::graphAddEdge(edgeJson)
+/// agentOS::graphAddEdge(source, target, relation, [weight])
 /// @return BOOL true
 ConstantSP agentOSGraphAddEdge(Heap* heap, vector<ConstantSP>& args);
 
@@ -816,11 +817,9 @@ ConstantSP agentOSHealth(Heap* heap, vector<ConstantSP>& args);
 /// @return STRING — 系统状态摘要
 ConstantSP agentOSStatus(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS::registerTool(schemaJson, callbackFuncName)
+/// agentOS::registerTool(name, description, handler, [params])
 /// @return BOOL true
 ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args);
-
-// V1 createAgent/destroyAgent 已合并到下方统一声明
 
 /// agentOS::askAsync(question, [systemPrompt])
 /// 异步发起 LLM 请求，立即返回 requestId
@@ -840,10 +839,8 @@ ConstantSP agentOSCancelAsync(Heap* heap, vector<ConstantSP>& args);
 
 // ─── RAG: KnowledgeBase 系列函数 ────────────────────────────
 
-/// agentOS::createKB([configJson])
+/// agentOS::createKB([chunkSize], [chunkOverlap], [embeddingModel])
 /// 创建知识库实例
-/// configJson: {"vector_dim":1536, "max_chunks":100000, "embedding_model":"text-embedding-3-small",
-///              "chunk_size":500, "chunk_overlap":50}
 /// @return LONG — KB handle
 ConstantSP agentOSCreateKB(Heap* heap, vector<ConstantSP>& args);
 

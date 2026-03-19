@@ -634,8 +634,10 @@ TEST(KernelCoverageTest, KernelStreamInfer) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// knowledge_base.hpp coverage
+// knowledge_base.hpp coverage (requires DuckDB)
 // ═══════════════════════════════════════════════════════════
+
+#ifndef AGENTOS_NO_DUCKDB
 
 // Reuse the MockEmbeddingBackend from test_knowledge_base.cpp
 class MockEmbedBackend : public ILLMBackend {
@@ -799,6 +801,8 @@ TEST(KBCoverageTest, RemoveDocumentWithHNSW) {
     EXPECT_NE(r.doc_id, "to_remove");
   }
 }
+
+#endif // AGENTOS_NO_DUCKDB
 
 // ═══════════════════════════════════════════════════════════
 // Additional edge cases

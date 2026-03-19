@@ -11,10 +11,12 @@
 #include <hnswlib/hnswlib.h>
 #pragma GCC diagnostic pop
 #include <agentos/core/logger.hpp>
+#ifndef AGENTOS_NO_DUCKDB
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <duckdb.hpp>
 #pragma GCC diagnostic pop
+#endif
 #include <memory>
 #include <mutex>
 #include <string>
@@ -173,7 +175,9 @@ public:
       }
     }
 
-    // 3. chunk 元数据 → DuckDB
+    // 3. chunk 元数据
+#ifndef AGENTOS_NO_DUCKDB
+    // DuckDB 列存格式
     try {
       auto db_path = (dir / "kb_meta.duckdb").string();
       duckdb::DuckDB db(db_path);
@@ -226,14 +230,23 @@ public:
       LOG_ERROR(fmt::format("[KB] Failed to save metadata: {}", e.what()));
       return false;
     }
+#else
+    // 无 DuckDB: 使用旧二进制格式
+    if (!save_to_legacy_bin(dir))
+      return false;
+#endif
     return true;
   }
 
   bool load(const fs::path &dir) {
     std::lock_guard lk(mu_);
 
-    // DuckDB 格式优先，降级到旧二进制格式
+    // 检查可用格式
+#ifndef AGENTOS_NO_DUCKDB
     bool has_duckdb = fs::exists(dir / "kb_meta.duckdb");
+#else
+    bool has_duckdb = false;
+#endif
     bool has_legacy = fs::exists(dir / "kb_meta.bin");
     if (!has_duckdb && !has_legacy)
       return false;
@@ -244,10 +257,13 @@ public:
       return false;
     }
 
+#ifndef AGENTOS_NO_DUCKDB
     if (has_duckdb) {
       if (!load_from_duckdb(dir))
         return false;
-    } else {
+    } else
+#endif
+    {
       if (!load_from_legacy_bin(dir))
         return false;
     }
@@ -412,6 +428,7 @@ private:
   // GraphRAG
   std::shared_ptr<graph_engine::core::ImmutableGraph> graph_;
 
+#ifndef AGENTOS_NO_DUCKDB
   // ── DuckDB 元数据加载 ───────────────────────────────
   bool load_from_duckdb(const fs::path &dir) {
     try {
@@ -464,6 +481,52 @@ private:
       LOG_ERROR(fmt::format("[KB] DuckDB load failed: {}", e.what()));
       return false;
     }
+  }
+#endif
+
+  // ── 旧二进制格式保存 ───────────────────────────────
+  bool save_to_legacy_bin(const fs::path &dir) const {
+    std::ofstream ofs(dir / "kb_meta.bin", std::ios::binary);
+    if (!ofs) return false;
+
+    uint32_t magic = 0x4B424D54;
+    ofs.write(reinterpret_cast<const char *>(&magic), 4);
+    ofs.write(reinterpret_cast<const char *>(&dim_), sizeof(dim_));
+    ofs.write(reinterpret_cast<const char *>(&max_chunks_), sizeof(max_chunks_));
+
+    auto write_str = [&](const std::string &s) {
+      uint32_t len = static_cast<uint32_t>(s.size());
+      ofs.write(reinterpret_cast<const char *>(&len), 4);
+      ofs.write(s.data(), len);
+    };
+
+    write_str(embedding_model_);
+
+    uint32_t n_chunks = static_cast<uint32_t>(chunk_content_.size());
+    ofs.write(reinterpret_cast<const char *>(&n_chunks), 4);
+    for (const auto &[id, content] : chunk_content_) {
+      write_str(id);
+      write_str(content);
+    }
+
+    uint32_t n_docs = static_cast<uint32_t>(chunk_docs_.size());
+    ofs.write(reinterpret_cast<const char *>(&n_docs), 4);
+    for (const auto &[chunk_id, doc_id] : chunk_docs_) {
+      write_str(chunk_id);
+      write_str(doc_id);
+    }
+
+    ofs.write(reinterpret_cast<const char *>(&next_hnsw_id_), sizeof(next_hnsw_id_));
+    uint32_t n_hnsw = static_cast<uint32_t>(hnsw_id_to_chunk_.size());
+    ofs.write(reinterpret_cast<const char *>(&n_hnsw), 4);
+    for (const auto &[label, chunk_id] : hnsw_id_to_chunk_) {
+      ofs.write(reinterpret_cast<const char *>(&label), sizeof(label));
+      write_str(chunk_id);
+    }
+
+    LOG_INFO(fmt::format("[KB] Saved (legacy bin): {} chunks -> {}",
+                         chunk_content_.size(), dir.string()));
+    return ofs.good();
   }
 
   // ── 旧二进制格式兼容加载 ─────────────────────────────
