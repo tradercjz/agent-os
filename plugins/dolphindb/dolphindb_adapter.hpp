@@ -784,21 +784,7 @@ ConstantSP agentOSInit(Heap* heap, vector<ConstantSP>& args);
 /// 关闭 AgentOS，释放所有资源 (command: void 返回)
 void agentOSClose(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS::ask(question, [systemPrompt])
-/// 单轮对话
-/// @return STRING — LLM 回答
-ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args);
-
-/// agentOS::askStream(question, [systemPrompt], [callbackFunc])
-/// 流式对话 — callbackFunc 每收到一个 token 被调用一次
-/// 例: agentOS::askStream("问题", , print)
-/// @return STRING — 完整回答
-ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args);
-
-/// agentOS::askTable(question, [configJson], [agentHandle])
-/// 对话并返回结构化结果
-/// @return TABLE — columns: role, content, tool_name, tool_args, tool_result
-ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args);
+// V1 ask/askStream/askTable 已合并到下方统一声明
 
 /// agentOS::remember(content, [importance], [source])
 /// 存入长期记忆
@@ -834,13 +820,7 @@ ConstantSP agentOSStatus(Heap* heap, vector<ConstantSP>& args);
 /// @return BOOL true
 ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args);
 
-/// agentOS::createAgent(configJson)
-/// @return LONG — agent handle（可作为 resource 管理）
-ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args);
-
-/// agentOS::destroyAgent(handle)
-/// @return BOOL — success
-ConstantSP agentOSDestroyAgent(Heap* heap, vector<ConstantSP>& args);
+// V1 createAgent/destroyAgent 已合并到下方统一声明
 
 /// agentOS::askAsync(question, [systemPrompt])
 /// 异步发起 LLM 请求，立即返回 requestId
@@ -923,17 +903,17 @@ ConstantSP agentOSAskWithKBAsync(Heap* heap, vector<ConstantSP>& args);
 ///                      [contextLimit], [isolation], [securityRole])
 /// 原生参数风格创建 Agent
 /// @return LONG — agent handle
-ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args);
+ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::ask(agent, question, [prompt])
 /// 单轮/多轮对话（保持上下文）
 /// @return STRING — LLM 回答
-ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args);
+ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::askStream(agent, question, [prompt], [callback])
 /// 流式对话
 /// @return STRING — 完整回答
-ConstantSP agentOSAskStream2(Heap* heap, vector<ConstantSP>& args);
+ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::run(agent, task, [prompt], [timeout], [contextLimit])
 /// 结构化执行任务

@@ -283,7 +283,7 @@ void agentOSClose(Heap* heap, vector<ConstantSP>& args) {
 
 // ─── agentOS::ask(question, [systemPrompt]) ──────────────────
 
-ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
+static ConstantSP agentOSAsk_v1(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
     const string usage = "Usage: agentOS::ask(question, [systemPrompt])";
     if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
@@ -328,7 +328,7 @@ ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
 
 // ─── agentOS::askStream(question, [systemPrompt], [callback]) ─
 
-ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args) {
+static ConstantSP agentOSAskStream_v1(Heap* heap, vector<ConstantSP>& args) {
     const string usage =
         "Usage: agentOS::askStream(question, [systemPrompt], [callbackFunc])\n"
         "  callbackFunc: a DolphinDB function(token) called for each token chunk.\n"
@@ -881,7 +881,7 @@ ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args) {
 
 // ─── agentOS::createAgent(configJson) ────────────────────────
 
-ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args) {
+static ConstantSP agentOSCreateAgent_v1(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
     const string usage = "Usage: agentOS::createAgent(configJson)";
     if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
@@ -911,7 +911,7 @@ ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args) {
 
 // ─── agentOS::destroyAgent(handle) ───────────────────────────
 
-ConstantSP agentOSDestroyAgent(Heap* heap, vector<ConstantSP>& args) {
+static ConstantSP agentOSDestroyAgent_v1(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
     const string usage = "Usage: agentOS::destroyAgent(handle)";
     if (args.empty())
@@ -1548,7 +1548,7 @@ static std::vector<std::string> extract_string_vector(const ConstantSP& val) {
 // ─── agentOS::createAgent(name, [prompt], [tools], [skills],
 //         [blockTools], [contextLimit], [isolation], [securityRole]) ──
 
-ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
+ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
     const string usage = "Usage: agentOS::createAgent(name, [prompt], [tools], [skills], "
                          "[blockTools], [contextLimit], [isolation], [securityRole])";
@@ -1558,7 +1558,7 @@ ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
 
     // 兼容 V1: createAgent('{"name":"xxx",...}') — JSON 字符串
     if (!first_arg.empty() && first_arg[0] == '{') {
-        return agentOSCreateAgent(heap, args);
+        return agentOSCreateAgent_v1(heap, args);
     }
 
     // V2 模式：createAgent(name, [prompt], ...)
@@ -1635,7 +1635,7 @@ ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
 
 // ─── agentOS::ask(agent, question, [prompt]) ─────────────────
 
-ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args) {
+ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
     const string usage = "Usage: agentOS::ask(agent, question, [prompt]) or agentOS::ask(question, [prompt])";
     if (args.empty()) throw IllegalArgumentException("agentOS::ask", usage);
@@ -1646,7 +1646,7 @@ ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args) {
 
     if (is_v1) {
         // V1 模式：无 agent handle，转发到旧的 agentOSAsk
-        return agentOSAsk(heap, args);
+        return agentOSAsk_v1(heap, args);
     }
 
     // V2 模式：有 agent handle
@@ -1676,14 +1676,14 @@ ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args) {
 
 // ─── agentOS::askStream(agent, question, [prompt], [callback]) ──
 
-ConstantSP agentOSAskStream2(Heap* heap, vector<ConstantSP>& args) {
+ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args) {
     const string usage = "Usage: agentOS::askStream(agent, question, [prompt], [callback]) or agentOS::askStream(question, [prompt], [callback])";
     if (args.empty()) throw IllegalArgumentException("agentOS::askStream", usage);
 
     // 兼容 V1: askStream(question, [prompt], [callback])
     bool is_v1 = (args[0]->getType() == DT_STRING);
     if (is_v1) {
-        return agentOSAskStream(heap, args);
+        return agentOSAskStream_v1(heap, args);
     }
 
     // V2 模式：有 agent handle
