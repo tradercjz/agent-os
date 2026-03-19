@@ -2082,9 +2082,8 @@ ConstantSP agentOSSessions(Heap* heap, vector<ConstantSP>& args) {
     std::vector<long long> message_counts;
 
     auto& ctx = os.ctx();
-    // Get snapshot dir by listing sessions for a range of agent IDs
-    // Simplified: scan all files matching "session_*.bin"
-    std::string snap_dir = os.config_.snapshot_dir;
+    // Scan snapshot dir for all session files matching "session_*.bin"
+    std::string snap_dir = os.config().snapshot_dir;
     namespace fs = std::filesystem;
 
     if (fs::exists(snap_dir)) {

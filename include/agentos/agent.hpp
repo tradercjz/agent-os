@@ -447,6 +447,7 @@ public:
   tracing::Tracer &tracer() { return *tracer_; }
   tools::ToolLearner &tool_learner() { return *tool_learner_; }
   worktree::WorktreeManager &worktree_mgr() { return *worktree_mgr_; }
+  const Config& config() const { return config_; }
 
   // ── Agent 数量查询 ──────────────────────────────────────
   size_t agent_count() const {
