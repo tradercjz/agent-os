@@ -5,7 +5,7 @@
 // 核心：将 DolphinDB 查询函数注册为 Agent 工具
 
 loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
-agentOS::init('{"api_key":"sk-xxx","base_url":"https://api.siliconflow.cn/v1","model":"deepseek-chat"}')
+agentOS::init("sk-xxx", "https://api.siliconflow.cn/v1", "deepseek-chat")
 
 // ────────────────────────────────────
 // 第一步：定义数据查询工具
@@ -52,20 +52,9 @@ def calcIndicators(paramsJson) {
 // 第二步：注册工具
 // ────────────────────────────────────
 
-agentOS::registerTool(
-    '{"id":"query_price","description":"查询某只股票的最新价格","params":[{"name":"ticker","type":"string","description":"股票代码，如 600519"}]}',
-    "queryLatestPrice"
-)
-
-agentOS::registerTool(
-    '{"id":"query_kline","description":"查询某只股票的K线数据","params":[{"name":"ticker","type":"string","description":"股票代码"},{"name":"days","type":"integer","description":"查询最近多少天"}]}',
-    "queryKLine"
-)
-
-agentOS::registerTool(
-    '{"id":"calc_indicators","description":"计算股票技术指标(MA5/MA20/金叉死叉)","params":[{"name":"ticker","type":"string","description":"股票代码"}]}',
-    "calcIndicators"
-)
+agentOS::registerTool("query_price", "查询某只股票的最新价格", queryLatestPrice)
+agentOS::registerTool("query_kline", "查询某只股票的K线数据", queryKLine)
+agentOS::registerTool("calc_indicators", "计算股票技术指标(MA5/MA20/金叉死叉)", calcIndicators)
 
 // ────────────────────────────────────
 // 第三步：注册技能包
@@ -84,7 +73,7 @@ analyst = agentOS::createAgent(
     name = "quant-analyst",
     prompt = "你是一位资深量化研究员。分析股票时，先用工具查询数据，再基于数据给出专业判断。用中文回答，数据用表格展示。",
     skills = ["行情分析"],
-    blockTools = ["shell"],       // 禁止执行 shell 命令
+    blockTools = ["shell"],
     contextLimit = 16384
 )
 

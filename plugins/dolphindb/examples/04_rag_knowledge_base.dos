@@ -5,13 +5,13 @@
 // 核心：灌入文档 → 自动分块+向量化 → 检索增强生成
 
 loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
-agentOS::init('{"api_key":"sk-xxx","model":"deepseek-chat"}')
+agentOS::init("sk-xxx", model="deepseek-chat")
 
 // ────────────────────────────────────
 // 第一步：创建知识库
 // ────────────────────────────────────
 
-kb = agentOS::createKB('{"chunk_size":500,"chunk_overlap":50}')
+kb = agentOS::createKB(500, 50)
 
 // ────────────────────────────────────
 // 第二步：灌入知识

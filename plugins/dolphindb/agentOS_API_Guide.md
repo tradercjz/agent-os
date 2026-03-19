@@ -69,10 +69,10 @@ loadPlugin("/path/to/PluginAgentOS.txt")
 agentOS::init()
 
 // 生产模式 — OpenAI
-agentOS::init('{"api_key":"sk-xxx","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini"}')
+agentOS::init("sk-xxx", "https://api.openai.com/v1", "gpt-4o-mini")
 
 // 生产模式 — OpenAI 兼容（SiliconFlow / DeepSeek / 本地 Ollama）
-agentOS::init('{"api_key":"sk-xxx","base_url":"https://api.siliconflow.cn/v1","model":"deepseek-chat"}')
+agentOS::init("sk-xxx", "https://api.siliconflow.cn/v1", "deepseek-chat")
 ```
 
 ### 2.3 第一次对话
@@ -93,7 +93,7 @@ agentOS::ask("帮我写一个均线策略", "你是一个量化分析师")
 
 | 函数 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
-| `agentOS::init([configJson])` | STRING (可选) | BOOL | 初始化 AgentOS，幂等 |
+| `agentOS::init([apiKey [, baseUrl [, model [, threads [, tpmLimit]]]]])` | STRING... | BOOL | 初始化 AgentOS，幂等 |
 | `agentOS::close()` | 无 | VOID | 关闭并释放所有资源 |
 | `agentOS::health()` | 无 | STRING (JSON) | 健康检查 `{"healthy":true,...}` |
 | `agentOS::status()` | 无 | STRING | 运行状态摘要 |
@@ -161,13 +161,15 @@ agentOS::ask("帮我写一个均线策略", "你是一个量化分析师")
 
 | 函数 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
-| `agentOS::graphAddNode(nodeJson)` | STRING | STRING | 添加节点，返回 ID |
-| `agentOS::graphAddEdge(edgeJson)` | STRING | BOOL | 添加边 |
+| `agentOS::graphAddNode(id, type, content)` | STRING, STRING, STRING | STRING | 添加节点，返回 ID |
+| `agentOS::graphAddEdge(source, target, relation [, weight])` | STRING, STRING, STRING, DOUBLE | BOOL | 添加边 |
 | `agentOS::graphQuery(nodeId [, maxResults])` | STRING, INT | TABLE | 查询关系 |
 
-**nodeJson 示例**: `{"id":"AAPL","type":"stock","properties":{"name":"Apple Inc."}}`
-
-**edgeJson 示例**: `{"source":"AAPL","target":"tech_sector","relation":"belongs_to","weight":1.0}`
+**示例**:
+```dolphindb
+agentOS::graphAddNode("AAPL", "stock", "Apple Inc.")
+agentOS::graphAddEdge("AAPL", "tech_sector", "belongs_to", 1.0)
+```
 
 **graphQuery 返回表**: `source | relation | target | weight`
 
@@ -175,34 +177,41 @@ agentOS::ask("帮我写一个均线策略", "你是一个量化分析师")
 
 | 函数 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
-| `agentOS::registerTool(schemaJson, callbackFuncName)` | STRING, STRING | BOOL | 注册 DolphinDB 函数为 Agent 工具 |
+| `agentOS::registerTool(name, description, handler [, params])` | STRING, STRING, FUNCTION, STRING | BOOL | 注册 DolphinDB 函数为 Agent 工具 |
 
-**schemaJson 示例**:
+**示例**:
 
-```json
-{
-  "id": "query_stock_price",
-  "description": "查询股票最新价格",
-  "params": [
-    {"name": "symbol", "type": "string", "description": "股票代码"}
-  ]
+```dolphindb
+def queryPrice(paramsJson) {
+    params = parseExpr(paramsJson).eval()
+    return exec last price from loadTable("dfs://market", "trades") where symbol = params["symbol"]
 }
+agentOS::registerTool("query_stock_price", "查询股票最新价格", queryPrice)
 ```
 
 ### 3.7 Agent 管理
 
 | 函数 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
-| `agentOS::createAgent(configJson)` | STRING | LONG | 创建持久 Agent，返回 handle |
-| `agentOS::destroyAgent(handle)` | LONG | BOOL | 销毁 Agent |
+| `agentOS::createAgent(name [, prompt, tools, skills, blockTools, contextLimit, isolation, maxSteps])` | STRING... | LONG | 创建持久 Agent，返回 handle |
+| `agentOS::destroy(handle)` | LONG | BOOL | 销毁 Agent |
 
-**configJson 示例**: `{"name":"quant_agent","role_prompt":"你是量化分析师","context_limit":16384}`
+**示例**:
+
+```dolphindb
+agent = agentOS::createAgent(
+    name = "quant_agent",
+    prompt = "你是量化分析师",
+    tools = ["query_price"],
+    contextLimit = 16384
+)
+```
 
 ### 3.8 RAG 知识库
 
 | 函数 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
-| `agentOS::createKB([configJson])` | STRING | LONG | 创建知识库，返回 handle |
+| `agentOS::createKB([chunkSize [, chunkOverlap [, embeddingModel]]])` | INT, INT, STRING | LONG | 创建知识库，返回 handle |
 | `agentOS::destroyKB(handle)` | LONG | BOOL | 销毁知识库 |
 | `agentOS::saveKB(handle, dirPath)` | LONG, STRING | BOOL | 持久化到磁盘 |
 | `agentOS::loadKB(handle, dirPath)` | LONG, STRING | BOOL | 从磁盘加载 |
@@ -214,16 +223,12 @@ agentOS::ask("帮我写一个均线策略", "你是一个量化分析师")
 | `agentOS::askWithKB(handle, question [, topK [, systemPrompt]])` | LONG, STRING, INT, STRING | STRING | RAG 同步对话 |
 | `agentOS::askWithKBAsync(handle, question [, topK [, systemPrompt]])` | LONG, STRING, INT, STRING | DICT | RAG 流式对话（`__stream__` dict） |
 
-**createKB 配置项**:
+**createKB 参数**:
 
-```json
-{
-  "vector_dim": 1536,
-  "embedding_model": "text-embedding-3-small",
-  "chunk_size": 500,
-  "chunk_overlap": 50,
-  "max_chunks": 100000
-}
+```dolphindb
+// createKB([chunkSize], [chunkOverlap], [embeddingModel])
+kb = agentOS::createKB(500, 50, "text-embedding-3-small")
+// 全部可选，默认: chunkSize=500, chunkOverlap=50, embeddingModel="text-embedding-3-small"
 ```
 
 **search 返回表**: `doc_id | chunk_id | content | score | graph_context`
@@ -492,7 +497,7 @@ curl -N "http://localhost:8849/api/kb/ask?kb_handle=1&q=如何分区&top_k=5"
 
 ```dolphindb
 // 1. 创建知识库
-kb = agentOS::createKB('{"embedding_model":"text-embedding-3-small","chunk_size":500}')
+kb = agentOS::createKB(500, 50, "text-embedding-3-small")
 
 // 2. 导入数据
 agentOS::ingest(kb, "intro", "DolphinDB 是高性能分布式时序数据库...")
@@ -559,25 +564,31 @@ agentOS::destroyKB(kb)
 
 ## 7. 配置参考
 
-### 7.1 agentOS::init 配置
+### 7.1 agentOS::init 参数
 
-| 字段 | 类型 | 默认值 | 说明 |
+```dolphindb
+agentOS::init([apiKey], [baseUrl], [model], [threads], [tpmLimit])
+```
+
+| 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `api_key` | string | — | LLM API 密钥 |
-| `base_url` | string | `https://api.openai.com/v1` | API 端点 |
-| `model` | string | `gpt-4o-mini` | 模型名称 |
-| `sse_port` | int | `8849` | SSE 服务端口 |
-| `sse_cors_origin` | string | `*` | CORS 允许来源 |
+| `apiKey` | STRING | — | LLM API 密钥（空则 Mock 模式） |
+| `baseUrl` | STRING | `https://api.openai.com/v1` | API 端点 |
+| `model` | STRING | `gpt-4o-mini` | 模型名称 |
+| `threads` | INT | `4` | 调度线程数 |
+| `tpmLimit` | INT | `100000` | TPM 限流 |
 
-### 7.2 createKB 配置
+### 7.2 createKB 参数
 
-| 字段 | 类型 | 默认值 | 说明 |
+```dolphindb
+agentOS::createKB([chunkSize], [chunkOverlap], [embeddingModel])
+```
+
+| 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `vector_dim` | int | `1536` | 向量维度 |
-| `embedding_model` | string | `text-embedding-3-small` | Embedding 模型 |
-| `chunk_size` | int | `500` | 分块大小（字符） |
-| `chunk_overlap` | int | `50` | 块间重叠 |
-| `max_chunks` | int | `100000` | 最大 chunk 数 |
+| `chunkSize` | INT | `500` | 分块大小（字符） |
+| `chunkOverlap` | INT | `50` | 块间重叠 |
+| `embeddingModel` | STRING | `text-embedding-3-small` | Embedding 模型 |
 
 ### 7.3 编译选项
 
@@ -612,45 +623,57 @@ agentOS::destroyKB(kb)
 
 ---
 
-## 附录: PluginAgentOS.txt 函数清单（30 个）
+## 附录: PluginAgentOS.txt 函数清单（41 个）
 
 ```
-agentOS,libPluginAgentOS.so
+agentOS,libPluginAgentOS.so,3.00.5.0
 
 # 系统
-agentOSInit,init,system,0,1,0
-agentOSClose,close,command,0,0
+agentOSInit,init,system,0,5,0
+agentOSClose,close,command,0,0,0
 agentOSHealth,health,system,0,0,0
 agentOSStatus,status,system,0,0,0
 
-# 单轮对话
-agentOSAsk,ask,system,1,2,0
-agentOSAskStream,askStream,system,1,3,0
-agentOSAskTable,askTable,system,1,3,0
+# Agent 管理
+agentOSCreateAgent,createAgent,system,1,8,0
+agentOSDestroy,destroy,system,1,1,0
+agentOSInfo,info,system,1,1,0
+
+# 对话
+agentOSAsk,ask,system,1,3,0
+agentOSAskStream,askStream,system,1,4,0
+agentOSAskTable,askTable,system,1,4,0
+agentOSRun,run,system,2,5,0
 
 # 异步流式
 agentOSAskAsync,askAsync,system,1,2,0
 agentOSPoll,poll,system,1,1,0
 agentOSCancelAsync,cancelAsync,system,1,1,0
 
+# 会话
+agentOSSave,save,system,1,2,0
+agentOSResume,resume,system,1,1,0
+agentOSSessions,sessions,system,0,0,0
+
+# 工具 & 技能
+agentOSRegisterTool,registerTool,system,2,4,0
+agentOSRegisterSkill,registerSkill,system,2,4,0
+agentOSBlockTool,blockTool,system,2,3,0
+agentOSUnblockTool,unblockTool,system,2,2,0
+agentOSActivateSkill,activateSkill,system,2,2,0
+agentOSDeactivateSkill,deactivateSkill,system,2,2,0
+
 # 记忆
 agentOSRemember,remember,system,1,3,0
 agentOSRecall,recall,system,1,2,0
 
 # 知识图谱
-agentOSGraphAddNode,graphAddNode,system,1,1,0
-agentOSGraphAddEdge,graphAddEdge,system,1,1,0
+agentOSGraphAddNode,graphAddNode,system,1,3,0
+agentOSGraphAddEdge,graphAddEdge,system,2,4,0
 agentOSGraphQuery,graphQuery,system,1,2,0
 
-# 工具注册
-agentOSRegisterTool,registerTool,system,2,2,0
-
-# Agent 管理
-agentOSCreateAgent,createAgent,system,1,1,0
-agentOSDestroyAgent,destroyAgent,system,1,1,0
-
 # RAG 知识库
-agentOSCreateKB,createKB,system,0,1,0
+agentOSCreateKB,createKB,system,0,3,0
 agentOSDestroyKB,destroyKB,system,1,1,0
 agentOSSaveKB,saveKB,system,2,2,0
 agentOSLoadKB,loadKB,system,2,2,0

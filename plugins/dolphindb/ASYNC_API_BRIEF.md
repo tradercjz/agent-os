@@ -268,10 +268,10 @@ async streamViaPoll(rid: string, accumulated: string) {
 
 ### 配置
 
-在 `agentOS::init` 的 JSON 配置中可自定义 SSE 端口和 CORS：
+在 `agentOS::init` 中传入 API Key 即可，SSE 端口默认 8849：
 
 ```dolphindb
-agentOS::init('{"api_key": "sk-xxx", "sse_port": 8849, "sse_cors": "http://your-domain.com"}')
+agentOS::init("sk-xxx")
 ```
 
 | 配置项 | 默认值 | 说明 |
@@ -304,7 +304,7 @@ agentOS::init('{"api_key": "sk-xxx", "sse_port": 8849, "sse_cors": "http://your-
 loadPlugin("/path/to/PluginAgentOS.txt")
 
 // 初始化（开启 SSE 时会自动启动 SSE 服务）
-agentOS::init('{"api_key": "sk-xxx", "sse_port": 8849}')
+agentOS::init("sk-xxx")
 
 // 同步调用（阻塞，等完整结果）
 result = agentOS::ask("什么是DolphinDB？")

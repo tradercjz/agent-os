@@ -5,7 +5,7 @@
 // 核心：save() 保存 → 重启 DolphinDB → resume() 恢复
 
 loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
-agentOS::init('{"api_key":"sk-xxx","model":"deepseek-chat"}')
+agentOS::init("sk-xxx", model="deepseek-chat")
 
 // ────────────────────────────────────
 // 第一天：创建 Agent，开始研究

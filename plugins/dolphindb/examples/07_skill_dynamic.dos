@@ -6,7 +6,7 @@
 //       运行时 activateSkill/deactivateSkill 动态切换
 
 loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
-agentOS::init('{"api_key":"sk-xxx","model":"deepseek-chat"}')
+agentOS::init("sk-xxx", model="deepseek-chat")
 
 // ────────────────────────────────────
 // 注册工具
@@ -31,9 +31,9 @@ def generateChart(paramsJson) {
     return '{"chart_url":"/tmp/chart_' + params["type"] + '.png","status":"generated"}'
 }
 
-agentOS::registerTool('{"id":"exec_sql","description":"执行DolphinDB SQL","params":[{"name":"sql","type":"string","description":"SQL语句"}]}', "execSQL")
-agentOS::registerTool('{"id":"send_alert","description":"发送告警通知","params":[{"name":"channel","type":"string","description":"通知渠道"},{"name":"message","type":"string","description":"告警内容"}]}', "sendAlert")
-agentOS::registerTool('{"id":"gen_chart","description":"生成数据图表","params":[{"name":"type","type":"string","description":"图表类型(line/bar/pie)"}]}', "generateChart")
+agentOS::registerTool("exec_sql", "执行DolphinDB SQL", execSQL)
+agentOS::registerTool("send_alert", "发送告警通知", sendAlert)
+agentOS::registerTool("gen_chart", "生成数据图表", generateChart)
 
 // ────────────────────────────────────
 // 注册技能包

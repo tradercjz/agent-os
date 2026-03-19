@@ -5,7 +5,7 @@
 // 核心：流计算引擎检测异常 → Agent 分析原因 → 生成报告
 
 loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
-agentOS::init('{"api_key":"sk-xxx","model":"deepseek-chat"}')
+agentOS::init("sk-xxx", model="deepseek-chat")
 
 // ────────────────────────────────────
 // 注册数据查询工具
@@ -33,15 +33,8 @@ def queryOrderBook(paramsJson) {
     return result.toStdJson()
 }
 
-agentOS::registerTool(
-    '{"id":"recent_trades","description":"查询最近N分钟的成交记录","params":[{"name":"ticker","type":"string","description":"股票代码"},{"name":"minutes","type":"integer","description":"最近几分钟"}]}',
-    "queryRecentTrades"
-)
-
-agentOS::registerTool(
-    '{"id":"order_book","description":"查询最新盘口数据","params":[{"name":"ticker","type":"string","description":"股票代码"}]}',
-    "queryOrderBook"
-)
+agentOS::registerTool("recent_trades", "查询最近N分钟的成交记录", queryRecentTrades)
+agentOS::registerTool("order_book", "查询最新盘口数据", queryOrderBook)
 
 // ────────────────────────────────────
 // 创建监控 Agent

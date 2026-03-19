@@ -10,11 +10,11 @@ loadPlugin("/path/to/plugins/AgentOS/PluginAgentOS.txt")
 // Mock 模式（无需 API key，用于开发测试）
 agentOS::init()
 
-// 或传入配置 JSON 连接真实 LLM
-// agentOS::init('{"api_key":"sk-xxx","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini"}')
+// 或传入参数连接真实 LLM
+// agentOS::init("sk-xxx", "https://api.openai.com/v1", "gpt-4o-mini")
 
 // 或连接国内大模型（硅基流动/DeepSeek 等 OpenAI 兼容接口）
-// agentOS::init('{"api_key":"sk-xxx","base_url":"https://api.siliconflow.cn/v1","model":"deepseek-chat"}')
+// agentOS::init("sk-xxx", "https://api.siliconflow.cn/v1", "deepseek-chat")
 
 // ── 3. 健康检查 ──
 agentOS::health()
@@ -95,13 +95,13 @@ select * from recallResult
 
 // ── 8. 知识图谱 ──
 // 添加节点
-agentOS::graphAddNode('{"id":"DolphinDB","type":"database","properties":{"category":"TSDB","language":"C++"}}')
-agentOS::graphAddNode('{"id":"AgentOS","type":"framework","properties":{"category":"LLM Agent","language":"C++"}}')
-agentOS::graphAddNode('{"id":"时序数据","type":"concept","content":"用于存储带时间戳的数据序列"}')
+agentOS::graphAddNode("DolphinDB", "database", "高性能分布式时序数据库")
+agentOS::graphAddNode("AgentOS", "framework", "C++ LLM Agent 操作系统")
+agentOS::graphAddNode("时序数据", "concept", "用于存储带时间戳的数据序列")
 
 // 添加边
-agentOS::graphAddEdge('{"source":"DolphinDB","target":"时序数据","relation":"处理","weight":0.95}')
-agentOS::graphAddEdge('{"source":"AgentOS","target":"DolphinDB","relation":"集成","weight":0.8}')
+agentOS::graphAddEdge("DolphinDB", "时序数据", "处理", 0.95)
+agentOS::graphAddEdge("AgentOS", "DolphinDB", "集成", 0.8)
 
 // 查询图谱（nodeId, [maxResults]）
 graphResult = agentOS::graphQuery("DolphinDB", 10)
@@ -117,25 +117,26 @@ def queryLatestPrice(paramsJson) {
 }
 
 // 注册为 AgentOS 工具
-agentOS::registerTool(
-    '{"id":"query_price","description":"查询最新股票价格","params":[{"name":"ticker","type":"string","description":"股票代码"}]}',
-    "queryLatestPrice"
-)
+agentOS::registerTool("query_price", "查询最新股票价格", queryLatestPrice)
 
 // ── 10. 持久 Agent（多轮对话）──
 // 创建 Agent（返回 handle）
-handle = agentOS::createAgent('{"name":"金融分析师","role_prompt":"你是一个专业的金融数据分析师","context_limit":16384}')
+handle = agentOS::createAgent(
+    name = "金融分析师",
+    prompt = "你是一个专业的金融数据分析师",
+    contextLimit = 16384
+)
 
 // 使用 Agent handle 进行多轮对话
-result1 = agentOS::askTable("帮我分析今天的市场走势", "{}", handle)
-result2 = agentOS::askTable("刚才的分析中，哪些因素最重要？", "{}", handle)
+print(agentOS::ask(handle, "帮我分析今天的市场走势"))
+print(agentOS::ask(handle, "刚才的分析中，哪些因素最重要？"))
 
 // 销毁 Agent
-agentOS::destroyAgent(handle)
+agentOS::destroy(handle)
 
 // ── 11. 知识库 RAG ──
 // 创建知识库（可配置 embedding 模型、分块参数等）
-kb = agentOS::createKB('{"embedding_model":"text-embedding-3-small","chunk_size":500,"chunk_overlap":50}')
+kb = agentOS::createKB(500, 50, "text-embedding-3-small")
 // 也可以不传参数，使用默认配置
 // kb = agentOS::createKB()
 
