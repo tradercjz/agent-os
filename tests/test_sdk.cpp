@@ -1,5 +1,6 @@
 #include <agentos/agentos.hpp>
 #include <gtest/gtest.h>
+#include <cstdlib>
 #include <filesystem>
 
 using namespace agentos;
@@ -460,13 +461,17 @@ TEST_F(SDKBuilderTest, AgentOSBuilderConfigAccess) {
 
 // Test quickstart without OPENAI_API_KEY throws
 TEST_F(SDKBuilderTest, QuickstartNoApiKeyThrows) {
-  // Save and unset the env var
   const char *old = std::getenv("OPENAI_API_KEY");
-  if (old) {
-    // If set, skip this test since unsetting is not safe in parallel tests
-    GTEST_SKIP() << "OPENAI_API_KEY is set, skipping quickstart error test";
-  }
+
+  std::string saved = old ? std::string(old) : std::string();
+  unsetenv("OPENAI_API_KEY");
   EXPECT_THROW(quickstart(), std::runtime_error);
+
+  if (old) {
+    setenv("OPENAI_API_KEY", saved.c_str(), 1);
+  } else {
+    unsetenv("OPENAI_API_KEY");
+  }
 }
 
 // Test snapshot_dir and ltm_dir builder methods
