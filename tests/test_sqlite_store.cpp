@@ -10,7 +10,12 @@ namespace fs = std::filesystem;
 class SQLiteStoreTest : public ::testing::Test {
 protected:
   void SetUp() override {
-    test_dir_ = fs::temp_directory_path() / "agentos_sqlite_test";
+    const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    ASSERT_NE(info, nullptr);
+    test_dir_ = fs::temp_directory_path() /
+                fs::path("agentos_sqlite_test_" +
+                         std::string(info->test_suite_name()) + "_" +
+                         std::string(info->name()));
     fs::remove_all(test_dir_);
     store_ = std::make_unique<SQLiteLongTermMemory>(test_dir_);
   }
