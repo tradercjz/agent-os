@@ -22,6 +22,28 @@ TEST(SupervisorTest, Scaffold) {
     EXPECT_TRUE(sup->delegation_log().empty());
 }
 
+TEST(SupervisorTest, WorkerTemplateRegistrationDoesNotCrash) {
+    auto os = make_os();
+    auto sup = os->create_agent<SupervisorAgent>(AgentConfig{.name = "sup"});
+
+    WorkerTemplate tpl{
+        .name = "researcher",
+        .description = "Researches implementation details",
+        .config = AgentConfig{.name = "researcher_worker", .role_prompt = "Research carefully."}
+    };
+
+    EXPECT_NO_THROW(sup->add_worker_template("researcher", tpl));
+}
+
+TEST(SupervisorTest, ExplicitRunUnknownTemplateReturnsError) {
+    auto os = make_os();
+    auto sup = os->create_agent<SupervisorAgent>(AgentConfig{.name = "sup"});
+
+    auto res = sup->run_subworker("missing", "do work");
+    EXPECT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().code, ErrorCode::NotFound);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: add_worker + run() completes without error
 // ─────────────────────────────────────────────────────────────────────────────

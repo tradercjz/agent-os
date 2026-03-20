@@ -5,6 +5,7 @@
 // ============================================================
 #include <agentos/agent.hpp>
 #include <agentos/core/types.hpp>
+#include <agentos/subworkers/runtime.hpp>
 #include <agentos/tools/tool_manager.hpp>
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -60,10 +61,15 @@ public:
     SupervisorAgent& add_worker(std::shared_ptr<Agent> worker,
                                 std::string description,
                                 size_t max_calls = 5);
+    SupervisorAgent& add_worker_template(std::string name, WorkerTemplate tpl);
 
     Result<std::string> run(std::string user_input) override;
+    Result<SubworkerResult> run_subworker(const std::string& name,
+                                          const std::string& task,
+                                          const SubworkerRunOptions& opts = {});
 
     std::vector<DelegationRecord> delegation_log() const;
+    std::vector<SubworkerRunRecord> subworker_log() const;
 
     void set_max_depth(size_t depth) { max_depth_ = depth; }
 
@@ -78,7 +84,9 @@ private:
                                         std::string_view workers);
 
     std::unordered_map<std::string, WorkerEntry> workers_;
+    std::unordered_map<std::string, WorkerTemplate> worker_templates_;
     std::vector<DelegationRecord> delegation_log_;
+    std::vector<SubworkerRunRecord> subworker_log_;
     size_t max_depth_{3};
     static constexpr int MAX_STEPS = 10;
     mutable std::mutex mu_;
@@ -94,9 +102,35 @@ inline SupervisorAgent& SupervisorAgent::add_worker(
     return *this;
 }
 
+inline SupervisorAgent& SupervisorAgent::add_worker_template(
+        std::string name, WorkerTemplate tpl) {
+    std::lock_guard lk(mu_);
+    worker_templates_[std::move(name)] = std::move(tpl);
+    return *this;
+}
+
 inline std::vector<DelegationRecord> SupervisorAgent::delegation_log() const {
     std::lock_guard lk(mu_);
     return delegation_log_;
+}
+
+inline std::vector<SubworkerRunRecord> SupervisorAgent::subworker_log() const {
+    std::lock_guard lk(mu_);
+    return subworker_log_;
+}
+
+inline Result<SubworkerResult> SupervisorAgent::run_subworker(
+        const std::string& name, const std::string& task, const SubworkerRunOptions& opts) {
+    (void)task;
+    (void)opts;
+    std::lock_guard lk(mu_);
+    auto it = worker_templates_.find(name);
+    if (it == worker_templates_.end()) {
+        return make_error(ErrorCode::NotFound,
+                          fmt::format("subworker template '{}' not found", name));
+    }
+    return make_error(ErrorCode::NotImplemented,
+                      fmt::format("subworker template '{}' is not implemented yet", name));
 }
 
 inline std::string SupervisorAgent::build_workers_tools_json() const {

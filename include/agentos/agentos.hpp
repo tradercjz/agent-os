@@ -17,6 +17,7 @@
 
 // ── Core modules ────────────────────────────────────────────
 #include <agentos/agent.hpp>
+#include <agentos/subworkers/runtime.hpp>
 #include <agentos/supervisor_agent.hpp>
 #ifndef AGENTOS_NO_DUCKDB
 #include <agentos/knowledge/knowledge_base.hpp>
