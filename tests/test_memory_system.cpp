@@ -7,7 +7,12 @@ using namespace agentos::memory;
 class MemorySystemTest : public ::testing::Test {
 protected:
   void SetUp() override {
-    test_dir_ = std::filesystem::temp_directory_path() / "agentos_test_memory";
+    const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    ASSERT_NE(info, nullptr);
+    test_dir_ = std::filesystem::temp_directory_path() /
+                std::filesystem::path("agentos_test_memory_" +
+                                      std::string(info->test_suite_name()) + "_" +
+                                      std::string(info->name()));
     std::filesystem::remove_all(test_dir_);
     mem_sys_ = std::make_unique<MemorySystem>(test_dir_);
   }

@@ -13,7 +13,12 @@ using namespace agentos::memory;
 class ConsolidatorTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        test_dir_ = std::filesystem::temp_directory_path() / "agentos_test_consolidator";
+        const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+        ASSERT_NE(info, nullptr);
+        test_dir_ = std::filesystem::temp_directory_path() /
+                    std::filesystem::path("agentos_test_consolidator_" +
+                                          std::string(info->test_suite_name()) + "_" +
+                                          std::string(info->name()));
         std::filesystem::remove_all(test_dir_);
         mem_ = std::make_unique<MemorySystem>(test_dir_);
     }
