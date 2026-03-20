@@ -187,6 +187,24 @@ TEST(SupervisorTest, PreferredWorktreeBaseOverridesDefaultLocation) {
         preferred_base.lexically_normal().string()));
 }
 
+TEST(SupervisorTest, DistinctSubworkerRunsUseDistinctWorktrees) {
+    auto os = make_os();
+    auto sup = os->create_agent<SupervisorAgent>(AgentConfig{.name = "sup"});
+
+    WorkerTemplate tpl{
+        .name = "researcher",
+        .description = "Researches implementation details",
+        .config = AgentConfig{.name = "researcher_worker", .role_prompt = "Research carefully."}
+    };
+    sup->add_worker_template("researcher", tpl);
+
+    auto r1 = sup->run_subworker("researcher", "task one");
+    auto r2 = sup->run_subworker("researcher", "task two");
+    ASSERT_TRUE(r1.has_value());
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_NE(r1->worktree_path, r2->worktree_path);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: add_worker + run() completes without error
 // ─────────────────────────────────────────────────────────────────────────────
