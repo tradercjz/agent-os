@@ -306,7 +306,7 @@ loadPlugin("/path/to/PluginAgentOS.txt")
 // 初始化（开启 SSE 时会自动启动 SSE 服务）
 agentOS::init("sk-xxx")
 
-// 同步调用（阻塞，等完整结果）
+// 单轮同步调用（阻塞，等完整结果；持久 Agent 场景请用 ask2）
 result = agentOS::ask("什么是DolphinDB？")
 
 // 异步流式调用
