@@ -80,8 +80,10 @@ public:
 
 private:
     std::string build_workers_tools_json() const;
+    std::string build_template_tools_json() const;
     static std::string merge_tools_json(std::string_view global,
                                         std::string_view workers);
+    static std::string format_subworker_observation(const SubworkerResult& result);
 
     std::unordered_map<std::string, WorkerEntry> workers_;
     std::unordered_map<std::string, WorkerTemplate> worker_templates_;
@@ -175,6 +177,21 @@ inline std::string SupervisorAgent::build_workers_tools_json() const {
     return arr;
 }
 
+inline std::string SupervisorAgent::build_template_tools_json() const {
+    if (worker_templates_.empty()) return "[]";
+    std::string arr = "[";
+    bool first = true;
+    for (const auto& [name, tpl] : worker_templates_) {
+        if (!first) arr += ",";
+        first = false;
+        arr += fmt::format(
+            R"({{"type":"function","function":{{"name":"{}","description":"{}","parameters":{{"type":"object","properties":{{"task":{{"type":"string","description":"Task description for this worker"}}}},"required":["task"]}}}}}})",
+            name, tpl.description);
+    }
+    arr += "]";
+    return arr;
+}
+
 inline std::string SupervisorAgent::merge_tools_json(
         std::string_view global, std::string_view workers) {
     auto strip = [](std::string_view s) -> std::string {
@@ -194,6 +211,34 @@ inline std::string SupervisorAgent::merge_tools_json(
     if (g.empty()) return "[" + w + "]";
     if (w.empty()) return "[" + g + "]";
     return "[" + g + "," + w + "]";
+}
+
+inline std::string SupervisorAgent::format_subworker_observation(
+        const SubworkerResult& result) {
+    const char* status = "failed";
+    switch (result.status) {
+    case SubworkerStatus::Succeeded:
+        status = "succeeded";
+        break;
+    case SubworkerStatus::Cancelled:
+        status = "cancelled";
+        break;
+    case SubworkerStatus::TimedOut:
+        status = "timed_out";
+        break;
+    case SubworkerStatus::Failed:
+    default:
+        status = "failed";
+        break;
+    }
+
+    return fmt::format(
+        "[subworker:{}]\nstatus: {}\nsummary: {}\nworktree: {}\noutput:\n{}",
+        result.worker_name,
+        status,
+        result.summary,
+        result.worktree_path.string(),
+        result.output);
 }
 
 inline tools::ToolResult SupervisorAgent::dispatch_worker(
@@ -287,7 +332,9 @@ inline Result<std::string> SupervisorAgent::run(std::string user_input) {
         // Merge global tools + worker tools
         std::string global_tj = this->os_->tools().tools_json(this->config_.allowed_tools);
         std::string worker_tj = build_workers_tools_json();
-        std::string merged    = merge_tools_json(global_tj, worker_tj);
+        std::string template_tj = build_template_tools_json();
+        std::string merged = merge_tools_json(
+            global_tj, merge_tools_json(worker_tj, template_tj));
         if (!merged.empty() && merged != "[]") req.tools_json = merged;
 
         auto infer_result = this->os_->kernel().infer(req);
@@ -309,10 +356,10 @@ inline Result<std::string> SupervisorAgent::run(std::string user_input) {
         // Dispatch each tool call
         for (const auto& call : resp.tool_calls) {
             tools::ToolResult tool_res;
+            std::string obs;
 
-            auto it = workers_.find(call.name);
-            if (it != workers_.end()) {
-                // Worker intercept: parse task from args JSON
+            auto tpl_it = worker_templates_.find(call.name);
+            if (tpl_it != worker_templates_.end()) {
                 std::string task_str = call.args_json;
                 try {
                     auto j = nlohmann::json::parse(call.args_json);
@@ -320,22 +367,38 @@ inline Result<std::string> SupervisorAgent::run(std::string user_input) {
                         task_str = j["task"].get<std::string>();
                 } catch (...) {}
 
-                tool_res = dispatch_worker(it->second, task_str, call_counts[call.name]);
+                auto sub_res = run_subworker(call.name, task_str);
+                obs = sub_res ? format_subworker_observation(*sub_res)
+                              : ("[error] " + sub_res.error().message);
             } else {
-                // Normal tool dispatch via act()
-                auto act_res = this->act(call);
-                if (act_res) {
-                    tool_res = *act_res;
+                auto it = workers_.find(call.name);
+                if (it != workers_.end()) {
+                // Worker intercept: parse task from args JSON
+                    std::string task_str = call.args_json;
+                    try {
+                        auto j = nlohmann::json::parse(call.args_json);
+                        if (j.contains("task") && j["task"].is_string())
+                            task_str = j["task"].get<std::string>();
+                    } catch (...) {}
+
+                    tool_res = dispatch_worker(it->second, task_str, call_counts[call.name]);
                 } else {
-                    tool_res = tools::ToolResult{.success = false,
-                                                 .output  = {},
-                                                 .error   = act_res.error().message};
+                // Normal tool dispatch via act()
+                    auto act_res = this->act(call);
+                    if (act_res) {
+                        tool_res = *act_res;
+                    } else {
+                        tool_res = tools::ToolResult{.success = false,
+                                                     .output  = {},
+                                                     .error   = act_res.error().message};
+                    }
                 }
+
+                obs = tool_res.success ? tool_res.output
+                                       : ("[error] " + tool_res.error);
             }
 
             // Append tool result as observation
-            std::string obs = tool_res.success ? tool_res.output
-                                               : ("[error] " + tool_res.error);
             kernel::Message tool_msg;
             tool_msg.role         = kernel::Role::Tool;
             tool_msg.content      = std::move(obs);

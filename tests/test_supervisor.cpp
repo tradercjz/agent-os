@@ -82,6 +82,58 @@ TEST(SupervisorTest, ExplicitRunSubworkerRecordsStructuredLog) {
     EXPECT_EQ(log[0].task, "Inspect the repository");
 }
 
+TEST(SupervisorTest, LLMDelegatesToTemplateWorker) {
+    auto os = make_os();
+    auto* mock = dynamic_cast<kernel::MockLLMBackend*>(&os->kernel().backend());
+    ASSERT_NE(mock, nullptr);
+
+    auto sup = os->create_agent<SupervisorAgent>(
+        AgentConfig{.name = "sup", .role_prompt = "Delegate tasks."});
+
+    WorkerTemplate tpl{
+        .name = "researcher",
+        .description = "Researches implementation details",
+        .config = AgentConfig{.name = "researcher_worker", .role_prompt = "Research carefully."}
+    };
+    sup->add_worker_template("researcher", tpl);
+
+    mock->register_tool_rule("use researcher", "researcher", R"({"task":"inspect code"})", 10);
+
+    auto res = sup->run("use researcher");
+    ASSERT_TRUE(res.has_value());
+
+    auto log = sup->subworker_log();
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_EQ(log[0].worker_name, "researcher");
+}
+
+TEST(SupervisorTest, TemplateAndLegacyWorkersCoexist) {
+    auto os = make_os();
+    auto* mock = dynamic_cast<kernel::MockLLMBackend*>(&os->kernel().backend());
+    ASSERT_NE(mock, nullptr);
+
+    auto sup = os->create_agent<SupervisorAgent>(AgentConfig{.name = "sup"});
+    auto legacy = os->create_agent<ReActAgent>(AgentConfig{.name = "writer"});
+
+    sup->add_worker(legacy, "Writes summaries");
+    sup->add_worker_template("researcher", WorkerTemplate{
+        .name = "researcher",
+        .description = "Researches implementation details",
+        .config = AgentConfig{.name = "researcher_worker", .role_prompt = "Research carefully."}
+    });
+
+    mock->register_tool_rule("use researcher", "researcher", R"({"task":"inspect code"})", 10);
+    mock->register_tool_rule("use writer", "writer", R"({"task":"write summary"})", 10);
+
+    auto template_res = sup->run("use researcher");
+    ASSERT_TRUE(template_res.has_value());
+    ASSERT_EQ(sup->subworker_log().size(), 1u);
+
+    auto legacy_res = sup->run("use writer");
+    ASSERT_TRUE(legacy_res.has_value());
+    ASSERT_EQ(sup->delegation_log().size(), 1u);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: add_worker + run() completes without error
 // ─────────────────────────────────────────────────────────────────────────────
