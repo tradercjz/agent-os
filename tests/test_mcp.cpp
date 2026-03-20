@@ -1,5 +1,6 @@
 #include <agentos/mcp/mcp_server.hpp>
 #include <gtest/gtest.h>
+#include <thread>
 
 using namespace agentos;
 using namespace agentos::mcp;
@@ -18,16 +19,16 @@ protected:
             .required = true,
         });
 
-        registry_.register_fn(schema,
+        tool_manager_.registry().register_fn(schema,
             [](const tools::ParsedArgs& args, std::stop_token) {
                 return tools::ToolResult::ok(args.values.count("message")
                     ? args.values.at("message") : "no message");
             });
 
-        server_ = std::make_unique<MCPServer>(registry_, "test-server", "1.0.0");
+        server_ = std::make_unique<MCPServer>(tool_manager_, "test-server", "1.0.0");
     }
 
-    tools::ToolRegistry registry_;
+    tools::ToolManager tool_manager_;
     std::unique_ptr<MCPServer> server_;
 };
 
@@ -67,10 +68,15 @@ TEST_F(MCPServerTest, ToolsListReturnsTool) {
     auto resp = server_->handle(req);
     EXPECT_TRUE(resp.error.is_null());
     ASSERT_TRUE(resp.result["tools"].is_array());
-    EXPECT_EQ(resp.result["tools"].size(), 1u);
-    EXPECT_EQ(resp.result["tools"][0]["name"], "echo");
-    EXPECT_EQ(resp.result["tools"][0]["description"], "Echo back input");
-    EXPECT_TRUE(resp.result["tools"][0]["inputSchema"]["properties"].contains("message"));
+    bool found_echo = false;
+    for (const auto& tool : resp.result["tools"]) {
+        if (tool["name"] == "echo") {
+            found_echo = true;
+            EXPECT_EQ(tool["description"], "Echo back input");
+            EXPECT_TRUE(tool["inputSchema"]["properties"].contains("message"));
+        }
+    }
+    EXPECT_TRUE(found_echo);
 }
 
 // ── Tools call ──
@@ -85,6 +91,45 @@ TEST_F(MCPServerTest, ToolsCallDispatchesTool) {
     EXPECT_TRUE(resp.error.is_null());
     EXPECT_FALSE(resp.result["isError"].get<bool>());
     EXPECT_EQ(resp.result["content"][0]["text"], "hello");
+}
+
+TEST_F(MCPServerTest, ToolsCallMissingRequiredArgumentReturnsToolError) {
+    MCPRequest req;
+    req.method = "tools/call";
+    req.params = {{"name", "echo"}, {"arguments", Json::object()}};
+    req.id = 11;
+
+    auto resp = server_->handle(req);
+    EXPECT_TRUE(resp.error.is_null());
+    EXPECT_TRUE(resp.result["isError"].get<bool>());
+    EXPECT_NE(resp.result["content"][0]["text"].get<std::string>().find("message"), std::string::npos);
+}
+
+TEST_F(MCPServerTest, ToolsCallRespectsToolTimeout) {
+    tools::ToolSchema schema;
+    schema.id = "slow";
+    schema.description = "Slow tool";
+    schema.timeout_ms = 50;
+    tool_manager_.registry().register_fn(
+        schema,
+        [](const tools::ParsedArgs&, std::stop_token) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            return tools::ToolResult::ok("slow-done");
+        });
+
+    MCPRequest req;
+    req.method = "tools/call";
+    req.params = {{"name", "slow"}, {"arguments", Json::object()}};
+    req.id = 12;
+
+    auto start = Clock::now();
+    auto resp = server_->handle(req);
+    auto elapsed = std::chrono::duration_cast<Duration>(Clock::now() - start);
+
+    EXPECT_TRUE(resp.error.is_null());
+    EXPECT_TRUE(resp.result["isError"].get<bool>());
+    EXPECT_NE(resp.result["content"][0]["text"].get<std::string>().find("timed out"), std::string::npos);
+    EXPECT_LT(elapsed.count(), 120) << "MCP call bypassed ToolManager timeout handling";
 }
 
 TEST_F(MCPServerTest, ToolsCallMissingNameReturnsError) {

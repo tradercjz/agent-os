@@ -259,9 +259,13 @@ c++filt _ZN6duckdb6DuckDBC1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcE
 | `agentOS::init` | `agentOS::init()` | 初始化 AgentOS |
 | `agentOS::health` | `agentOS::health()` | 健康检查 |
 | `agentOS::status` | `agentOS::status()` | 状态信息 |
-| `agentOS::createAgent` | `agentOS::createAgent()` | 创建 Agent |
-| `agentOS::destroyAgent` | `agentOS::destroyAgent()` | 销毁 Agent |
-| `agentOS::ask` | `agentOS::ask()` | 同步对话 |
+| `agentOS::createAgent` | `agentOS::createAgent()` | 兼容别名：创建 Agent |
+| `agentOS::createAgent2` | `agentOS::createAgent2()` | 推荐写法：显式 V2 创建 Agent |
+| `agentOS::destroy` | `agentOS::destroy()` | 销毁 Agent |
+| `agentOS::ask` | `agentOS::ask()` | 单轮同步对话；兼容 handle 重载 |
+| `agentOS::ask2` | `agentOS::ask2()` | 推荐写法：持久 Agent 同步对话 |
+| `agentOS::askStream` | `agentOS::askStream()` | 单轮流式对话；兼容 handle 重载 |
+| `agentOS::askStream2` | `agentOS::askStream2()` | 推荐写法：持久 Agent 流式对话 |
 | `agentOS::askAsync` | `agentOS::askAsync()` | 异步对话 |
 | `agentOS::poll` | `agentOS::poll()` | 轮询结果 |
 | `agentOS::cancelAsync` | `agentOS::cancelAsync()` | 取消异步 |

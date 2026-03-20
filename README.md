@@ -1,7 +1,7 @@
-# AgentOS — C++20 LLM Agent Operating System
+# AgentOS — C++23 LLM Agent Operating System
 
 > **LLM as Kernel** — 以大语言模型为内核的轻量级 Agent 操作系统
-> A lightweight, modular Agent OS written in modern C++20, inspired by AIOS, MemGPT, Autellix, and IsolateGPT.
+> A lightweight, modular Agent OS written in modern C++23, inspired by AIOS, MemGPT, Autellix, and IsolateGPT.
 
 ---
 
@@ -123,8 +123,8 @@ auto results = mem.recall("界面偏好", /*k=*/5);
   - `kv_store` — 进程内键值存储
   - `shell_exec` — 白名单 Shell 命令（echo/date/pwd/ls 等）
   - `http_fetch` — 受限 HTTP GET（10s 超时，100KB 限制）
-- **ToolRegistry** — 支持 `register_fn()` 注册 lambda 工具
-- **ToolManager** — 路由、执行、生成 LLM 工具描述 JSON
+- **ToolRegistry** — 底层注册表，支持 `register_fn()` 注册 lambda 工具
+- **ToolManager** — 默认入口，负责内置工具注册、参数校验、超时与调度
 
 ```cpp
 tools::ToolManager tool_mgr;
@@ -246,9 +246,16 @@ public:
 |---------|-------------|
 | GCC     | ≥ 11（推荐 ≥ 13） |
 | CMake   | ≥ 3.25       |
-| libcurl | 任意版本（可选，用于 OpenAI backend） |
+| libcurl | 构建必需 |
+| sqlite3 | 构建必需 |
 
-> **注意**：项目通过内置 polyfill（`core/compat.hpp`）在 GCC 11 上模拟 `std::expected` 和 `std::format`，无需 GCC 13+。
+可选依赖：
+
+- `DuckDB`：默认启用；如未安装，可通过 `-DAGENTOS_NO_DUCKDB=ON` 关闭
+- `cppjieba`：默认启用，用于中文分词支持
+- DolphinDB SDK：仅构建插件时需要
+
+> **注意**：项目当前以 `C++23` 编译，并通过 `core/compat.hpp` 补齐部分库能力；文档中的旧 `C++20` 表述已不再准确。
 
 ### 编译
 
@@ -271,24 +278,17 @@ Demo 涵盖全部 8 个功能区域的演示：LLM Kernel、Scheduler、Context 
 ### 接入 OpenAI API
 
 ```cpp
-#include <agentos/kernel/llm_kernel.hpp>
+#include <agentos/agentos.hpp>
 
-auto backend = std::make_unique<kernel::OpenAIBackend>(
-    "https://api.openai.com/v1/chat/completions",
-    "gpt-4o",
-    std::getenv("OPENAI_API_KEY")
-);
+auto os = agentos::AgentOSBuilder()
+    .openai(std::getenv("OPENAI_API_KEY"), "gpt-4o-mini")
+    .threads(2)
+    .build();
 
-AgentOS::Config cfg;
-cfg.tpm_limit = 100000;
-
-AgentOS os(std::move(backend), cfg);
-auto agent = os.create_agent<ReActAgent>(AgentConfig{
-    .name        = "assistant",
-    .role_prompt = "你是一个有用的助手。",
-    .security_role = "standard",
-    .allowed_tools = {"web_search", "kv_store"},
-});
+auto agent = os->agent("assistant")
+    .prompt("你是一个有用的助手。")
+    .tools({"kv_store", "http_fetch"})
+    .create();
 
 auto result = agent->run("今天天气怎么样？");
 ```
@@ -304,9 +304,9 @@ cpp-agent-os/
 ├── include/
 │   └── agentos/
 │       ├── core/
-│       │   ├── compat.hpp          # C++23 polyfills (Expected, fmt::format)
+│       │   ├── compat.hpp          # 兼容层与辅助 polyfill
 │       │   ├── types.hpp           # 核心类型、错误体系、Result<T>
-│       │   └── task.hpp            # C++20 协程 Task<T>
+│       │   └── task.hpp            # Task<T> 抽象
 │       ├── kernel/
 │       │   └── llm_kernel.hpp      # LLM 内核 + 后端抽象
 │       ├── scheduler/
@@ -321,6 +321,16 @@ cpp-agent-os/
 │       │   └── security.hpp        # RBAC + 污点 + ECL
 │       ├── bus/
 │       │   └── agent_bus.hpp       # Agent 消息总线
+│       ├── mcp/
+│       │   └── mcp_server.hpp      # MCP server 适配层
+│       ├── headless/
+│       │   └── runner.hpp          # 无头执行入口
+│       ├── session/
+│       │   └── session.hpp         # 会话持久化
+│       ├── skills/
+│       │   └── registry.hpp        # 技能注册
+│       ├── hooks/
+│       │   └── hook_manager.hpp    # Hook 扩展点
 │       └── agent.hpp               # Agent 基类 + AgentOS 门面
 ├── src/
 │   ├── kernel/llm_kernel.cpp
@@ -328,19 +338,25 @@ cpp-agent-os/
 │   ├── context/context.cpp
 │   ├── memory/memory.cpp
 │   ├── tools/tool_manager.cpp
+│   ├── tools/tool_learner.cpp
 │   ├── security/security.cpp
-│   └── bus/agent_bus.cpp
+│   ├── bus/agent_bus.cpp
+│   ├── tracing/tracer.cpp
+│   └── worktree/worktree_manager.cpp
 └── examples/
-    └── demo.cpp                    # 完整功能演示
+    ├── demo.cpp                    # 完整功能演示
+    ├── openai_demo.cpp             # OpenAI / compatible API 示例
+    ├── mcp_demo.cpp                # MCP server 示例
+    └── headless_demo.cpp           # 无头运行示例
 ```
 
 ---
 
 ## 设计亮点 / Design Highlights
 
-- **零外部依赖**（可选 libcurl）：所有核心功能纯 C++ 标准库实现
-- **Header-heavy 设计**：大量逻辑在头文件中，便于嵌入和裁剪
-- **C++20 兼容**：通过 `compat.hpp` polyfill 支持 GCC 11，不依赖 GCC 13 的 `std::expected`
+- **模块化运行时**：核心能力覆盖 agent、tools、memory、session、hooks、MCP 与 headless 入口
+- **Header-first Public API**：公共接口集中在 `include/agentos/`，但核心实现仍在 `src/`
+- **C++23 构建基线**：当前 CMake 以 `C++23` 编译，面向现代编译器工具链
 - **可插拔后端**：`ILLMBackend` 接口可对接任意 LLM API
 - **纵深安全**：RBAC + Taint + Injection Detection + ECL 四道防线
 - **可观测性**：内置 `KernelMetrics`、ECL `audit_log`、Bus `audit_trail`

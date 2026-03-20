@@ -6,6 +6,7 @@
 // ============================================================
 #include <agentos/agent.hpp>
 #include <chrono>
+#include <thread>
 #include <string>
 
 namespace agentos::headless {
@@ -71,7 +72,7 @@ class HeadlessRunner {
 public:
     explicit HeadlessRunner(std::unique_ptr<kernel::ILLMBackend> backend,
                             AgentOS::Config os_config = AgentOS::Config::builder().build())
-        : os_(std::move(backend), std::move(os_config)) {}
+        : os_(std::make_shared<AgentOS>(std::move(backend), std::move(os_config))) {}
 
     /// Run a task and return structured result
     RunResult run(const RunRequest& req) {
@@ -81,27 +82,39 @@ public:
         }
 
         auto start = Clock::now();
-        uint64_t tokens_before = os_.kernel().metrics().total_tokens.load();
+        auto os = os_;
+        uint64_t tokens_before = os->kernel().metrics().total_tokens.load();
 
         // Create agent
-        auto agent = os_.create_agent(
+        auto agent = os->create_agent(
             AgentConfig::builder()
                 .name(req.agent_name)
                 .role_prompt(req.role_prompt)
                 .context_limit(req.context_limit)
                 .tools(req.allowed_tools)
                 .build());
+        AgentId aid = agent->id();
 
-        // Run with timeout
-        auto future = agent->run_async(req.task);
+        // Run on a detached worker so timeout returns promptly without
+        // destroying the running agent from this call frame.
+        auto promise = std::make_shared<std::promise<Result<std::string>>>();
+        auto future = promise->get_future();
+        std::thread([os, agent, promise, task = req.task, aid]() mutable {
+            try {
+                promise->set_value(agent->run(std::move(task)));
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+            }
+            os->destroy_agent(aid);
+        }).detach();
+
         auto status = future.wait_for(
             std::chrono::milliseconds(req.timeout.count()));
 
         auto elapsed = std::chrono::duration_cast<Duration>(Clock::now() - start);
-        uint64_t tokens_after = os_.kernel().metrics().total_tokens.load();
+        uint64_t tokens_after = os->kernel().metrics().total_tokens.load();
 
         if (status == std::future_status::timeout) {
-            os_.destroy_agent(agent->id());
             return {.success = false, .output = "",
                     .error = "Task timed out",
                     .duration_ms = static_cast<uint64_t>(elapsed.count()),
@@ -109,7 +122,6 @@ public:
         }
 
         auto result = future.get();
-        AgentId aid = agent->id();
 
         RunResult run_result;
         run_result.duration_ms = static_cast<uint64_t>(elapsed.count());
@@ -123,7 +135,6 @@ public:
             run_result.error = result.error().message;
         }
 
-        os_.destroy_agent(aid);
         return run_result;
     }
 
@@ -140,10 +151,10 @@ public:
     }
 
     /// Access the underlying AgentOS (for tool registration etc.)
-    AgentOS& os() { return os_; }
+    AgentOS& os() { return *os_; }
 
 private:
-    AgentOS os_;
+    std::shared_ptr<AgentOS> os_;
 };
 
 } // namespace agentos::headless

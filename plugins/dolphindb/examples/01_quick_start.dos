@@ -11,15 +11,15 @@ loadPlugin(getHomeDir() + "/plugins/AgentOS/PluginAgentOS.txt")
 agentOS::init()
 
 // 3. 创建 Agent — 一行搞定
-agent = agentOS::createAgent("my-first-agent")
+agent = agentOS::createAgent2("my-first-agent")
 
 // 4. 对话
-print(agentOS::ask(agent, "你好！你是谁？"))
-print(agentOS::ask(agent, "DolphinDB 是什么？"))
+print(agentOS::ask2(agent, "你好！你是谁？"))
+print(agentOS::ask2(agent, "DolphinDB 是什么？"))
 
 // 5. 多轮对话 — 同一个 agent 自动保持上下文
-print(agentOS::ask(agent, "它有什么特点？"))       // agent 记得"它"指 DolphinDB
-print(agentOS::ask(agent, "跟 MySQL 比有什么优势？"))
+print(agentOS::ask2(agent, "它有什么特点？"))       // agent 记得"它"指 DolphinDB
+print(agentOS::ask2(agent, "跟 MySQL 比有什么优势？"))
 
 // 6. 查看 agent 状态
 agentOS::info(agent)

@@ -88,15 +88,15 @@ agentOS::saveKB(kb, "/data/agentos_kb/ddb_docs/")
 // ────────────────────────────────────
 
 // 创建一个绑定知识库的 agent，同时具有数据查询能力
-agent = agentOS::createAgent(
+agent = agentOS::createAgent2(
     name = "ddb-expert",
     prompt = "你是 DolphinDB 技术专家。回答问题时，优先参考知识库内容，用中文回答。"
 )
 
 // Agent 既能查知识库，也能做多轮对话
-print(agentOS::ask(agent, "DolphinDB 的流计算有什么特点？"))
-print(agentOS::ask(agent, "给我写个流计算的示例代码"))
-print(agentOS::ask(agent, "这段代码怎么部署到生产环境？"))
+print(agentOS::ask2(agent, "DolphinDB 的流计算有什么特点？"))
+print(agentOS::ask2(agent, "给我写个流计算的示例代码"))
+print(agentOS::ask2(agent, "这段代码怎么部署到生产环境？"))
 
 agentOS::destroy(agent)
 agentOS::destroyKB(kb)

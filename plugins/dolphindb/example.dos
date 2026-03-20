@@ -121,15 +121,15 @@ agentOS::registerTool("query_price", "查询最新股票价格", queryLatestPric
 
 // ── 10. 持久 Agent（多轮对话）──
 // 创建 Agent（返回 handle）
-handle = agentOS::createAgent(
+handle = agentOS::createAgent2(
     name = "金融分析师",
     prompt = "你是一个专业的金融数据分析师",
     contextLimit = 16384
 )
 
 // 使用 Agent handle 进行多轮对话
-print(agentOS::ask(handle, "帮我分析今天的市场走势"))
-print(agentOS::ask(handle, "刚才的分析中，哪些因素最重要？"))
+print(agentOS::ask2(handle, "帮我分析今天的市场走势"))
+print(agentOS::ask2(handle, "刚才的分析中，哪些因素最重要？"))
 
 // 销毁 Agent
 agentOS::destroy(handle)

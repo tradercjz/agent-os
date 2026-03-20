@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 
@@ -66,4 +68,36 @@ TEST(DolphinDBAdapterTest, ExceptionHandling) {
 
 TEST(DolphinDBAdapterTest, NoExceptionPassesThrough) {
     EXPECT_NO_THROW(testFunction(0));
+}
+
+static std::string read_file(const std::filesystem::path& path) {
+    std::ifstream ifs(path);
+    if (!ifs) {
+        throw std::runtime_error("cannot open " + path.string());
+    }
+    return std::string((std::istreambuf_iterator<char>(ifs)),
+                       std::istreambuf_iterator<char>());
+}
+
+TEST(DolphinDBAdapterTest, V2AliasExportsAndDeclarationsPresent) {
+    namespace fs = std::filesystem;
+    const fs::path repo_root = fs::path(__FILE__).parent_path().parent_path();
+
+    const std::string manifest =
+        read_file(repo_root / "plugins" / "dolphindb" / "PluginAgentOS.txt");
+    EXPECT_NE(manifest.find("agentOSCreateAgent2,createAgent2"), std::string::npos);
+    EXPECT_NE(manifest.find("agentOSAsk2,ask2"), std::string::npos);
+    EXPECT_NE(manifest.find("agentOSAskStream2,askStream2"), std::string::npos);
+
+    const std::string header =
+        read_file(repo_root / "plugins" / "dolphindb" / "dolphindb_adapter.hpp");
+    EXPECT_NE(header.find("ConstantSP agentOSCreateAgent2("), std::string::npos);
+    EXPECT_NE(header.find("ConstantSP agentOSAsk2("), std::string::npos);
+    EXPECT_NE(header.find("ConstantSP agentOSAskStream2("), std::string::npos);
+
+    const std::string source =
+        read_file(repo_root / "plugins" / "dolphindb" / "dolphindb_adapter.cpp");
+    EXPECT_NE(source.find("ConstantSP agentOSCreateAgent2("), std::string::npos);
+    EXPECT_NE(source.find("ConstantSP agentOSAsk2("), std::string::npos);
+    EXPECT_NE(source.find("ConstantSP agentOSAskStream2("), std::string::npos);
 }

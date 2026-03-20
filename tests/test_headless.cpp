@@ -1,8 +1,31 @@
 #include <agentos/headless/runner.hpp>
 #include <gtest/gtest.h>
+#include <thread>
 
 using namespace agentos;
 using namespace agentos::headless;
+
+namespace {
+
+class SlowMockBackend : public kernel::ILLMBackend {
+public:
+    explicit SlowMockBackend(Duration delay) : delay_(delay) {}
+
+    Result<kernel::LLMResponse> complete(const kernel::LLMRequest&) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_.count()));
+        kernel::LLMResponse resp;
+        resp.content = "slow reply";
+        resp.finish_reason = "stop";
+        return resp;
+    }
+
+    std::string name() const noexcept override { return "slow-mock"; }
+
+private:
+    Duration delay_;
+};
+
+} // namespace
 
 class HeadlessRunnerTest : public ::testing::Test {
 protected:
@@ -107,4 +130,22 @@ TEST_F(HeadlessRunnerTest, ToolRegistrationOnRunner) {
     req.task = "Say hello";
     auto result = runner->run(req);
     EXPECT_TRUE(result.success);
+}
+
+TEST(HeadlessRunnerTimeoutTest, TimeoutReturnsPromptly) {
+    auto runner = std::make_unique<HeadlessRunner>(
+        std::make_unique<SlowMockBackend>(Duration{250}),
+        AgentOS::Config::builder().scheduler_threads(1).build());
+
+    RunRequest req;
+    req.task = "This should time out quickly";
+    req.timeout = Duration{25};
+
+    auto start = Clock::now();
+    auto result = runner->run(req);
+    auto elapsed = std::chrono::duration_cast<Duration>(Clock::now() - start);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.error, "Task timed out");
+    EXPECT_LT(elapsed.count(), 150) << "timeout path blocked on background task";
 }

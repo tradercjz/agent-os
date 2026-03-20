@@ -486,7 +486,7 @@ TEST_F(SDKBuilderTest, BuilderSnapshotAndLtmDirs) {
 TEST(SDKTest, VersionPatch) {
   auto v = version();
   EXPECT_GE(v.patch, 0);
-  EXPECT_EQ(v.to_string(), "0.9.0");
+  EXPECT_EQ(v.to_string(), std::string(AGENTOS_VERSION_STRING));
 }
 
 // Test multiple agents with find_agent

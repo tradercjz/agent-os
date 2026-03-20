@@ -171,6 +171,7 @@ set(AGENTOS_SOURCES
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(agentos PUBLIC ${CMAKE_BINARY_DIR}/include)
 target_include_directories(agentos PUBLIC ${SQLITE3_INCLUDE_DIRS})
 target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_LIBRARIES})
 

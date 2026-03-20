@@ -52,10 +52,10 @@ namespace error_code {
 
 class MCPServer {
 public:
-    MCPServer(tools::ToolRegistry& registry,
+    MCPServer(tools::ToolManager& tool_manager,
               std::string server_name,
               std::string version)
-        : registry_(registry),
+        : tool_manager_(tool_manager),
           server_name_(std::move(server_name)),
           version_(std::move(version)) {}
 
@@ -98,7 +98,7 @@ public:
     const std::string& version() const { return version_; }
 
 private:
-    tools::ToolRegistry& registry_;
+    tools::ToolManager& tool_manager_;
     std::string server_name_;
     std::string version_;
 
@@ -117,7 +117,7 @@ private:
 
     MCPResponse handle_tools_list(const MCPRequest& req) {
         Json tools_array = Json::array();
-        auto schemas = registry_.list_schemas();
+        auto schemas = tool_manager_.registry().list_schemas();
         for (const auto& schema : schemas) {
             Json tool_json;
             tool_json["name"] = schema.id;
@@ -155,26 +155,19 @@ private:
         }
 
         std::string tool_name = req.params["name"].get<std::string>();
-        std::string args_json = "{}";
-        if (req.params.contains("arguments")) {
-            args_json = req.params["arguments"].dump();
-        }
-
-        auto tool = registry_.find(tool_name);
-        if (!tool) {
+        if (!tool_manager_.registry().find(tool_name)) {
             return make_error_response(req.id, error_code::InvalidParams,
                                        "Tool not found: " + tool_name);
         }
 
-        // Build ParsedArgs from arguments
-        tools::ParsedArgs parsed;
-        if (req.params.contains("arguments") && req.params["arguments"].is_object()) {
-            for (auto& [key, val] : req.params["arguments"].items()) {
-                parsed.values[key] = val.is_string() ? val.get<std::string>() : val.dump();
-            }
-        }
+        kernel::ToolCallRequest call;
+        call.id = req.id.is_null() ? "mcp-call" : req.id.dump();
+        call.name = tool_name;
+        call.args_json = req.params.contains("arguments")
+            ? req.params["arguments"].dump()
+            : Json::object().dump();
 
-        auto result = tool->execute(parsed);
+        auto result = tool_manager_.dispatch(call);
 
         Json content = Json::array();
         Json text_content;

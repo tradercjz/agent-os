@@ -193,18 +193,29 @@ agentOS::registerTool("query_stock_price", "查询股票最新价格", queryPric
 
 | 函数 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
-| `agentOS::createAgent(name [, prompt, tools, skills, blockTools, contextLimit, isolation, maxSteps])` | STRING... | LONG | 创建持久 Agent，返回 handle |
+| `agentOS::createAgent(name [, prompt, tools, skills, blockTools, contextLimit, isolation, securityRole])` | STRING... | LONG | 兼容别名：创建持久 Agent，返回 handle |
+| `agentOS::createAgent2(name [, prompt, tools, skills, blockTools, contextLimit, isolation, securityRole])` | STRING... | LONG | 推荐写法：显式 V2 创建持久 Agent |
+| `agentOS::ask2(handle, question [, systemPrompt])` | LONG, STRING, STRING | STRING | 推荐写法：对持久 Agent 发起同步对话 |
+| `agentOS::askStream2(handle, question [, systemPrompt [, callback]])` | LONG, STRING, STRING, FUNCTION | STRING | 推荐写法：对持久 Agent 发起流式对话 |
 | `agentOS::destroy(handle)` | LONG | BOOL | 销毁 Agent |
+
+说明：
+推荐在所有“持久 Agent + handle”场景使用 `agentOS::createAgent2`、`agentOS::ask2`、`agentOS::askStream2`。旧写法 `createAgent`、`ask(handle, ...)`、`askStream(handle, ...)` 仍然保留，用于兼容已有调用方。
 
 **示例**:
 
 ```dolphindb
-agent = agentOS::createAgent(
+agent = agentOS::createAgent2(
     name = "quant_agent",
     prompt = "你是量化分析师",
     tools = ["query_price"],
     contextLimit = 16384
 )
+```
+
+```dolphindb
+print(agentOS::ask2(agent, "帮我分析今天的市场走势"))
+agentOS::askStream2(agent, "把结论展开成三段", callback=print)
 ```
 
 ### 3.8 RAG 知识库
@@ -623,7 +634,7 @@ agentOS::createKB([chunkSize], [chunkOverlap], [embeddingModel])
 
 ---
 
-## 附录: PluginAgentOS.txt 函数清单（41 个）
+## 附录: PluginAgentOS.txt 函数清单（44 个）
 
 ```
 agentOS,libPluginAgentOS.so,3.00.5.0
@@ -636,12 +647,15 @@ agentOSStatus,status,system,0,0,0
 
 # Agent 管理
 agentOSCreateAgent,createAgent,system,1,8,0
+agentOSCreateAgent2,createAgent2,system,1,8,0
 agentOSDestroy,destroy,system,1,1,0
 agentOSInfo,info,system,1,1,0
 
 # 对话
 agentOSAsk,ask,system,1,3,0
+agentOSAsk2,ask2,system,2,3,0
 agentOSAskStream,askStream,system,1,4,0
+agentOSAskStream2,askStream2,system,2,4,0
 agentOSAskTable,askTable,system,1,4,0
 agentOSRun,run,system,2,5,0
 

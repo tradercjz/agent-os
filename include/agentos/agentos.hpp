@@ -5,7 +5,7 @@
 // 用法：
 //   #include <agentos/agentos.hpp>
 //   auto os = agentos::AgentOSBuilder()
-//                 .openai("sk-...", "gpt-4o")
+//                 .openai("sk-...", "gpt-4o-mini")
 //                 .threads(4)
 //                 .build();
 //   auto agent = os->agent("MyBot")
@@ -24,9 +24,9 @@
 
 // ── Version info ────────────────────────────────────────────
 #define AGENTOS_VERSION_MAJOR 0
-#define AGENTOS_VERSION_MINOR 9
+#define AGENTOS_VERSION_MINOR 1
 #define AGENTOS_VERSION_PATCH 0
-#define AGENTOS_VERSION_STRING "0.9.0"
+#define AGENTOS_VERSION_STRING "0.1.0"
 
 namespace agentos {
 

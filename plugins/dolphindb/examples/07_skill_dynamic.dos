@@ -61,7 +61,7 @@ agentOS::registerSkill("数据可视化",
 // 创建通用助手（初始不带任何技能）
 // ────────────────────────────────────
 
-assistant = agentOS::createAgent(
+assistant = agentOS::createAgent2(
     name = "smart-assistant",
     prompt = "你是 DolphinDB 智能助手。根据用户需求，使用可用的工具完成任务。"
 )
@@ -74,7 +74,7 @@ print("=== 场景 A: 数据查询 ===")
 
 // 激活
 agentOS::activateSkill(assistant, "数据查询")
-print(agentOS::ask(assistant, "帮我查下最近一周每天的总交易量"))
+print(agentOS::ask2(assistant, "帮我查下最近一周每天的总交易量"))
 
 // 查看状态
 print(agentOS::info(assistant))
@@ -87,7 +87,7 @@ print(agentOS::info(assistant))
 print("=== 场景 B: 追加可视化 ===")
 
 agentOS::activateSkill(assistant, "数据可视化")
-print(agentOS::ask(assistant, "把刚才的交易量数据画成趋势图"))
+print(agentOS::ask2(assistant, "把刚才的交易量数据画成趋势图"))
 
 // 现在 assistant 同时有两个技能
 print(agentOS::info(assistant))
@@ -103,7 +103,7 @@ agentOS::deactivateSkill(assistant, "数据查询")
 agentOS::deactivateSkill(assistant, "数据可视化")
 agentOS::activateSkill(assistant, "监控告警")
 
-print(agentOS::ask(assistant, "检测到 CPU 使用率超过 90%，发个钉钉告警"))
+print(agentOS::ask2(assistant, "检测到 CPU 使用率超过 90%，发个钉钉告警"))
 
 // ────────────────────────────────────
 // 场景 D：运行时禁用/启用工具
@@ -115,12 +115,12 @@ print("=== 场景 D: 工具级控制 ===")
 agentOS::activateSkill(assistant, "数据查询")
 agentOS::blockTool(assistant, "exec_sql", "数据库维护中")
 
-print(agentOS::ask(assistant, "帮我查下数据"))
+print(agentOS::ask2(assistant, "帮我查下数据"))
 // agent 会告诉用户工具不可用
 
 // 维护结束，恢复
 agentOS::unblockTool(assistant, "exec_sql")
-print(agentOS::ask(assistant, "现在可以查了，帮我看下数据"))
+print(agentOS::ask2(assistant, "现在可以查了，帮我看下数据"))
 
 agentOS::destroy(assistant)
 agentOS::close()

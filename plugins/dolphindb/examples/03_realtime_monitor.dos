@@ -40,7 +40,7 @@ agentOS::registerTool("order_book", "查询最新盘口数据", queryOrderBook)
 // 创建监控 Agent
 // ────────────────────────────────────
 
-monitor = agentOS::createAgent(
+monitor = agentOS::createAgent2(
     name = "risk-monitor",
     prompt = "你是实时风控监控员。当收到异常告警时，查询最近交易数据和盘口，分析异常原因，评估风险等级（低/中/高/紧急），给出处置建议。格式：\n1. 异常概述\n2. 数据分析\n3. 风险等级\n4. 处置建议",
     tools = ["recent_trades", "order_book"],

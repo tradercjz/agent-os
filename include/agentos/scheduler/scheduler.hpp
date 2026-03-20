@@ -108,6 +108,7 @@ public:
         for (auto& [tid, node] : nodes_) {
             if (completed_.contains(tid)) continue;
             if (enqueued_.contains(tid)) continue; // 已入队的不再返回，避免重复
+            if (!node.deps.contains(id)) continue; // 仅检查被本次完成事件影响的下游任务
             if (all_deps_satisfied_locked(tid)) {
                 enqueued_.insert(tid);
                 newly_ready.push_back(tid);
@@ -334,7 +335,10 @@ public:
             }
         }
         metrics_.tasks_submitted++;
-        cv_.notify_one();
+        // Workers and the dispatcher currently share this condition variable.
+        // Wake all waiters so a task-ready notification is not consumed only by
+        // the dispatcher while workers remain asleep.
+        cv_.notify_all();
         return task->id;
     }
 
@@ -483,7 +487,7 @@ private:
                     if (it != all_tasks_.end() &&
                         it->second->state == TaskState::Pending) {
                         enqueue_ready_locked(it->second);
-                        cv_.notify_one();
+                        cv_.notify_all();
                     }
                 }
             }

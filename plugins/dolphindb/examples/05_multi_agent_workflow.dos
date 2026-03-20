@@ -43,7 +43,7 @@ agentOS::registerTool("execute_order", "提交交易委托", executeOrder)
 // ────────────────────────────────────
 
 // Agent 1：研究员 — 负责市场分析
-researcher = agentOS::createAgent(
+researcher = agentOS::createAgent2(
     name = "researcher",
     prompt = "你是资深量化研究员。分析市场行情，给出看多/看空/中性的判断和理由。只做分析，不做交易决策。",
     tools = ["query_market"],
@@ -51,7 +51,7 @@ researcher = agentOS::createAgent(
 )
 
 // Agent 2：风控员 — 负责风险评估
-risk_mgr = agentOS::createAgent(
+risk_mgr = agentOS::createAgent2(
     name = "risk-manager",
     prompt = "你是风控经理。评估交易建议的风险，检查持仓集中度、回撤风险。输出：风险等级（低/中/高）和约束条件。",
     tools = ["query_portfolio", "query_market"],
@@ -59,7 +59,7 @@ risk_mgr = agentOS::createAgent(
 )
 
 // Agent 3：交易员 — 负责执行（受限工具）
-trader = agentOS::createAgent(
+trader = agentOS::createAgent2(
     name = "trader",
     prompt = "你是交易执行员。根据研究建议和风控约束，决定具体的交易参数（品种、方向、数量），执行下单。",
     tools = ["execute_order", "query_portfolio"],

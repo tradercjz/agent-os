@@ -21,8 +21,8 @@ void section(std::string_view title) {
 }
 
 int main() {
-    // 创建工具注册表并注册工具
-    tools::ToolRegistry registry;
+    // 创建工具管理器并注册工具
+    tools::ToolManager tool_manager;
 
     tools::ToolSchema calc_schema;
     calc_schema.id = "calculator";
@@ -34,7 +34,7 @@ int main() {
         .required = true,
     });
 
-    registry.register_fn(calc_schema,
+    tool_manager.registry().register_fn(calc_schema,
         [](const tools::ParsedArgs& args, std::stop_token) {
             std::string expr = args.values.count("expression")
                 ? args.values.at("expression") : "0";
@@ -51,7 +51,7 @@ int main() {
         .required = true,
     });
 
-    registry.register_fn(weather_schema,
+    tool_manager.registry().register_fn(weather_schema,
         [](const tools::ParsedArgs& args, std::stop_token) {
             std::string city = args.values.count("city")
                 ? args.values.at("city") : "Unknown";
@@ -59,7 +59,7 @@ int main() {
         });
 
     // 创建 MCP Server
-    MCPServer server(registry, "agentos-mcp", "1.0.0");
+    MCPServer server(tool_manager, "agentos-mcp", "1.0.0");
 
     // ── 1. Initialize ──
     section("1. Initialize (握手)");

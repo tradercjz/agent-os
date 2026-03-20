@@ -69,7 +69,7 @@ agentOS::registerSkill("行情分析",
 // 第四步：创建 Agent 并使用
 // ────────────────────────────────────
 
-analyst = agentOS::createAgent(
+analyst = agentOS::createAgent2(
     name = "quant-analyst",
     prompt = "你是一位资深量化研究员。分析股票时，先用工具查询数据，再基于数据给出专业判断。用中文回答，数据用表格展示。",
     skills = ["行情分析"],
@@ -78,12 +78,12 @@ analyst = agentOS::createAgent(
 )
 
 // 分析
-print(agentOS::ask(analyst, "帮我看下贵州茅台（600519）的最新价格"))
-print(agentOS::ask(analyst, "最近30天的K线走势如何？"))
-print(agentOS::ask(analyst, "技术指标给出什么信号？是否建议买入？"))
+print(agentOS::ask2(analyst, "帮我看下贵州茅台（600519）的最新价格"))
+print(agentOS::ask2(analyst, "最近30天的K线走势如何？"))
+print(agentOS::ask2(analyst, "技术指标给出什么信号？是否建议买入？"))
 
 // 对比分析（agent 记住了上文）
-print(agentOS::ask(analyst, "再帮我查下比亚迪（002594）的情况，跟茅台对比一下"))
+print(agentOS::ask2(analyst, "再帮我查下比亚迪（002594）的情况，跟茅台对比一下"))
 
 // ────────────────────────────────────
 // 第五步：保存会话，明天继续
@@ -94,7 +94,7 @@ print("会话已保存: " + sid)
 
 // ... 第二天 ...
 // analyst = agentOS::resume(sid)
-// print(agentOS::ask(analyst, "昨天的技术信号今天验证了吗？"))
+// print(agentOS::ask2(analyst, "昨天的技术信号今天验证了吗？"))
 
 agentOS::destroy(analyst)
 agentOS::close()

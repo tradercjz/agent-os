@@ -1725,6 +1725,10 @@ ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args) {
     DDB_SAFE_END("agentOS::createAgent")
 }
 
+ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
+    return agentOSCreateAgent(heap, args);
+}
+
 // ─── agentOS::ask(agent, question, [prompt]) ─────────────────
 
 ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
@@ -1764,6 +1768,10 @@ ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
     auto result = agent->run(question);
     return new String(unwrap_or_throw("agentOS::ask", std::move(result)));
     DDB_SAFE_END("agentOS::ask")
+}
+
+ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args) {
+    return agentOSAsk(heap, args);
 }
 
 // ─── agentOS::askStream(agent, question, [prompt], [callback]) ──
@@ -1830,6 +1838,10 @@ ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args) {
 
     return new String(full_response);
     DDB_SAFE_END("agentOS::askStream")
+}
+
+ConstantSP agentOSAskStream2(Heap* heap, vector<ConstantSP>& args) {
+    return agentOSAskStream(heap, args);
 }
 
 // ─── agentOS::run(agent, task, [prompt], [timeout], [contextLimit]) ──
