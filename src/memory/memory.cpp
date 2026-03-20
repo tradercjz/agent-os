@@ -621,6 +621,10 @@ void LongTermMemory::load_index() {
       ls >> rec.id >> rec.label >> rec.importance >> rec.user_id >>
           rec.agent_id >> rec.session_id >> rec.type;
 
+      if (!ls) {
+        throw std::runtime_error("malformed index record: " + line);
+      }
+
       if (rec.user_id == "-")
         rec.user_id = "";
       if (rec.agent_id == "-")

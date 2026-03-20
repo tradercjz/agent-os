@@ -468,11 +468,10 @@ TEST_F(LongTermMemoryCoverage, CorruptIndexDatHandled) {
 
   // Constructing LTM should handle corrupt index gracefully
   LongTermMemory ltm(test_dir_);
-  // It may or may not load successfully, but should not crash
-  // If it fails, handle_corrupt_index renames it to .bad
-  if (!ltm.is_loaded()) {
-    EXPECT_TRUE(fs::exists(test_dir_ / "index.bad"));
-  }
+  EXPECT_FALSE(ltm.is_loaded());
+  EXPECT_TRUE(fs::exists(test_dir_ / "index.bad"));
+  EXPECT_FALSE(fs::exists(test_dir_ / "index.dat"));
+  EXPECT_EQ(ltm.size(), 0u);
 }
 
 TEST_F(LongTermMemoryCoverage, CorruptImportanceParsed) {
