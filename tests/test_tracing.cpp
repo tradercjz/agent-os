@@ -6,10 +6,21 @@
 #include <thread>
 #include <chrono>
 #include <filesystem>
+#include <string>
 
 using namespace agentos;
 using namespace agentos::tracing;
 using json = nlohmann::json;
+
+namespace {
+
+std::filesystem::path make_tracing_test_dir(const std::string &name) {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::filesystem::temp_directory_path() /
+           ("agentos_tracing_test_" + name + "_" + std::to_string(nonce));
+}
+
+}
 
 // ── Basic Tracer tests (no AgentOS needed) ───────────────────
 
@@ -239,6 +250,9 @@ TEST(TracerDisabledTest, DisabledTracer) {
 // 11. MiddlewareIntegration — use middleware hooks to record tracing spans
 class TracerIntegrationTest : public ::testing::Test {
 protected:
+    std::filesystem::path snapshot_dir_ = make_tracing_test_dir("snap");
+    std::filesystem::path ltm_dir_ = make_tracing_test_dir("ltm");
+
     void SetUp() override {
         auto mock = std::make_unique<kernel::MockLLMBackend>("test-llm");
         mock->register_rule("test", "response text");
@@ -246,20 +260,16 @@ protected:
 
         AgentOS::Config cfg;
         cfg.scheduler_threads = 2;
-        cfg.snapshot_dir = (std::filesystem::temp_directory_path() /
-                            "agentos_tracing_test_snap").string();
-        cfg.ltm_dir = (std::filesystem::temp_directory_path() /
-                       "agentos_tracing_test_ltm").string();
+        cfg.snapshot_dir = snapshot_dir_.string();
+        cfg.ltm_dir = ltm_dir_.string();
 
         os_ = std::make_unique<AgentOS>(std::move(mock), cfg);
     }
 
     void TearDown() override {
         os_.reset();
-        std::filesystem::remove_all(
-            std::filesystem::temp_directory_path() / "agentos_tracing_test_snap");
-        std::filesystem::remove_all(
-            std::filesystem::temp_directory_path() / "agentos_tracing_test_ltm");
+        std::filesystem::remove_all(snapshot_dir_);
+        std::filesystem::remove_all(ltm_dir_);
     }
 
     std::unique_ptr<AgentOS> os_;

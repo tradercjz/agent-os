@@ -1,14 +1,29 @@
 #include <agentos/reflective_agent.hpp>
 #include <gtest/gtest.h>
+#include <chrono>
 #include <filesystem>
+#include <string>
 
 using namespace agentos;
 using namespace agentos::kernel;
+
+namespace {
+
+std::filesystem::path make_reflective_agent_test_dir(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return std::filesystem::temp_directory_path() /
+         ("agentos_ref_test_" + name + "_" + std::to_string(nonce));
+}
+
+}
 
 // ── ReflectiveAgentOS 集成测试 ────────────────────────────────────────
 
 class ReflectiveAgentOSTest : public ::testing::Test {
 protected:
+  std::filesystem::path snapshot_dir_ = make_reflective_agent_test_dir("snap");
+  std::filesystem::path ltm_dir_ = make_reflective_agent_test_dir("ltm");
+
   void SetUp() override {
     auto mock = std::make_unique<MockLLMBackend>("test-llm");
     // Register rules for typical thought process
@@ -32,12 +47,8 @@ protected:
 
     AgentOS::Config cfg;
     cfg.scheduler_threads = 2;
-    cfg.snapshot_dir = (std::filesystem::temp_directory_path() /
-                        "agentos_ref_test_snap")
-                           .string();
-    cfg.ltm_dir = (std::filesystem::temp_directory_path() /
-                   "agentos_ref_test_ltm")
-                      .string();
+    cfg.snapshot_dir = snapshot_dir_.string();
+    cfg.ltm_dir = ltm_dir_.string();
 
     os_ = std::make_unique<AgentOS>(std::move(mock), cfg);
 
@@ -55,10 +66,8 @@ protected:
 
   void TearDown() override {
     os_.reset();
-    std::filesystem::remove_all(
-        std::filesystem::temp_directory_path() / "agentos_ref_test_snap");
-    std::filesystem::remove_all(
-        std::filesystem::temp_directory_path() / "agentos_ref_test_ltm");
+    std::filesystem::remove_all(snapshot_dir_);
+    std::filesystem::remove_all(ltm_dir_);
   }
 
   std::unique_ptr<AgentOS> os_;
