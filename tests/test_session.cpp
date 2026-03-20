@@ -9,7 +9,12 @@ using namespace agentos::context;
 class SessionTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        snap_dir_ = fs::temp_directory_path() / "test_sessions";
+        const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+        ASSERT_NE(info, nullptr);
+        snap_dir_ = fs::temp_directory_path() /
+                    fs::path("agentos_session_test_" +
+                             std::string(info->test_suite_name()) + "_" +
+                             std::string(info->name()));
         if (fs::exists(snap_dir_)) fs::remove_all(snap_dir_);
         mgr_ = std::make_unique<ContextManager>(snap_dir_);
     }

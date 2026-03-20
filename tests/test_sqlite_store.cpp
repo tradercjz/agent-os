@@ -262,6 +262,42 @@ TEST_F(SQLiteStoreTest, PersistenceAcrossRestarts) {
   EXPECT_EQ(results->front().entry.content, "Persistent memory 1");
 }
 
+TEST_F(SQLiteStoreTest, PersistenceSkipsMalformedEmbeddingBlobOnReload) {
+  Embedding emb(16, 0.25f);
+  MemoryEntry entry;
+  entry.content = "Corruptible memory";
+  entry.embedding = emb;
+  entry.user_id = "user_blob";
+
+  auto id = store_->write(entry);
+  ASSERT_TRUE(id);
+
+  sqlite3* db = nullptr;
+  ASSERT_EQ(sqlite3_open((test_dir_ / "memory.db").c_str(), &db), SQLITE_OK);
+  const char bad_blob[] = {'x', 'y', 'z'};
+  sqlite3_stmt* stmt = nullptr;
+  ASSERT_EQ(sqlite3_prepare_v2(
+                db,
+                "UPDATE entries SET embedding = ? WHERE id = ?",
+                -1, &stmt, nullptr),
+            SQLITE_OK);
+  ASSERT_NE(stmt, nullptr);
+  ASSERT_EQ(sqlite3_bind_blob(stmt, 1, bad_blob, sizeof(bad_blob), SQLITE_STATIC),
+            SQLITE_OK);
+  ASSERT_EQ(sqlite3_bind_text(stmt, 2, id->c_str(), -1, SQLITE_TRANSIENT), SQLITE_OK);
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_DONE);
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+
+  store_.reset();
+  store_ = std::make_unique<SQLiteLongTermMemory>(test_dir_);
+
+  auto read = store_->read(*id);
+  ASSERT_TRUE(read);
+  EXPECT_TRUE(read->embedding.empty());
+  EXPECT_EQ(read->content, "Corruptible memory");
+}
+
 // ── MemorySystem 集成测试 ──────────────────────
 TEST_F(SQLiteStoreTest, MemorySystemWithSQLiteBackend) {
   // 使用自定义构造器注入 SQLite 后端
