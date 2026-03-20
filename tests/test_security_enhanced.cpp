@@ -3,12 +3,27 @@
 // SSRF protection, shell sanitization, injection hot-reload
 // ============================================================
 #include <agentos/security/security.hpp>
+#include <agentos/memory/graph_memory.hpp>
 #include <agentos/tools/tool_manager.hpp>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <string>
 
 using namespace agentos;
 using namespace agentos::security;
 using namespace agentos::tools;
+
+namespace {
+
+std::filesystem::path make_security_wal_test_dir(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return std::filesystem::temp_directory_path() /
+         ("agentos_test_wal_" + name + "_" + std::to_string(nonce));
+}
+
+}
 
 // ── InjectionDetector Hot-Reload Tests ──────────────────────
 
@@ -144,7 +159,7 @@ TEST(ShellToolSecurity, BlocksTooManyArguments) {
 // ── WAL CRC32 Tests ─────────────────────────────────────────
 
 TEST(WALIntegrity, CRC32RoundTrip) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_wal_crc";
+  std::filesystem::path test_dir = make_security_wal_test_dir("crc");
   std::filesystem::remove_all(test_dir);
 
   {
@@ -166,7 +181,7 @@ TEST(WALIntegrity, CRC32RoundTrip) {
 }
 
 TEST(WALIntegrity, CorruptedLineSkipped) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_wal_corrupt";
+  std::filesystem::path test_dir = make_security_wal_test_dir("corrupt");
   std::filesystem::remove_all(test_dir);
 
   // Write valid data first
