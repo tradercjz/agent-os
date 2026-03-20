@@ -148,6 +148,16 @@ TEST_F(ToolLearnerTest, ApplyParamFix) {
     EXPECT_EQ(j["url"].get<std::string>(), "https://example.com");
 }
 
+TEST_F(ToolLearnerTest, ApplyParamFixWithoutValueContainingParamName) {
+    learner_->analyze_failure(make_failure("http_fetch"));
+
+    std::string input = R"({"url":"example.com"})";
+    std::string result = learner_->apply_param_fixes("http_fetch", input);
+
+    auto j = nlohmann::json::parse(result);
+    EXPECT_EQ(j["url"].get<std::string>(), "https://example.com");
+}
+
 // ─────────────────────────────────────────────────────────────
 // 6. ApplyParamFix_NoMatch
 // ─────────────────────────────────────────────────────────────

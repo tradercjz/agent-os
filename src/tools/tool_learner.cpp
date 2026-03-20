@@ -112,10 +112,6 @@ void ToolLearner::parse_and_store_rule(const std::string& tool_id, const std::st
 
                 if (rule.fix_type == "param_fix") {
                     rule.fix_replacement = fix_val;
-                    // Use param_name as fix_regex if not otherwise set
-                    if (rule.fix_regex.empty() && !rule.param_name.empty()) {
-                        rule.fix_regex = rule.param_name;
-                    }
                 } else {
                     rule.prompt_hint = fix_val;
                 }
