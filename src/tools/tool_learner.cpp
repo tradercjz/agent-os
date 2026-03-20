@@ -218,15 +218,21 @@ std::string ToolLearner::get_prompt_hints(const std::string& tool_id) {
 void ToolLearner::record_fix_outcome(const std::string& tool_id, bool success) {
     std::lock_guard lk(mu_);
 
-    auto it = rules_.find(tool_id);
-    if (it == rules_.end()) return;
+    if (last_applied_tool_ != tool_id) return;
 
-    // Increment success_after_apply for rules that were recently applied
+    auto it = rules_.find(tool_id);
+    if (it == rules_.end()) {
+        last_applied_tool_.clear();
+        return;
+    }
+
+    // Count each successful application at most once.
     for (auto& rule : it->second) {
-        if (rule.applied_count > 0 && success) {
+        if (success && rule.applied_count > rule.success_after_apply) {
             rule.success_after_apply++;
         }
     }
+    last_applied_tool_.clear();
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -172,6 +172,24 @@ TEST_F(ToolLearnerTest, ApplyParamFix_NoMatch) {
     EXPECT_EQ(result, input);
 }
 
+TEST_F(ToolLearnerTest, RecordFixOutcomeCountsEachApplicationOnce) {
+    learner_->analyze_failure(make_failure("http_fetch"));
+
+    learner_->apply_param_fixes("http_fetch", R"({"url":"example.com"})");
+    learner_->record_fix_outcome("http_fetch", true);
+
+    auto rules = learner_->get_rules("http_fetch");
+    ASSERT_EQ(rules.size(), 1u);
+    EXPECT_EQ(rules[0].applied_count, 1u);
+    EXPECT_EQ(rules[0].success_after_apply, 1u);
+
+    learner_->record_fix_outcome("http_fetch", true);
+
+    rules = learner_->get_rules("http_fetch");
+    ASSERT_EQ(rules.size(), 1u);
+    EXPECT_EQ(rules[0].success_after_apply, 1u);
+}
+
 // ─────────────────────────────────────────────────────────────
 // 7. GetPromptHints
 // ─────────────────────────────────────────────────────────────
