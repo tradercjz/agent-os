@@ -186,6 +186,15 @@ TEST_F(ContextManagerTest, CompressWithSummary) {
   EXPECT_LE(compressed.used_tokens(), compressed.max_tokens());
 }
 
+TEST_F(ContextManagerTest, RestoreRejectsUnreadableSnapshotPath) {
+  const auto snapshot_path = test_dir_ / "agent_300_snap.bin";
+  std::filesystem::create_directory(snapshot_path);
+
+  auto result = mgr_->restore(300);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code, ErrorCode::MemoryReadFailed);
+}
+
 // ── Snapshot Serialize/Deserialize Roundtrip ─────────────────
 
 TEST(ContextSnapshotTest, RoundtripWithSpecialChars) {
@@ -215,6 +224,22 @@ TEST(ContextSnapshotTest, DeserializeRejectsOversizedInput) {
   // Create a vector > 50 MiB
   std::vector<uint8_t> huge(51 * 1024 * 1024, 'X');
   auto result = ContextSnapshot::deserialize_binary(huge);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(ContextSnapshotTest, DeserializeRejectsTruncatedInput) {
+  ContextSnapshot snap;
+  snap.agent_id = 7;
+  snap.session_id = "sess_truncated";
+  snap.captured_at = now();
+  snap.messages.push_back(Message::user("hello"));
+  snap.metadata_json = R"({"ok":true})";
+
+  auto serialized = snap.serialize_binary();
+  ASSERT_GT(serialized.size(), 4u);
+  serialized.resize(serialized.size() - 3);
+
+  auto result = ContextSnapshot::deserialize_binary(serialized);
   EXPECT_FALSE(result.has_value());
 }
 

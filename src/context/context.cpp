@@ -147,17 +147,28 @@ std::optional<ContextSnapshot> ContextSnapshot::deserialize_binary(std::span<con
   if (data.size() < 16) return std::nullopt;
   if (data.size() > 50 * 1024 * 1024) return std::nullopt;
   size_t pos = 0;
+  bool ok = true;
   auto read_u32 = [&]() -> uint32_t {
     uint32_t v;
-    if (pos + 4 > data.size()) return 0;
+    if (pos + 4 > data.size()) {
+      ok = false;
+      return 0;
+    }
     std::memcpy(&v, &data[pos], 4);
     pos += 4;
     return v;
   };
   auto read_str = [&]() -> std::string {
     uint32_t len = read_u32();
-    if (len > 10 * 1024 * 1024) return "";
-    if (pos + len > data.size()) return "";
+    if (!ok) return {};
+    if (len > 10 * 1024 * 1024) {
+      ok = false;
+      return {};
+    }
+    if (pos + len > data.size()) {
+      ok = false;
+      return {};
+    }
     std::string s(reinterpret_cast<const char*>(&data[pos]), len);
     pos += len;
     return s;
@@ -167,18 +178,21 @@ std::optional<ContextSnapshot> ContextSnapshot::deserialize_binary(std::span<con
   snap.agent_id = read_u32();
   snap.session_id = read_str();
   uint32_t ms = read_u32();
+  if (!ok) return std::nullopt;
   snap.captured_at = TimePoint(Duration(ms));
   uint32_t msg_count = read_u32();
-  if (msg_count > 100000) return std::nullopt;
+  if (!ok || msg_count > 100000) return std::nullopt;
   for (uint32_t i = 0; i < msg_count; ++i) {
-    if (pos >= data.size()) break;
+    if (pos >= data.size()) return std::nullopt;
     kernel::Role role = static_cast<kernel::Role>(data[pos++]);
     std::string content = read_str();
     std::string name = read_str();
     std::string tc_id = read_str();
+    if (!ok) return std::nullopt;
     snap.messages.push_back({role, std::move(content), std::move(name), std::move(tc_id), {}});
   }
   snap.metadata_json = read_str();
+  if (!ok) return std::nullopt;
   return snap;
 }
 
@@ -306,42 +320,56 @@ std::optional<SessionState> SessionState::deserialize_binary(std::span<const uin
     return std::nullopt;
 
   size_t pos = 4;
+  bool ok = true;
   auto read_u32 = [&]() -> uint32_t {
     uint32_t v;
-    if (pos + 4 > data.size()) return 0;
+    if (pos + 4 > data.size()) {
+      ok = false;
+      return 0;
+    }
     std::memcpy(&v, &data[pos], 4);
     pos += 4;
     return v;
   };
   auto read_str = [&]() -> std::string {
     uint32_t len = read_u32();
-    if (len > 10 * 1024 * 1024) return "";
-    if (pos + len > data.size()) return "";
+    if (!ok) return {};
+    if (len > 10 * 1024 * 1024) {
+      ok = false;
+      return {};
+    }
+    if (pos + len > data.size()) {
+      ok = false;
+      return {};
+    }
     std::string s(reinterpret_cast<const char*>(&data[pos]), len);
     pos += len;
     return s;
   };
 
   uint32_t version = read_u32();
-  if (version != 1) return std::nullopt;
+  if (!ok || version != 1) return std::nullopt;
 
   SessionState state;
   state.agent_id = read_u32();
   state.session_id = read_str();
   uint32_t ms = read_u32();
+  if (!ok) return std::nullopt;
   state.saved_at = TimePoint(Duration(ms));
 
   state.config_json = read_str();
+  if (!ok) return std::nullopt;
 
   uint32_t mw_count = read_u32();
-  if (mw_count > 1000) return std::nullopt;
+  if (!ok || mw_count > 1000) return std::nullopt;
   for (uint32_t i = 0; i < mw_count; ++i) {
     state.middleware_names.push_back(read_str());
+    if (!ok) return std::nullopt;
   }
 
   // Embedded context snapshot
   uint32_t ctx_len = read_u32();
-  if (ctx_len > 50 * 1024 * 1024 || pos + ctx_len > data.size()) return std::nullopt;
+  if (!ok || ctx_len > 50 * 1024 * 1024 || pos + ctx_len > data.size()) return std::nullopt;
   std::span<const uint8_t> ctx_data(data.data() + pos, ctx_len);
   auto ctx_snap = ContextSnapshot::deserialize_binary(ctx_data);
   if (!ctx_snap) return std::nullopt;
@@ -349,6 +377,7 @@ std::optional<SessionState> SessionState::deserialize_binary(std::span<const uin
   pos += ctx_len;
 
   state.metadata_json = read_str();
+  if (!ok) return std::nullopt;
   return state;
 }
 

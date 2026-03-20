@@ -1,17 +1,10 @@
 #include <agentos/context/context.hpp>
 #include <gtest/gtest.h>
 #include <filesystem>
-#include <optional>
-#include <string_view>
 
 namespace fs = std::filesystem;
 using namespace agentos;
 using namespace agentos::context;
-
-namespace agentos::context {
-std::optional<AgentId> parse_session_owner(std::string_view session_id);
-std::optional<std::pair<AgentId, SessionId>> parse_session_filename(std::string_view filename);
-}
 
 class SessionTest : public ::testing::Test {
 protected:
@@ -74,6 +67,26 @@ TEST_F(SessionTest, DeserializeBadMagicReturnsNullopt) {
 TEST_F(SessionTest, DeserializeTooSmallReturnsNullopt) {
     std::vector<uint8_t> tiny = {1, 2, 3};
     auto result = SessionState::deserialize_binary(tiny);
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(SessionTest, DeserializeRejectsTruncatedPayload) {
+    SessionState state;
+    state.agent_id = 9;
+    state.session_id = "sess-truncated";
+    state.saved_at = TimePoint(Duration(123));
+    state.config_json = R"({"name":"broken"})";
+    state.context.agent_id = 9;
+    state.context.session_id = state.session_id;
+    state.context.captured_at = state.saved_at;
+    state.context.messages.push_back(kernel::Message::user("hello"));
+    state.metadata_json = "{}";
+
+    auto binary = state.serialize_binary();
+    ASSERT_GT(binary.size(), 4u);
+    binary.resize(binary.size() - 3);
+
+    auto result = SessionState::deserialize_binary(binary);
     EXPECT_FALSE(result.has_value());
 }
 
