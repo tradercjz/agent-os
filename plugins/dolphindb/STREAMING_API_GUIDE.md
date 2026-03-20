@@ -282,7 +282,7 @@ print()
 | `agentOS::health()` | STRING | 健康检查 (JSON) |
 | `agentOS::status()` | STRING | 系统状态摘要 |
 | `agentOS::registerTool(s, cb)` | BOOL | 注册 DDB 函数为工具 |
-| `agentOS::createAgent2(name, ...)` | LONG | 显式 V2 创建 Agent |
-| `agentOS::ask2(h, q, [sys])` | STRING | 持久 Agent 同步对话 |
-| `agentOS::askStream2(h, q, [sys], [cb])` | STRING | 持久 Agent 流式对话 |
+| `agentOS::createAgent2(name, ...)` | LONG | 推荐写法：显式 V2 创建 Agent |
+| `agentOS::ask2(h, q, [sys])` | STRING | 推荐写法：持久 Agent 同步对话 |
+| `agentOS::askStream2(h, q, [sys], [cb])` | STRING | 推荐写法：持久 Agent 流式对话 |
 | `agentOS::destroy(h)` | BOOL | 销毁 Agent |

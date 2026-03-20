@@ -102,8 +102,8 @@ agentOS::ask("帮我写一个均线策略", "你是一个量化分析师")
 
 | 函数 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
-| `agentOS::ask(question [, systemPrompt])` | STRING, STRING | STRING | 同步 LLM 推理 |
-| `agentOS::askStream(question [, systemPrompt [, callback]])` | STRING, STRING, FUNCTION | STRING | 流式推理，callback 逐 token 回调 |
+| `agentOS::ask(question [, systemPrompt])` | STRING, STRING | STRING | 单轮同步 LLM 推理；持久 Agent 场景请用 `ask2` |
+| `agentOS::askStream(question [, systemPrompt [, callback]])` | STRING, STRING, FUNCTION | STRING | 单轮流式推理，callback 逐 token 回调；持久 Agent 场景请用 `askStream2` |
 | `agentOS::askTable(question [, configJson [, agentHandle]])` | STRING, STRING, LONG | TABLE | 结构化返回（含 tool call 记录） |
 
 **askTable 返回表结构**:
