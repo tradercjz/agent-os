@@ -779,6 +779,39 @@ TEST_F(SQLiteStoreTest, MigrateWithBadImportanceString) {
   EXPECT_NEAR(read->importance, 0.75f, 0.01f);
 }
 
+TEST_F(SQLiteStoreTest, MigrateSkipsMalformedIndexRow) {
+  store_.reset();
+
+  auto idx_path = test_dir_ / "index.dat";
+  auto mem_path = test_dir_ / "lt_bad.mem";
+
+  {
+    std::ofstream ofs(idx_path);
+    ofs << "128\n";
+    ofs << "lt_bad 0 0.75 only_user\n";  // malformed: missing fields
+  }
+
+  {
+    std::ofstream ofs(mem_path);
+    ofs << "lt_bad\n";
+    ofs << "src\n";
+    ofs << "0.75\n";
+    ofs << "user_1\n";
+    ofs << "agent_1\n";
+    ofs << "sess_1\n";
+    ofs << "episodic\n";
+    ofs << "should not migrate\n";
+  }
+
+  store_ = std::make_unique<SQLiteLongTermMemory>(test_dir_);
+
+  EXPECT_EQ(store_->size(), 0u);
+  auto read = store_->read("lt_bad");
+  EXPECT_FALSE(read);
+  EXPECT_TRUE(fs::exists(idx_path));
+  EXPECT_TRUE(fs::exists(mem_path));
+}
+
 // ── Search: no HNSW index built, entries without embeddings ──
 TEST_F(SQLiteStoreTest, SearchNoHNSWFallsBackToLinear) {
   // Write entries without embeddings -- HNSW never gets built

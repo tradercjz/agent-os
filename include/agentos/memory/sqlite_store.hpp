@@ -667,6 +667,8 @@ private:
       std::string user_id, agent_id, session_id, type;
       ls >> id >> old_label >> importance >> user_id >> agent_id >> session_id >>
           type;
+      if (!ls || id.empty())
+        continue;
 
       if (user_id == "-")
         user_id = "";
