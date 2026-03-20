@@ -394,7 +394,12 @@ TEST_F(DuckDBStoreTest, NameIsDuckDBLongTermMemory) {
 }
 
 TEST_F(DuckDBStoreTest, MemorySystemDuckDBEnumCreatesCorrectBackend) {
-  auto duckdb_dir = fs::temp_directory_path() / "agentos_duckdb_enum_test";
+  const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+  ASSERT_NE(info, nullptr);
+  auto duckdb_dir = fs::temp_directory_path() /
+                    fs::path("agentos_duckdb_enum_test_" +
+                             std::string(info->test_suite_name()) + "_" +
+                             std::string(info->name()));
   fs::remove_all(duckdb_dir);
 
   {
