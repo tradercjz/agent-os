@@ -60,4 +60,31 @@ struct SubworkerRunRecord {
     std::string error;
 };
 
+class ISubworkerExecutor {
+public:
+    virtual ~ISubworkerExecutor() = default;
+
+    virtual Result<SubworkerResult> run(AgentOS& os,
+                                        AgentId supervisor_id,
+                                        const std::shared_ptr<Agent>& worker,
+                                        const WorkerTemplate& tpl,
+                                        const std::string& task,
+                                        const std::filesystem::path& worktree_path,
+                                        const SubworkerRunOptions& opts) = 0;
+};
+
+class SubworkerRuntime {
+public:
+    explicit SubworkerRuntime(std::unique_ptr<ISubworkerExecutor> executor = {});
+
+    Result<SubworkerResult> run(AgentOS& os,
+                                AgentId supervisor_id,
+                                const WorkerTemplate& tpl,
+                                const std::string& task,
+                                const SubworkerRunOptions& opts = {});
+
+private:
+    std::unique_ptr<ISubworkerExecutor> executor_;
+};
+
 } // namespace agentos

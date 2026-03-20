@@ -44,6 +44,44 @@ TEST(SupervisorTest, ExplicitRunUnknownTemplateReturnsError) {
     EXPECT_EQ(res.error().code, ErrorCode::NotFound);
 }
 
+TEST(SupervisorTest, ExplicitRunSubworkerCreatesWorktree) {
+    auto os = make_os();
+    auto sup = os->create_agent<SupervisorAgent>(AgentConfig{.name = "sup"});
+
+    WorkerTemplate tpl{
+        .name = "researcher",
+        .description = "Researches implementation details",
+        .config = AgentConfig{.name = "researcher_worker", .role_prompt = "Research carefully."}
+    };
+    sup->add_worker_template("researcher", tpl);
+
+    auto res = sup->run_subworker("researcher", "Inspect the repository");
+    ASSERT_TRUE(res.has_value());
+    EXPECT_EQ(res->worker_name, "researcher");
+    EXPECT_FALSE(res->worktree_path.empty());
+    EXPECT_TRUE(std::filesystem::exists(res->worktree_path));
+}
+
+TEST(SupervisorTest, ExplicitRunSubworkerRecordsStructuredLog) {
+    auto os = make_os();
+    auto sup = os->create_agent<SupervisorAgent>(AgentConfig{.name = "sup"});
+
+    WorkerTemplate tpl{
+        .name = "researcher",
+        .description = "Researches implementation details",
+        .config = AgentConfig{.name = "researcher_worker", .role_prompt = "Research carefully."}
+    };
+    sup->add_worker_template("researcher", tpl);
+
+    auto res = sup->run_subworker("researcher", "Inspect the repository");
+    ASSERT_TRUE(res.has_value());
+
+    auto log = sup->subworker_log();
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_EQ(log[0].worker_name, "researcher");
+    EXPECT_EQ(log[0].task, "Inspect the repository");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: add_worker + run() completes without error
 // ─────────────────────────────────────────────────────────────────────────────

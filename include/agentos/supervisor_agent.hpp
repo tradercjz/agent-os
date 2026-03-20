@@ -121,16 +121,43 @@ inline std::vector<SubworkerRunRecord> SupervisorAgent::subworker_log() const {
 
 inline Result<SubworkerResult> SupervisorAgent::run_subworker(
         const std::string& name, const std::string& task, const SubworkerRunOptions& opts) {
-    (void)task;
-    (void)opts;
-    std::lock_guard lk(mu_);
-    auto it = worker_templates_.find(name);
-    if (it == worker_templates_.end()) {
-        return make_error(ErrorCode::NotFound,
-                          fmt::format("subworker template '{}' not found", name));
+    WorkerTemplate tpl;
+    {
+        std::lock_guard lk(mu_);
+        auto it = worker_templates_.find(name);
+        if (it == worker_templates_.end()) {
+            return make_error(ErrorCode::NotFound,
+                              fmt::format("subworker template '{}' not found", name));
+        }
+        tpl = it->second;
     }
-    return make_error(ErrorCode::NotImplemented,
-                      fmt::format("subworker template '{}' is not implemented yet", name));
+
+    SubworkerRuntime runtime;
+    auto result = runtime.run(*this->os_, this->id_, tpl, task, opts);
+    if (!result) {
+        return make_unexpected(result.error());
+    }
+
+    SubworkerRunRecord record;
+    record.supervisor_id = this->id_;
+    record.run_id = result->run_id;
+    record.worker_name = result->worker_name;
+    record.task = result->task;
+    record.status = result->status;
+    record.worktree_path = result->worktree_path;
+    record.elapsed = result->elapsed;
+    record.finished_at = Clock::now();
+    record.started_at = record.finished_at - result->elapsed;
+    record.summary = result->summary;
+    record.output = result->output;
+    record.error = result->error;
+
+    {
+        std::lock_guard lk(mu_);
+        subworker_log_.push_back(record);
+    }
+
+    return result;
 }
 
 inline std::string SupervisorAgent::build_workers_tools_json() const {

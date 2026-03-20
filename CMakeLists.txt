@@ -166,6 +166,7 @@ set(AGENTOS_SOURCES
     src/security/security.cpp
     src/bus/agent_bus.cpp
     src/tracing/tracer.cpp
+    src/subworkers/runtime.cpp
     src/worktree/worktree_manager.cpp
 )
 

@@ -28,6 +28,8 @@
 
 namespace agentos {
 
+class SubworkerRuntime;
+
 // ─────────────────────────────────────────────────────────────
 // § A.0  Middleware — Pre/Post Hooks for Agent Operations
 // ─────────────────────────────────────────────────────────────
@@ -161,6 +163,7 @@ protected:
   void run_after_hooks(HookContext &ctx);
 
   friend class AgentOS;
+  friend class SubworkerRuntime;
 };
 
 // ── AgentBase (CRTP) ───────────────────────────
