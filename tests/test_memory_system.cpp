@@ -144,7 +144,9 @@ TEST(ShortTermMemoryTest, HNSWCompactionAfterManyDeletes) {
 // ── Const accessor tests ─────────────────────────────────────
 
 TEST(MemorySystemConstTest, ConstAccessorsWork) {
-  auto temp_dir = std::filesystem::temp_directory_path() / "agentos_const_test";
+  auto temp_dir = std::filesystem::temp_directory_path() /
+                  ("agentos_const_test_" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   std::filesystem::remove_all(temp_dir);
 
   const memory::MemorySystem mem(temp_dir);

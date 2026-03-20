@@ -6,14 +6,26 @@
 // ============================================================
 #include <agentos/memory/memory.hpp>
 #include <gtest/gtest.h>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <cmath>
+#include <string>
 
 using namespace agentos;
 using namespace agentos::memory;
 
 namespace fs = std::filesystem;
+
+namespace {
+
+fs::path make_memory_coverage_test_dir(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return fs::temp_directory_path() /
+         ("agentos_memory_cov_" + name + "_" + std::to_string(nonce));
+}
+
+}
 
 // Helper: create a normalized embedding of given dimension with a distinguishing element
 static Embedding make_emb(size_t dim, int idx) {
@@ -270,7 +282,7 @@ TEST(ShortTermMemoryCoverage, WriteNoEmbeddingThenSearchFallback) {
 class LongTermMemoryCoverage : public ::testing::Test {
 protected:
   void SetUp() override {
-    test_dir_ = fs::temp_directory_path() / "agentos_ltm_cov_test";
+    test_dir_ = make_memory_coverage_test_dir("ltm");
     fs::remove_all(test_dir_);
     fs::create_directories(test_dir_);
   }
@@ -580,7 +592,7 @@ TEST_F(LongTermMemoryCoverage, LoadIndexWithDashPlaceholders) {
 class MemorySystemCoverage : public ::testing::Test {
 protected:
   void SetUp() override {
-    test_dir_ = fs::temp_directory_path() / "agentos_memsys_cov_test";
+    test_dir_ = make_memory_coverage_test_dir("memsys");
     fs::remove_all(test_dir_);
     mem_sys_ = std::make_unique<MemorySystem>(test_dir_);
   }
