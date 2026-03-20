@@ -268,8 +268,8 @@ print()
 |----------|--------|-------------|
 | `agentOS::init([config])` | BOOL | 初始化 AgentOS |
 | `agentOS::close()` | void | 关闭并释放资源 |
-| `agentOS::ask(q, [sys])` | STRING | 同步单轮对话 |
-| `agentOS::askStream(q, [sys], [cb])` | STRING | 回调式流式对话 |
+| `agentOS::ask(q, [sys])` | STRING | 单轮同步对话；持久 Agent 场景请用 `ask2` |
+| `agentOS::askStream(q, [sys], [cb])` | STRING | 单轮回调式流式对话；持久 Agent 场景请用 `askStream2` |
 | **`agentOS::askAsync(q, [sys])`** | **STRING** | **异步请求，返回 requestId** |
 | **`agentOS::poll(rid)`** | **DICT** | **获取增量 token** |
 | **`agentOS::cancelAsync(rid)`** | **BOOL** | **取消异步请求** |

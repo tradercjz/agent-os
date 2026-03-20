@@ -262,9 +262,9 @@ c++filt _ZN6duckdb6DuckDBC1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcE
 | `agentOS::createAgent` | `agentOS::createAgent()` | 兼容别名：创建 Agent |
 | `agentOS::createAgent2` | `agentOS::createAgent2()` | 推荐写法：显式 V2 创建 Agent |
 | `agentOS::destroy` | `agentOS::destroy()` | 销毁 Agent |
-| `agentOS::ask` | `agentOS::ask()` | 单轮同步对话；兼容 handle 重载 |
+| `agentOS::ask` | `agentOS::ask()` | 单轮同步对话；兼容 handle 重载，持久 Agent 推荐用 `ask2()` |
 | `agentOS::ask2` | `agentOS::ask2()` | 推荐写法：持久 Agent 同步对话 |
-| `agentOS::askStream` | `agentOS::askStream()` | 单轮流式对话；兼容 handle 重载 |
+| `agentOS::askStream` | `agentOS::askStream()` | 单轮流式对话；兼容 handle 重载，持久 Agent 推荐用 `askStream2()` |
 | `agentOS::askStream2` | `agentOS::askStream2()` | 推荐写法：持久 Agent 流式对话 |
 | `agentOS::askAsync` | `agentOS::askAsync()` | 异步对话 |
 | `agentOS::poll` | `agentOS::poll()` | 轮询结果 |
