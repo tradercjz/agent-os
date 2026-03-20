@@ -1,10 +1,22 @@
 #include <agentos/agentos.hpp>
 #include <gtest/gtest.h>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 
 using namespace agentos;
 namespace fs = std::filesystem;
+
+namespace {
+
+fs::path make_sdk_test_dir(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return fs::temp_directory_path() /
+         ("agentos_sdk_test_" + name + "_" + std::to_string(nonce));
+}
+
+}
 
 // ── Version ─────────────────────────────────────────────────
 TEST(SDKTest, VersionInfo) {
@@ -18,8 +30,10 @@ TEST(SDKTest, VersionInfo) {
 
 class SDKBuilderTest : public ::testing::Test {
 protected:
+  fs::path test_dir_ = make_sdk_test_dir("builder");
+
   void TearDown() override {
-    fs::remove_all(fs::temp_directory_path() / "agentos_sdk_test");
+    fs::remove_all(test_dir_);
   }
 };
 
@@ -36,7 +50,7 @@ TEST_F(SDKBuilderTest, MockBuilder) {
 }
 
 TEST_F(SDKBuilderTest, DataDirSetsSnapshotAndLtm) {
-  auto dir = (fs::temp_directory_path() / "agentos_sdk_test").string();
+  auto dir = test_dir_.string();
   auto os = AgentOSBuilder()
                 .mock()
                 .data_dir(dir)
@@ -122,7 +136,7 @@ TEST_F(SDKBuilderTest, FromJsonMock) {
 }
 
 TEST_F(SDKBuilderTest, FromJsonFile) {
-  auto dir = fs::temp_directory_path() / "agentos_sdk_test";
+  auto dir = test_dir_;
   fs::create_directories(dir);
   auto cfg_path = dir / "config.json";
 
@@ -345,7 +359,7 @@ TEST_F(SDKBuilderTest, SchedulerDrain) {
 
 // Test from_json with all config fields
 TEST_F(SDKBuilderTest, FromJsonAllFields) {
-  auto dir = (fs::temp_directory_path() / "agentos_sdk_test").string();
+  auto dir = test_dir_.string();
   nlohmann::json j = {
       {"backend", "mock"},
       {"threads", 2},
@@ -375,7 +389,7 @@ TEST_F(SDKBuilderTest, FromJsonLogLevels) {
 
 // Test from_json with snapshot_dir and ltm_dir separately
 TEST_F(SDKBuilderTest, FromJsonSeparateDirs) {
-  auto dir = fs::temp_directory_path() / "agentos_sdk_test";
+  auto dir = test_dir_;
   nlohmann::json j = {
       {"backend", "mock"},
       {"security", false},
@@ -486,7 +500,7 @@ TEST_F(SDKBuilderTest, QuickstartNoApiKeyThrows) {
 
 // Test snapshot_dir and ltm_dir builder methods
 TEST_F(SDKBuilderTest, BuilderSnapshotAndLtmDirs) {
-  auto dir = fs::temp_directory_path() / "agentos_sdk_test";
+  auto dir = test_dir_;
   auto os = AgentOSBuilder()
                 .mock()
                 .snapshot_dir((dir / "custom_snaps").string())

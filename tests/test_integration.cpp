@@ -4,16 +4,32 @@
 // ============================================================
 #include <agentos/agent.hpp>
 #include <gtest/gtest.h>
+#include <chrono>
+#include <filesystem>
 #include <future>
+#include <string>
 #include <thread>
 #include <vector>
 
 using namespace agentos;
 
+namespace {
+
+std::filesystem::path make_integration_test_dir(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return std::filesystem::temp_directory_path() /
+         ("agentos_test_integration_" + name + "_" + std::to_string(nonce));
+}
+
+}
+
 // ── End-to-End Agent Flow ──────────────────────────────────
 
 class IntegrationTest : public ::testing::Test {
 protected:
+  std::filesystem::path snapshot_dir_ = make_integration_test_dir("snap");
+  std::filesystem::path ltm_dir_ = make_integration_test_dir("ltm");
+
   void SetUp() override {
     auto backend = std::make_unique<kernel::MockLLMBackend>();
     backend->register_rule("hello", "Hello! How can I help you?");
@@ -21,8 +37,8 @@ protected:
                                 R"({"op":"set","key":"result","value":"found"})");
 
     AgentOS::Config cfg;
-    cfg.snapshot_dir = "/tmp/agentos_test_integration_snap";
-    cfg.ltm_dir = "/tmp/agentos_test_integration_ltm";
+    cfg.snapshot_dir = snapshot_dir_.string();
+    cfg.ltm_dir = ltm_dir_.string();
     cfg.enable_security = true;
 
     os_ = std::make_unique<AgentOS>(std::move(backend), cfg);
@@ -30,8 +46,8 @@ protected:
 
   void TearDown() override {
     os_.reset();
-    std::filesystem::remove_all("/tmp/agentos_test_integration_snap");
-    std::filesystem::remove_all("/tmp/agentos_test_integration_ltm");
+    std::filesystem::remove_all(snapshot_dir_);
+    std::filesystem::remove_all(ltm_dir_);
   }
 
   std::unique_ptr<AgentOS> os_;

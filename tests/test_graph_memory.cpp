@@ -3,13 +3,25 @@
 // ============================================================
 #include <agentos/memory/graph_memory.hpp>
 #include <agentos/memory/memory.hpp>
+#include <chrono>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <string>
 
 using namespace agentos;
 
+namespace {
+
+std::filesystem::path make_graph_test_dir(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return std::filesystem::temp_directory_path() /
+         ("agentos_test_graph_" + name + "_" + std::to_string(nonce));
+}
+
+}
+
 TEST(GraphMemoryTest, BasicGraphOperations) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_basic";
+  std::filesystem::path test_dir = make_graph_test_dir("basic");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
@@ -46,7 +58,7 @@ TEST(GraphMemoryTest, BasicGraphOperations) {
 }
 
 TEST(GraphMemoryTest, KHopSearch) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_khop";
+  std::filesystem::path test_dir = make_graph_test_dir("khop");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
@@ -80,7 +92,7 @@ TEST(GraphMemoryTest, KHopSearch) {
 }
 
 TEST(GraphMemoryTest, WALPersistence) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_wal";
+  std::filesystem::path test_dir = make_graph_test_dir("wal");
   std::filesystem::remove_all(test_dir);
 
   {
@@ -117,7 +129,7 @@ TEST(GraphMemoryTest, WALPersistence) {
 }
 
 TEST(GraphMemoryTest, WALReplayDeduplicatesEdges) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_dedup";
+  std::filesystem::path test_dir = make_graph_test_dir("dedup");
   std::filesystem::remove_all(test_dir);
 
   {
@@ -154,7 +166,7 @@ TEST(GraphMemoryTest, WALReplayDeduplicatesEdges) {
 }
 
 TEST(GraphMemoryTest, UpdateNode) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_update";
+  std::filesystem::path test_dir = make_graph_test_dir("update");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
@@ -188,7 +200,7 @@ TEST(GraphMemoryTest, UpdateNode) {
 }
 
 TEST(GraphMemoryTest, DeleteNode) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_delnode";
+  std::filesystem::path test_dir = make_graph_test_dir("delnode");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
@@ -235,7 +247,7 @@ TEST(GraphMemoryTest, DeleteNode) {
 }
 
 TEST(GraphMemoryTest, DeleteEdge) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_deledge";
+  std::filesystem::path test_dir = make_graph_test_dir("deledge");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
@@ -271,7 +283,7 @@ TEST(GraphMemoryTest, DeleteEdge) {
 }
 
 TEST(GraphMemoryTest, CleanupBefore) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_cleanup";
+  std::filesystem::path test_dir = make_graph_test_dir("cleanup");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
@@ -296,7 +308,7 @@ TEST(GraphMemoryTest, CleanupBefore) {
 }
 
 TEST(GraphMemoryTest, HighLevelMemoryAPI) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_high_level";
+  std::filesystem::path test_dir = make_graph_test_dir("high_level");
   std::filesystem::remove_all(test_dir);
 
   memory::MemorySystem memory(test_dir);
@@ -329,7 +341,7 @@ TEST(GraphMemoryTest, HighLevelMemoryAPI) {
 
 // Test corrupt WAL line (bad CRC) is skipped during replay
 TEST(GraphMemoryTest, CorruptWALLineSkipped) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_corrupt_wal";
+  std::filesystem::path test_dir = make_graph_test_dir("corrupt_wal");
   std::filesystem::remove_all(test_dir);
   std::filesystem::create_directories(test_dir);
 
@@ -358,7 +370,7 @@ TEST(GraphMemoryTest, CorruptWALLineSkipped) {
 
 // Test WAL with legacy format (no CRC suffix) is accepted
 TEST(GraphMemoryTest, LegacyWALFormatAccepted) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_legacy_wal";
+  std::filesystem::path test_dir = make_graph_test_dir("legacy_wal");
   std::filesystem::remove_all(test_dir);
   std::filesystem::create_directories(test_dir);
 
@@ -381,7 +393,7 @@ TEST(GraphMemoryTest, LegacyWALFormatAccepted) {
 
 // Test k_hop_search with nonexistent start node returns error
 TEST(GraphMemoryTest, KHopSearchNonexistentNode) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_khop_missing";
+  std::filesystem::path test_dir = make_graph_test_dir("khop_missing");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
@@ -394,7 +406,7 @@ TEST(GraphMemoryTest, KHopSearchNonexistentNode) {
 
 // Test k_hop_search with temporal filtering
 TEST(GraphMemoryTest, KHopTemporalFilter) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_khop_temporal";
+  std::filesystem::path test_dir = make_graph_test_dir("khop_temporal");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
@@ -425,7 +437,7 @@ TEST(GraphMemoryTest, KHopTemporalFilter) {
 
 // Test save_snapshot produces a compacted WAL
 TEST(GraphMemoryTest, SaveSnapshotCompactsWAL) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_snapshot";
+  std::filesystem::path test_dir = make_graph_test_dir("snapshot");
   std::filesystem::remove_all(test_dir);
 
   {
@@ -451,7 +463,7 @@ TEST(GraphMemoryTest, SaveSnapshotCompactsWAL) {
 
 // Test cleanup_before with no expired edges
 TEST(GraphMemoryTest, CleanupBeforeNoExpired) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_cleanup_none";
+  std::filesystem::path test_dir = make_graph_test_dir("cleanup_none");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
@@ -472,7 +484,7 @@ TEST(GraphMemoryTest, CleanupBeforeNoExpired) {
 
 // Test cleanup_before persists after WAL reload
 TEST(GraphMemoryTest, CleanupBeforePersistsAfterReload) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_cleanup_persist";
+  std::filesystem::path test_dir = make_graph_test_dir("cleanup_persist");
   std::filesystem::remove_all(test_dir);
 
   {
@@ -501,7 +513,7 @@ TEST(GraphMemoryTest, CleanupBeforePersistsAfterReload) {
 
 // Test escape/unescape roundtrip with special characters
 TEST(GraphMemoryTest, EscapeSpecialCharsInWAL) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_escape";
+  std::filesystem::path test_dir = make_graph_test_dir("escape");
   std::filesystem::remove_all(test_dir);
 
   {
@@ -524,7 +536,7 @@ TEST(GraphMemoryTest, EscapeSpecialCharsInWAL) {
 
 // Test pending WAL file is cleaned up on load
 TEST(GraphMemoryTest, PendingWALCleanedUp) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_pending";
+  std::filesystem::path test_dir = make_graph_test_dir("pending");
   std::filesystem::remove_all(test_dir);
   std::filesystem::create_directories(test_dir);
 
@@ -551,7 +563,7 @@ TEST(GraphMemoryTest, PendingWALCleanedUp) {
 
 // Test get_edges_by_relation with multiple relations
 TEST(GraphMemoryTest, GetEdgesByRelationFilters) {
-  std::filesystem::path test_dir = "/tmp/agentos_test_graph_edges_rel";
+  std::filesystem::path test_dir = make_graph_test_dir("edges_rel");
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
