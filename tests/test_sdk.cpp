@@ -389,20 +389,30 @@ TEST_F(SDKBuilderTest, FromJsonSeparateDirs) {
 
 // Test from_json with openai backend but missing api_key (should throw)
 TEST_F(SDKBuilderTest, FromJsonOpenAIMissingKeyThrows) {
-  // Unset env var to ensure it's not picked up
+  const char *old = std::getenv("OPENAI_API_KEY");
+  std::string saved = old ? std::string(old) : std::string();
+  unsetenv("OPENAI_API_KEY");
+
   nlohmann::json j = {
       {"backend", "openai"},
-      // no api_key, and OPENAI_API_KEY probably not set in test env
+      // no api_key
   };
 
-  // This may or may not throw depending on whether OPENAI_API_KEY is set
-  // We check the behavior is consistent
   try {
-    auto os = from_json(j);
-    // If OPENAI_API_KEY is set in env, this succeeds
-    EXPECT_NE(os, nullptr);
-  } catch (const std::runtime_error &e) {
-    EXPECT_NE(std::string(e.what()).find("api_key"), std::string::npos);
+    EXPECT_THROW(from_json(j), std::runtime_error);
+  } catch (...) {
+    if (old) {
+      setenv("OPENAI_API_KEY", saved.c_str(), 1);
+    } else {
+      unsetenv("OPENAI_API_KEY");
+    }
+    throw;
+  }
+
+  if (old) {
+    setenv("OPENAI_API_KEY", saved.c_str(), 1);
+  } else {
+    unsetenv("OPENAI_API_KEY");
   }
 }
 
