@@ -1,14 +1,26 @@
 #include "graph_engine/builder/graph_builder.hpp"
 #include "graph_engine/core/immutable_graph.hpp"
+#include <chrono>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <string>
 
 namespace fs = std::filesystem;
 using namespace graph_engine;
 
+namespace {
+
+fs::path make_csr_test_dir(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return fs::temp_directory_path() /
+         ("agentos_csr_test_" + name + "_" + std::to_string(nonce));
+}
+
+}
+
 class CSRGraphTest : public ::testing::Test {
 protected:
-  fs::path test_dir = "/tmp/agentos_csr_test";
+  fs::path test_dir = make_csr_test_dir("graph");
 
   void SetUp() override {
     if (fs::exists(test_dir))

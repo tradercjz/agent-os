@@ -1,14 +1,26 @@
 #include "graph_engine/core/immutable_graph.hpp"
+#include <chrono>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <string>
 
 namespace fs = std::filesystem;
 using namespace graph_engine::core;
 
+namespace {
+
+fs::path make_immutable_graph_test_dir() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    return fs::temp_directory_path() /
+           ("agentos_immutable_graph_test_" + std::to_string(nonce));
+}
+
+}
+
 class ImmutableGraphTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        test_dir = fs::temp_directory_path() / "agentos_immutable_graph_test";
+        test_dir = make_immutable_graph_test_dir();
         if (fs::exists(test_dir)) fs::remove_all(test_dir);
         fs::create_directories(test_dir);
     }

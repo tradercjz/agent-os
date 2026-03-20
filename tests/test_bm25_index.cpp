@@ -1,11 +1,22 @@
 #include "agentos/knowledge/bm25_index.hpp"
 #include <gtest/gtest.h>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
 
 using namespace agentos::knowledge;
 namespace fs = std::filesystem;
+
+namespace {
+
+fs::path make_bm25_test_file(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return fs::temp_directory_path() /
+         ("agentos_bm25_" + name + "_" + std::to_string(nonce) + ".bin");
+}
+
+}
 
 class BM25IndexTest : public ::testing::Test {
 protected:
@@ -93,7 +104,7 @@ TEST_F(BM25IndexTest, EmptyDocumentAndIndex) {
 }
 
 TEST_F(BM25IndexTest, SaveAndLoad) {
-  fs::path persist_file = fs::temp_directory_path() / "agentos_bm25_test.bin";
+  fs::path persist_file = make_bm25_test_file("save_load");
   if (fs::exists(persist_file)) {
     fs::remove(persist_file);
   }
@@ -124,5 +135,5 @@ TEST_F(BM25IndexTest, SaveAndLoad) {
 
 TEST_F(BM25IndexTest, LoadNonExistentFile) {
   BM25Index index;
-  EXPECT_FALSE(index.load(fs::temp_directory_path() / "nonexistent_bm25_file.bin"));
+  EXPECT_FALSE(index.load(make_bm25_test_file("missing")));
 }
