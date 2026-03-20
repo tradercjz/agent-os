@@ -1992,13 +1992,11 @@ ConstantSP agentOSResume(Heap* heap, vector<ConstantSP>& args) {
     // Try to find the session by scanning all agent IDs
     // Session ID format: "{agentId}_{timestamp}_{seq}"
     // Extract agent ID from session ID
-    auto underscore = session_id.find('_');
-    if (underscore == std::string::npos)
+    auto original_agent_id = context::parse_session_owner(session_id);
+    if (!original_agent_id)
         throw RuntimeException("agentOS::resume: invalid sessionId format");
 
-    AgentId original_agent_id = std::stoull(session_id.substr(0, underscore));
-
-    auto state = os.ctx().load_session(original_agent_id, session_id);
+    auto state = os.ctx().load_session(*original_agent_id, session_id);
     auto session_state = unwrap_or_throw("agentOS::resume", std::move(state));
 
     // Recreate agent from saved config
@@ -2258,14 +2256,10 @@ ConstantSP agentOSSessions(Heap* heap, vector<ConstantSP>& args) {
             std::string fname = entry.path().filename().string();
             if (!fname.starts_with("session_") || !fname.ends_with(".bin")) continue;
 
-            // Parse: session_{agentId}_{sessionId}.bin
-            if (fname.size() <= 12) continue;
-            std::string body = fname.substr(8, fname.size() - 12); // remove "session_" and ".bin"
-            auto first_us = body.find('_');
-            if (first_us == std::string::npos) continue;
-
-            AgentId aid = std::stoull(body.substr(0, first_us));
-            std::string sid = body.substr(first_us + 1);
+            auto parsed = context::parse_session_filename(fname);
+            if (!parsed) continue;
+            AgentId aid = parsed->first;
+            std::string sid = parsed->second;
 
             // Load to get details
             auto state = ctx.load_session(aid, sid);

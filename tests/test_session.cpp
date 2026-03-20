@@ -1,10 +1,17 @@
 #include <agentos/context/context.hpp>
 #include <gtest/gtest.h>
 #include <filesystem>
+#include <optional>
+#include <string_view>
 
 namespace fs = std::filesystem;
 using namespace agentos;
 using namespace agentos::context;
+
+namespace agentos::context {
+std::optional<AgentId> parse_session_owner(std::string_view session_id);
+std::optional<std::pair<AgentId, SessionId>> parse_session_filename(std::string_view filename);
+}
 
 class SessionTest : public ::testing::Test {
 protected:
@@ -124,4 +131,31 @@ TEST_F(SessionTest, MultipleSessions) {
     auto list = mgr_->list_sessions(aid);
     ASSERT_TRUE(list.has_value());
     EXPECT_EQ(list->size(), 2u);
+}
+
+TEST(SessionParsingTest, ParseSessionOwnerAcceptsValidId) {
+    auto owner = parse_session_owner("42_123456_7");
+    ASSERT_TRUE(owner.has_value());
+    EXPECT_EQ(*owner, 42u);
+}
+
+TEST(SessionParsingTest, ParseSessionOwnerRejectsMalformedId) {
+    EXPECT_FALSE(parse_session_owner("").has_value());
+    EXPECT_FALSE(parse_session_owner("abc_123_1").has_value());
+    EXPECT_FALSE(parse_session_owner("_123_1").has_value());
+    EXPECT_FALSE(parse_session_owner("123").has_value());
+}
+
+TEST(SessionParsingTest, ParseSessionFilenameAcceptsValidFilename) {
+    auto parsed = parse_session_filename("session_42_42_123456_7.bin");
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->first, 42u);
+    EXPECT_EQ(parsed->second, "42_123456_7");
+}
+
+TEST(SessionParsingTest, ParseSessionFilenameRejectsMalformedFilename) {
+    EXPECT_FALSE(parse_session_filename("session_abc_42_123.bin").has_value());
+    EXPECT_FALSE(parse_session_filename("session__42_123.bin").has_value());
+    EXPECT_FALSE(parse_session_filename("session_42.bin").has_value());
+    EXPECT_FALSE(parse_session_filename("not_a_session.bin").has_value());
 }

@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <memory_resource>
 #include <vector>
+#include <string_view>
 
 namespace agentos::context {
 
@@ -116,6 +117,9 @@ struct SessionState {
 
 using EvictionCallback = std::function<void(AgentId, const std::vector<kernel::Message> &)>;
 using SummarizeFn = std::function<std::string(const std::vector<kernel::Message> &)>;
+
+std::optional<AgentId> parse_session_owner(std::string_view session_id);
+std::optional<std::pair<AgentId, SessionId>> parse_session_filename(std::string_view filename);
 
 class ContextManager : private NonCopyable {
 public:

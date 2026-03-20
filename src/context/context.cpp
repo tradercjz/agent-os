@@ -4,6 +4,50 @@
 
 namespace agentos::context {
 
+std::optional<AgentId> parse_session_owner(std::string_view session_id) {
+  const auto underscore = session_id.find('_');
+  if (underscore == std::string_view::npos || underscore == 0)
+    return std::nullopt;
+
+  try {
+    size_t parsed = 0;
+    auto owner = static_cast<AgentId>(
+        std::stoull(std::string(session_id.substr(0, underscore)), &parsed));
+    if (parsed != underscore)
+      return std::nullopt;
+    return owner;
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
+std::optional<std::pair<AgentId, SessionId>>
+parse_session_filename(std::string_view filename) {
+  constexpr std::string_view prefix = "session_";
+  constexpr std::string_view suffix = ".bin";
+
+  if (!filename.starts_with(prefix) || !filename.ends_with(suffix))
+    return std::nullopt;
+  if (filename.size() <= prefix.size() + suffix.size())
+    return std::nullopt;
+
+  auto body = filename.substr(prefix.size(),
+                              filename.size() - prefix.size() - suffix.size());
+  auto first_us = body.find('_');
+  if (first_us == std::string_view::npos || first_us == 0)
+    return std::nullopt;
+
+  auto session_id = std::string(body.substr(first_us + 1));
+  if (session_id.empty())
+    return std::nullopt;
+
+  auto agent_id = parse_session_owner(std::string(body));
+  if (!agent_id)
+    return std::nullopt;
+
+  return std::make_pair(*agent_id, std::move(session_id));
+}
+
 // ─────────────────────────────────────────────────────────────
 // ContextWindow
 // ─────────────────────────────────────────────────────────────
