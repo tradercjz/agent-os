@@ -134,6 +134,59 @@ TEST(SupervisorTest, TemplateAndLegacyWorkersCoexist) {
     ASSERT_EQ(sup->delegation_log().size(), 1u);
 }
 
+TEST(SupervisorTest, TimedOutSubworkerUsesTimedOutStatusAndHonorsCleanupOverride) {
+    auto os = make_os();
+    auto* mock = dynamic_cast<kernel::MockLLMBackend*>(&os->kernel().backend());
+    ASSERT_NE(mock, nullptr);
+
+    auto sup = os->create_agent<SupervisorAgent>(AgentConfig{.name = "sup"});
+    sup->add_worker_template("bad_worker", WorkerTemplate{
+        .name = "bad_worker",
+        .description = "Fails intentionally",
+        .config = AgentConfig{.name = "bad_worker", .role_prompt = ""}
+    });
+
+    mock->register_tool_rule("force timeout", "missing_tool", "{}", 10);
+    mock->register_tool_rule("[继续]", "missing_tool", "{}", 10);
+
+    SubworkerRunOptions opts;
+    opts.preserve_worktree_on_failure = false;
+
+    auto res = sup->run_subworker("bad_worker", "force timeout", opts);
+    ASSERT_TRUE(res.has_value());
+    EXPECT_EQ(res->status, SubworkerStatus::TimedOut);
+    EXPECT_FALSE(res->error.empty());
+    EXPECT_FALSE(std::filesystem::exists(res->worktree_path));
+
+    auto log = sup->subworker_log();
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_EQ(log[0].status, SubworkerStatus::TimedOut);
+}
+
+TEST(SupervisorTest, PreferredWorktreeBaseOverridesDefaultLocation) {
+    auto os = make_os();
+    auto sup = os->create_agent<SupervisorAgent>(AgentConfig{.name = "sup"});
+
+    WorkerTemplate tpl{
+        .name = "researcher",
+        .description = "Researches implementation details",
+        .config = AgentConfig{.name = "researcher_worker", .role_prompt = "Research carefully."}
+    };
+    sup->add_worker_template("researcher", tpl);
+
+    auto preferred_base = std::filesystem::current_path() / "build" / "subworker_preferred_base";
+    std::filesystem::remove_all(preferred_base);
+    std::filesystem::create_directories(preferred_base);
+
+    SubworkerRunOptions opts;
+    opts.preferred_worktree_base = preferred_base;
+
+    auto res = sup->run_subworker("researcher", "Inspect the repository", opts);
+    ASSERT_TRUE(res.has_value());
+    EXPECT_TRUE(res->worktree_path.lexically_normal().string().starts_with(
+        preferred_base.lexically_normal().string()));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: add_worker + run() completes without error
 // ─────────────────────────────────────────────────────────────────────────────

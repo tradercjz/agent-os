@@ -8,6 +8,21 @@ namespace {
 
 std::atomic<uint64_t> g_subworker_run_seq{1};
 
+SubworkerStatus map_error_to_status(const Error& error) {
+    switch (error.code) {
+    case ErrorCode::Timeout:
+        return SubworkerStatus::TimedOut;
+    default:
+        return SubworkerStatus::Failed;
+    }
+}
+
+bool should_preserve_failed_worktree(const WorkerTemplate& tpl,
+                                     const SubworkerRunOptions& opts) {
+    return opts.preserve_worktree_on_failure.value_or(
+        tpl.preserve_worktree_on_failure);
+}
+
 std::string sanitize_worktree_name(std::string value) {
     for (char& ch : value) {
         const unsigned char uch = static_cast<unsigned char>(ch);
@@ -38,7 +53,7 @@ public:
         result.elapsed = elapsed;
 
         if (!worker_run) {
-            result.status = SubworkerStatus::Failed;
+            result.status = map_error_to_status(worker_run.error());
             result.error = worker_run.error().message;
             result.summary = worker_run.error().message;
             return result;
@@ -70,8 +85,18 @@ Result<SubworkerResult> SubworkerRuntime::run(AgentOS& os,
     const std::string worker_name = tpl.name.empty() ? tpl.config.name : tpl.name;
     const std::string worktree_name =
         sanitize_worktree_name(fmt::format("{}-{}", worker_name, run_id));
+    std::unique_ptr<worktree::WorktreeManager> preferred_mgr;
+    worktree::WorktreeManager* worktree_mgr = &os.worktree_mgr();
+    if (opts.preferred_worktree_base.has_value()) {
+        preferred_mgr = std::make_unique<worktree::WorktreeManager>(
+            worktree::WorktreeConfig{
+                .repo_root = os.config().repo_root,
+                .worktree_base = *opts.preferred_worktree_base,
+                .max_concurrent = os.config().max_worktrees});
+        worktree_mgr = preferred_mgr.get();
+    }
 
-    auto wt_res = os.worktree_mgr().create(worktree_name);
+    auto wt_res = worktree_mgr->create(worktree_name);
     if (!wt_res) {
         return make_unexpected(wt_res.error());
     }
@@ -103,6 +128,12 @@ Result<SubworkerResult> SubworkerRuntime::run(AgentOS& os,
             ? result->output
             : result->error;
     }
+
+    if (result->status != SubworkerStatus::Succeeded &&
+        !should_preserve_failed_worktree(tpl, opts)) {
+        (void)worktree_mgr->remove(worktree_name, /*force=*/true);
+    }
+
     return result;
 }
 
