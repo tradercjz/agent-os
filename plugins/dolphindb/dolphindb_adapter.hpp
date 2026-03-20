@@ -898,33 +898,33 @@ ConstantSP agentOSAskWithKBAsync(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::createAgent(name, [prompt], [tools], [skills], [blockTools],
 ///                      [contextLimit], [isolation], [securityRole])
-/// 原生参数风格创建 Agent
+/// 兼容入口：支持原生参数风格创建持久 Agent
 /// @return LONG — agent handle
 ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::createAgent2(name, [prompt], [tools], [skills], [blockTools],
 ///                       [contextLimit], [isolation], [securityRole])
-/// 显式 V2 别名，等价于 createAgent 的原生参数模式
+/// 推荐写法：显式 V2 创建持久 Agent
 /// @return LONG — agent handle
 ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::ask(agent, question, [prompt])
-/// 单轮/多轮对话（保持上下文）
+/// 兼容入口：支持单轮 ask(question, ...) 和持久 Agent ask(agent, ...)
 /// @return STRING — LLM 回答
 ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::ask2(agent, question, [prompt])
-/// 显式 V2 别名，要求第一个参数为 agent handle
+/// 推荐写法：要求第一个参数为 agent handle
 /// @return STRING — LLM 回答
 ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::askStream(agent, question, [prompt], [callback])
-/// 流式对话
+/// 兼容入口：支持单轮 askStream(question, ...) 和持久 Agent askStream(agent, ...)
 /// @return STRING — 完整回答
 ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args);
 
 /// agentOS::askStream2(agent, question, [prompt], [callback])
-/// 显式 V2 别名，要求第一个参数为 agent handle
+/// 推荐写法：要求第一个参数为 agent handle
 /// @return STRING — 完整回答
 ConstantSP agentOSAskStream2(Heap* heap, vector<ConstantSP>& args);
 

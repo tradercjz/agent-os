@@ -101,3 +101,90 @@ TEST(DolphinDBAdapterTest, V2AliasExportsAndDeclarationsPresent) {
     EXPECT_NE(source.find("ConstantSP agentOSAsk2("), std::string::npos);
     EXPECT_NE(source.find("ConstantSP agentOSAskStream2("), std::string::npos);
 }
+
+TEST(DolphinDBAdapterTest, V2AliasUsageStringsAreExplicit) {
+    namespace fs = std::filesystem;
+    const fs::path repo_root = fs::path(__FILE__).parent_path().parent_path();
+
+    const std::string source =
+        read_file(repo_root / "plugins" / "dolphindb" / "dolphindb_adapter.cpp");
+
+    EXPECT_NE(source.find("Usage: agentOS::createAgent2(name, [prompt], [tools], [skills], "
+                          "[blockTools], [contextLimit], [isolation], [securityRole])"),
+              std::string::npos);
+    EXPECT_NE(source.find("Usage: agentOS::ask2(agent, question, [prompt])"),
+              std::string::npos);
+    EXPECT_NE(source.find("Usage: agentOS::askStream2(agent, question, [prompt], [callback])"),
+              std::string::npos);
+}
+
+TEST(DolphinDBAdapterTest, V2HeaderCommentsRecommendExplicitAliases) {
+    namespace fs = std::filesystem;
+    const fs::path repo_root = fs::path(__FILE__).parent_path().parent_path();
+
+    const std::string header =
+        read_file(repo_root / "plugins" / "dolphindb" / "dolphindb_adapter.hpp");
+
+    EXPECT_NE(header.find("兼容入口：支持原生参数风格创建持久 Agent"), std::string::npos);
+    EXPECT_NE(header.find("推荐写法：显式 V2 创建持久 Agent"), std::string::npos);
+    EXPECT_NE(header.find("兼容入口：支持单轮 ask(question, ...) 和持久 Agent ask(agent, ...)"), std::string::npos);
+    EXPECT_NE(header.find("推荐写法：要求第一个参数为 agent handle"), std::string::npos);
+    EXPECT_NE(header.find("兼容入口：支持单轮 askStream(question, ...) 和持久 Agent askStream(agent, ...)"), std::string::npos);
+}
+
+TEST(DolphinDBAdapterTest, CompatibilityUsageStringsPointToV2Aliases) {
+    namespace fs = std::filesystem;
+    const fs::path repo_root = fs::path(__FILE__).parent_path().parent_path();
+
+    const std::string source =
+        read_file(repo_root / "plugins" / "dolphindb" / "dolphindb_adapter.cpp");
+
+    EXPECT_NE(source.find("For persistent agents, prefer agentOS::createAgent2(...)"),
+              std::string::npos);
+    EXPECT_NE(source.find("For persistent agents, prefer agentOS::ask2(agent, question, [prompt])"),
+              std::string::npos);
+    EXPECT_NE(source.find("For persistent agents, prefer agentOS::askStream2(agent, question, [prompt], [callback])"),
+              std::string::npos);
+}
+
+TEST(DolphinDBAdapterTest, LegacyUsageStringsPointToModernInterfaces) {
+    namespace fs = std::filesystem;
+    const fs::path repo_root = fs::path(__FILE__).parent_path().parent_path();
+
+    const std::string source =
+        read_file(repo_root / "plugins" / "dolphindb" / "dolphindb_adapter.cpp");
+
+    EXPECT_NE(source.find("Usage: agentOS::askStream(question, [systemPrompt], [callback])"),
+              std::string::npos);
+    EXPECT_NE(source.find("callback: a DolphinDB function(token) called for each token chunk."),
+              std::string::npos);
+    EXPECT_NE(source.find("For persistent agents, prefer agentOS::askStream2(agent, question, [prompt], [callback])"),
+              std::string::npos);
+    EXPECT_NE(source.find("For new integrations, prefer agentOS::createAgent2(...)"),
+              std::string::npos);
+}
+
+TEST(DolphinDBAdapterTest, LegacyDestroyUsagePointsToModernDestroy) {
+    namespace fs = std::filesystem;
+    const fs::path repo_root = fs::path(__FILE__).parent_path().parent_path();
+
+    const std::string source =
+        read_file(repo_root / "plugins" / "dolphindb" / "dolphindb_adapter.cpp");
+
+    EXPECT_NE(source.find("Usage: agentOS::destroyAgent(handle)"), std::string::npos);
+    EXPECT_NE(source.find("For new integrations, prefer agentOS::destroy(agent)"),
+              std::string::npos);
+}
+
+TEST(DolphinDBAdapterTest, LegacyAskUsagePointsToModernPersistentInterface) {
+    namespace fs = std::filesystem;
+    const fs::path repo_root = fs::path(__FILE__).parent_path().parent_path();
+
+    const std::string source =
+        read_file(repo_root / "plugins" / "dolphindb" / "dolphindb_adapter.cpp");
+
+    EXPECT_NE(
+        source.find("Usage: agentOS::ask(question, [systemPrompt])\\n"
+                    "  For persistent agents, prefer agentOS::ask2(agent, question, [prompt])"),
+        std::string::npos);
+}

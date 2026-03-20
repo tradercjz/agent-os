@@ -302,7 +302,7 @@ void agentOSClose(Heap* heap, vector<ConstantSP>& args) {
 
 static ConstantSP agentOSAsk_v1(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
-    const string usage = "Usage: agentOS::ask(question, [systemPrompt])";
+    const string usage = "Usage: agentOS::ask(question, [systemPrompt])\n  For persistent agents, prefer agentOS::ask2(agent, question, [prompt])";
     if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
         throw IllegalArgumentException("agentOS::ask", usage);
 
@@ -347,8 +347,9 @@ static ConstantSP agentOSAsk_v1(Heap* heap, vector<ConstantSP>& args) {
 
 static ConstantSP agentOSAskStream_v1(Heap* heap, vector<ConstantSP>& args) {
     const string usage =
-        "Usage: agentOS::askStream(question, [systemPrompt], [callbackFunc])\n"
-        "  callbackFunc: a DolphinDB function(token) called for each token chunk.\n"
+        "Usage: agentOS::askStream(question, [systemPrompt], [callback])\n"
+        "  callback: a DolphinDB function(token) called for each token chunk.\n"
+        "  For persistent agents, prefer agentOS::askStream2(agent, question, [prompt], [callback]).\n"
         "  Example: agentOS::askStream(`What is DolphinDB?`, , print)";
     if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
         throw IllegalArgumentException("agentOS::askStream", usage);
@@ -969,7 +970,8 @@ ConstantSP agentOSRegisterTool(Heap* heap, vector<ConstantSP>& args) {
 
 static ConstantSP agentOSCreateAgent_v1(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
-    const string usage = "Usage: agentOS::createAgent(configJson)";
+    const string usage = "Usage: agentOS::createAgent(configJson)\n"
+                         "  For new integrations, prefer agentOS::createAgent2(...)";
     if (args.empty() || !args[0]->isScalar() || args[0]->getType() != DT_STRING)
         throw IllegalArgumentException("agentOS::createAgent", usage);
 
@@ -999,7 +1001,8 @@ static ConstantSP agentOSCreateAgent_v1(Heap* heap, vector<ConstantSP>& args) {
 
 static ConstantSP agentOSDestroyAgent_v1(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
-    const string usage = "Usage: agentOS::destroyAgent(handle)";
+    const string usage = "Usage: agentOS::destroyAgent(handle)\n"
+                         "  For new integrations, prefer agentOS::destroy(agent)";
     if (args.empty())
         throw IllegalArgumentException("agentOS::destroyAgent", usage);
 
@@ -1643,7 +1646,8 @@ static std::vector<std::string> extract_string_vector(const ConstantSP& val) {
 ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
     const string usage = "Usage: agentOS::createAgent(name, [prompt], [tools], [skills], "
-                         "[blockTools], [contextLimit], [isolation], [securityRole])";
+                         "[blockTools], [contextLimit], [isolation], [securityRole])\n"
+                         "  For persistent agents, prefer agentOS::createAgent2(...)";
     if (args.empty()) throw IllegalArgumentException("agentOS::createAgent", usage);
 
     std::string first_arg = extract_string(args[0]);
@@ -1726,6 +1730,17 @@ ConstantSP agentOSCreateAgent(Heap* heap, vector<ConstantSP>& args) {
 }
 
 ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
+    const string usage = "Usage: agentOS::createAgent2(name, [prompt], [tools], [skills], [blockTools], [contextLimit], [isolation], [securityRole])";
+    if (args.empty()) throw IllegalArgumentException("agentOS::createAgent2", usage);
+
+    std::string first_arg = extract_string(args[0]);
+    if (first_arg.empty()) {
+        throw IllegalArgumentException("agentOS::createAgent2", "name must not be empty");
+    }
+    if (first_arg[0] == '{') {
+        throw IllegalArgumentException("agentOS::createAgent2", usage);
+    }
+
     return agentOSCreateAgent(heap, args);
 }
 
@@ -1733,7 +1748,8 @@ ConstantSP agentOSCreateAgent2(Heap* heap, vector<ConstantSP>& args) {
 
 ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
     (void)heap;
-    const string usage = "Usage: agentOS::ask(agent, question, [prompt]) or agentOS::ask(question, [prompt])";
+    const string usage = "Usage: agentOS::ask(agent, question, [prompt]) or agentOS::ask(question, [prompt])\n"
+                         "  For persistent agents, prefer agentOS::ask2(agent, question, [prompt])";
     if (args.empty()) throw IllegalArgumentException("agentOS::ask", usage);
 
     // 兼容 V1: ask(question, [prompt]) — 第一个参数是 string
@@ -1771,13 +1787,20 @@ ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
 }
 
 ConstantSP agentOSAsk2(Heap* heap, vector<ConstantSP>& args) {
+    const string usage = "Usage: agentOS::ask2(agent, question, [prompt])";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::ask2", usage);
+    if (args[0]->getType() == DT_STRING) {
+        throw IllegalArgumentException("agentOS::ask2", usage);
+    }
+
     return agentOSAsk(heap, args);
 }
 
 // ─── agentOS::askStream(agent, question, [prompt], [callback]) ──
 
 ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args) {
-    const string usage = "Usage: agentOS::askStream(agent, question, [prompt], [callback]) or agentOS::askStream(question, [prompt], [callback])";
+    const string usage = "Usage: agentOS::askStream(agent, question, [prompt], [callback]) or agentOS::askStream(question, [prompt], [callback])\n"
+                         "  For persistent agents, prefer agentOS::askStream2(agent, question, [prompt], [callback])";
     if (args.empty()) throw IllegalArgumentException("agentOS::askStream", usage);
 
     // 兼容 V1: askStream(question, [prompt], [callback])
@@ -1841,6 +1864,12 @@ ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args) {
 }
 
 ConstantSP agentOSAskStream2(Heap* heap, vector<ConstantSP>& args) {
+    const string usage = "Usage: agentOS::askStream2(agent, question, [prompt], [callback])";
+    if (args.size() < 2) throw IllegalArgumentException("agentOS::askStream2", usage);
+    if (args[0]->getType() == DT_STRING) {
+        throw IllegalArgumentException("agentOS::askStream2", usage);
+    }
+
     return agentOSAskStream(heap, args);
 }
 
