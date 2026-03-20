@@ -1382,56 +1382,64 @@ TEST(SchedulerCoverageFinal, FIFOCancelledTaskSkippedInDequeue) {
 // FINAL COVERAGE PUSH — quickstart() with env vars set
 // ═══════════════════════════════════════════════════════════
 
+namespace {
+
+class ScopedEnvVar {
+ public:
+  ScopedEnvVar(const char* name, const char* value) : name_(name) {
+    const char* old = std::getenv(name_);
+    if (old) old_value_ = std::string(old);
+    if (value) {
+      setenv(name_, value, 1);
+    } else {
+      unsetenv(name_);
+    }
+  }
+
+  ~ScopedEnvVar() {
+    if (old_value_) {
+      setenv(name_, old_value_->c_str(), 1);
+    } else {
+      unsetenv(name_);
+    }
+  }
+
+ private:
+  const char* name_;
+  std::optional<std::string> old_value_;
+};
+
+}  // namespace
+
 // Test quickstart() by temporarily setting OPENAI_API_KEY
 // (covers lines 251-276 in agentos.hpp)
 TEST(SDKCoverageFinal, QuickstartWithEnvVars) {
-  // Only run if OPENAI_API_KEY is NOT already set (to avoid side effects)
-  const char *existing = std::getenv("OPENAI_API_KEY");
-  if (existing) {
-    // If already set, we can just call quickstart directly
-    auto os = quickstart();
-    ASSERT_NE(os, nullptr);
-    return;
-  }
-
-  // Set fake env vars
-  setenv("OPENAI_API_KEY", "sk-fake-test-key", 1);
-  setenv("AGENTOS_THREADS", "2", 1);
-  setenv("AGENTOS_TPM", "50000", 1);
+  ScopedEnvVar api_key("OPENAI_API_KEY", "sk-fake-test-key");
+  ScopedEnvVar threads("AGENTOS_THREADS", "2");
+  ScopedEnvVar tpm("AGENTOS_TPM", "50000");
 
   auto os = quickstart();
   ASSERT_NE(os, nullptr);
-
-  // Clean up
-  unsetenv("OPENAI_API_KEY");
-  unsetenv("AGENTOS_THREADS");
-  unsetenv("AGENTOS_TPM");
 }
 
 // Test quickstart() with invalid AGENTOS_THREADS (exception path, line 265)
 TEST(SDKCoverageFinal, QuickstartWithInvalidThreadsEnv) {
-  setenv("OPENAI_API_KEY", "sk-fake-key", 1);
-  setenv("AGENTOS_THREADS", "not_a_number", 1);
-  setenv("AGENTOS_TPM", "also_invalid", 1);
+  ScopedEnvVar api_key("OPENAI_API_KEY", "sk-fake-key");
+  ScopedEnvVar threads("AGENTOS_THREADS", "not_a_number");
+  ScopedEnvVar tpm("AGENTOS_TPM", "also_invalid");
 
   auto os = quickstart();
   ASSERT_NE(os, nullptr); // Should succeed with defaults
-
-  unsetenv("OPENAI_API_KEY");
-  unsetenv("AGENTOS_THREADS");
-  unsetenv("AGENTOS_TPM");
 }
 
 // Test quickstart() with AGENTOS_DATA_DIR set (line 257-259)
 TEST(SDKCoverageFinal, QuickstartWithDataDir) {
   auto dir = std::filesystem::temp_directory_path() / "agentos_quickstart_test";
-  setenv("OPENAI_API_KEY", "sk-fake-key", 1);
-  setenv("AGENTOS_DATA_DIR", dir.c_str(), 1);
+  ScopedEnvVar api_key("OPENAI_API_KEY", "sk-fake-key");
+  ScopedEnvVar data_dir("AGENTOS_DATA_DIR", dir.c_str());
 
   auto os = quickstart();
   ASSERT_NE(os, nullptr);
 
-  unsetenv("OPENAI_API_KEY");
-  unsetenv("AGENTOS_DATA_DIR");
   std::filesystem::remove_all(dir);
 }
