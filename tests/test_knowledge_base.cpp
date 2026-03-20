@@ -3,6 +3,7 @@
 #include "agentos/knowledge/knowledge_base.hpp"
 #include "graph_engine/builder/graph_builder.hpp"
 #include "graph_engine/core/immutable_graph.hpp"
+#include <chrono>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <memory>
@@ -13,6 +14,16 @@ using namespace agentos;
 using namespace agentos::knowledge;
 using namespace agentos::kernel;
 namespace fs = std::filesystem;
+
+namespace {
+
+fs::path make_kb_test_path(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return fs::temp_directory_path() /
+         ("agentos_kb_test_" + name + "_" + std::to_string(nonce));
+}
+
+}
 
 class MockEmbeddingBackend : public ILLMBackend {
 public:
@@ -84,7 +95,7 @@ TEST(KnowledgeBaseTest, OverlappingChunks) {
 
 TEST(KnowledgeBaseTest, GraphRAGIntegration) {
   // 1. 构建图
-  fs::path graph_dir = "/tmp/agentos_kb_graph_test";
+  fs::path graph_dir = make_kb_test_path("graph");
   if (fs::exists(graph_dir))
     fs::remove_all(graph_dir);
 
@@ -136,7 +147,7 @@ TEST(KnowledgeBaseTest, SearchWithoutGraphReturnsEmptyContext) {
 
 // ── KB 持久化测试 ──────────────────────────────
 TEST(KnowledgeBaseTest, SaveAndLoad) {
-  fs::path kb_dir = "/tmp/agentos_kb_persist_test";
+  fs::path kb_dir = make_kb_test_path("persist");
   if (fs::exists(kb_dir))
     fs::remove_all(kb_dir);
 
@@ -179,7 +190,7 @@ TEST(KnowledgeBaseTest, SaveAndLoad) {
 TEST(KnowledgeBaseTest, LoadNonexistentReturnsFalse) {
   auto mock_llm = std::make_shared<MockEmbeddingBackend>();
   KnowledgeBase kb(mock_llm, 1536);
-  EXPECT_FALSE(kb.load("/tmp/nonexistent_kb_dir_42"));
+  EXPECT_FALSE(kb.load(make_kb_test_path("missing_load")));
 }
 
 // ── 文档删除测试 ──────────────────────────────
@@ -392,7 +403,7 @@ TEST(KnowledgeBaseTest, IngestDirectoryNonexistent) {
   KnowledgeBase kb(mock_llm, 1536);
 
   // Should not crash, just log error
-  kb.ingest_directory("/tmp/nonexistent_kb_dir_9999");
+  kb.ingest_directory(make_kb_test_path("missing_ingest"));
   EXPECT_EQ(kb.document_count(), 0u);
 }
 
@@ -401,7 +412,7 @@ TEST(KnowledgeBaseTest, IngestDirectoryWithFiles) {
   auto mock_llm = std::make_shared<MockEmbeddingBackend>();
   KnowledgeBase kb(mock_llm, 1536);
 
-  fs::path test_dir = "/tmp/agentos_kb_ingest_dir_test";
+  fs::path test_dir = make_kb_test_path("ingest_dir");
   fs::remove_all(test_dir);
   fs::create_directories(test_dir);
 
@@ -420,7 +431,7 @@ TEST(KnowledgeBaseTest, IngestDirectoryWithFiles) {
 
 // Test save/load roundtrip preserves embedding model name
 TEST(KnowledgeBaseTest, SaveLoadPreservesEmbeddingModel) {
-  fs::path kb_dir = "/tmp/agentos_kb_model_test";
+  fs::path kb_dir = make_kb_test_path("model");
   fs::remove_all(kb_dir);
 
   auto mock_llm = std::make_shared<MockEmbeddingBackend>();
@@ -473,7 +484,7 @@ TEST(KnowledgeBaseTest, RemoveAllDocuments) {
 
 // Test search with graph_hops=0 does not add graph context even if graph attached
 TEST(KnowledgeBaseTest, SearchWithGraphHopsZero) {
-  fs::path graph_dir = "/tmp/agentos_kb_graph_hops0_test";
+  fs::path graph_dir = make_kb_test_path("graph_hops0");
   fs::remove_all(graph_dir);
 
   {
@@ -513,7 +524,7 @@ TEST(KnowledgeBaseTest, SingleLongSentenceChunk) {
 
 // ── Coverage boost: legacy binary format load ──────────────────
 TEST(KnowledgeBaseTest, LoadFromLegacyBin) {
-  fs::path kb_dir = "/tmp/agentos_kb_legacy_test";
+  fs::path kb_dir = make_kb_test_path("legacy");
   fs::remove_all(kb_dir);
   fs::create_directories(kb_dir);
 
@@ -583,7 +594,7 @@ TEST(KnowledgeBaseTest, LoadFromLegacyBin) {
 
 // Test loading legacy bin with bad magic returns false
 TEST(KnowledgeBaseTest, LoadLegacyBinBadMagic) {
-  fs::path kb_dir = "/tmp/agentos_kb_legacy_bad_magic";
+  fs::path kb_dir = make_kb_test_path("legacy_bad_magic");
   fs::remove_all(kb_dir);
   fs::create_directories(kb_dir);
 
@@ -653,7 +664,7 @@ TEST(KnowledgeBaseTest, RRFFusionSkipsDeletedChunks) {
 
 // Test GraphRAG with entity not found in graph (empty triples)
 TEST(KnowledgeBaseTest, GraphRAGEntityNotInGraph) {
-  fs::path graph_dir = "/tmp/agentos_kb_graph_notfound_test";
+  fs::path graph_dir = make_kb_test_path("graph_notfound");
   fs::remove_all(graph_dir);
 
   {
@@ -697,7 +708,7 @@ TEST(KnowledgeBaseTest, GraphRAGNoGraphAttached) {
 // This is tested implicitly since MockEmbeddingBackend always returns embeddings,
 // but we can test by searching after save/load without HNSW file
 TEST(KnowledgeBaseTest, SearchBM25FallbackNoHNSW) {
-  fs::path kb_dir = "/tmp/agentos_kb_bm25only_test";
+  fs::path kb_dir = make_kb_test_path("bm25only");
   fs::remove_all(kb_dir);
 
   auto mock_llm = std::make_shared<MockEmbeddingBackend>();
