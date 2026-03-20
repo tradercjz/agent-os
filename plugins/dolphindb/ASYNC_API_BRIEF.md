@@ -309,7 +309,7 @@ agentOS::init("sk-xxx")
 // 单轮同步调用（阻塞，等完整结果；持久 Agent 场景请用 ask2）
 result = agentOS::ask("什么是DolphinDB？")
 
-// 异步流式调用
+// 异步流式调用（单轮请求；持久 Agent 场景请用 askStream2）
 streamObj = agentOS::askAsync("帮我分析最近的交易数据")
 // streamObj 是 dict:
 //   __stream__ = true
