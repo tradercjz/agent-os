@@ -8,6 +8,16 @@
 using namespace graph_engine;
 namespace fs = std::filesystem;
 
+namespace {
+
+fs::path make_csr_benchmark_dir() {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return fs::temp_directory_path() /
+         ("agentos_csr_benchmark_" + std::to_string(nonce));
+}
+
+}
+
 // A simple utility to format time elapsed
 void print_timing(
     const std::string &prefix,
@@ -21,7 +31,7 @@ void print_timing(
 int main() {
   const int NUM_NODES = 1'000'000;
   const int NUM_EDGES = 10'000'000;
-  fs::path test_dir = "/tmp/agentos_csr_benchmark";
+  fs::path test_dir = make_csr_benchmark_dir();
 
   if (fs::exists(test_dir)) {
     fs::remove_all(test_dir);

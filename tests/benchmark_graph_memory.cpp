@@ -10,6 +10,16 @@
 
 using namespace agentos;
 
+namespace {
+
+std::filesystem::path make_graph_benchmark_dir() {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return std::filesystem::temp_directory_path() /
+         ("agentos_benchmark_graph_" + std::to_string(nonce));
+}
+
+}
+
 // Simple stopwatch for benchmarking
 class Stopwatch {
 public:
@@ -32,7 +42,7 @@ int main() {
   std::cout << "  AgentOS Graph Memory Benchmark\n";
   std::cout << "==========================================\n";
 
-  std::filesystem::path test_dir = "/tmp/agentos_benchmark_graph";
+  std::filesystem::path test_dir = make_graph_benchmark_dir();
   std::filesystem::remove_all(test_dir);
 
   memory::LocalGraphMemory graph(test_dir);
