@@ -5,8 +5,10 @@
 // ============================================================
 #include <agentos/agentos.hpp>
 #include <gtest/gtest.h>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <thread>
 
 using namespace agentos;
@@ -14,15 +16,27 @@ using namespace agentos::kernel;
 using namespace agentos::bus;
 namespace fs = std::filesystem;
 
+namespace {
+
+fs::path make_coverage_test_path(const std::string &name) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return fs::temp_directory_path() /
+         ("agentos_covboost_" + name + "_" + std::to_string(nonce));
+}
+
+}
+
 // ── Fixture ─────────────────────────────────────────────────
 
 class CoverageBoostTest : public ::testing::Test {
 protected:
+  fs::path test_dir_ = make_coverage_test_path("fixture");
+
   void TearDown() override {
-    fs::remove_all(fs::temp_directory_path() / "agentos_covboost_test");
+    fs::remove_all(test_dir_);
   }
   std::string tmp_dir() {
-    return (fs::temp_directory_path() / "agentos_covboost_test").string();
+    return test_dir_.string();
   }
 };
 
@@ -698,7 +712,7 @@ TEST(KBCoverageTest, IngestDirectoryNonExistent) {
 
 // Cover ingest_directory with actual text files (lines 279-287)
 TEST(KBCoverageTest, IngestDirectoryWithFiles) {
-  auto dir = fs::temp_directory_path() / "agentos_kb_ingest_dir_test";
+  auto dir = make_coverage_test_path("kb_ingest_dir");
   fs::create_directories(dir);
 
   // Create test files
@@ -758,7 +772,7 @@ TEST(KBCoverageTest, SearchMultipleResults) {
 
 // Cover save/load round-trip with DuckDB
 TEST(KBCoverageTest, SaveLoadRoundTrip) {
-  auto dir = fs::temp_directory_path() / "agentos_kb_saveload_test";
+  auto dir = make_coverage_test_path("kb_saveload");
   fs::remove_all(dir);
 
   auto llm = std::make_shared<MockEmbedBackend>();
@@ -1434,7 +1448,7 @@ TEST(SDKCoverageFinal, QuickstartWithInvalidThreadsEnv) {
 
 // Test quickstart() with AGENTOS_DATA_DIR set (line 257-259)
 TEST(SDKCoverageFinal, QuickstartWithDataDir) {
-  auto dir = std::filesystem::temp_directory_path() / "agentos_quickstart_test";
+  auto dir = make_coverage_test_path("quickstart");
   ScopedEnvVar api_key("OPENAI_API_KEY", "sk-fake-key");
   ScopedEnvVar data_dir("AGENTOS_DATA_DIR", dir.c_str());
 
