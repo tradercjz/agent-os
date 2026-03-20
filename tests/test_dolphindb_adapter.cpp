@@ -188,3 +188,14 @@ TEST(DolphinDBAdapterTest, LegacyAskUsagePointsToModernPersistentInterface) {
                     "  For persistent agents, prefer agentOS::ask2(agent, question, [prompt])"),
         std::string::npos);
 }
+
+TEST(DolphinDBAdapterTest, InvalidHandleErrorsPointToCreateOrResume) {
+    namespace fs = std::filesystem;
+    const fs::path repo_root = fs::path(__FILE__).parent_path().parent_path();
+
+    const std::string source =
+        read_file(repo_root / "plugins" / "dolphindb" / "dolphindb_adapter.cpp");
+
+    EXPECT_NE(source.find("invalid agent handle; create one with agentOS::createAgent2(...) or restore with agentOS::resume(...)"),
+              std::string::npos);
+}

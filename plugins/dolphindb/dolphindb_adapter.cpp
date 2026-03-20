@@ -22,6 +22,15 @@ using std::vector;
 
 namespace agentos::dolphindb {
 
+namespace {
+
+RuntimeException invalid_agent_handle_error(const char* func_name) {
+    return RuntimeException(std::string(func_name) +
+                            ": invalid agent handle; create one with agentOS::createAgent2(...) or restore with agentOS::resume(...)");
+}
+
+}  // namespace
+
 // ─────────────────────────────────────────────────────────────
 // § D.1  PluginRuntime 实现
 // ─────────────────────────────────────────────────────────────
@@ -1773,7 +1782,7 @@ ConstantSP agentOSAsk(Heap* heap, vector<ConstantSP>& args) {
 
     DDB_SAFE_BEGIN
     auto agent = PluginRuntime::instance().find_agent(handle);
-    if (!agent) throw RuntimeException("agentOS::ask: invalid agent handle");
+    if (!agent) throw invalid_agent_handle_error("agentOS::ask");
 
     // Inject prompt if provided (one-time)
     if (!prompt.empty()) {
@@ -1824,7 +1833,7 @@ ConstantSP agentOSAskStream(Heap* heap, vector<ConstantSP>& args) {
 
     DDB_SAFE_BEGIN
     auto agent = PluginRuntime::instance().find_agent(handle);
-    if (!agent) throw RuntimeException("agentOS::askStream: invalid agent handle");
+    if (!agent) throw invalid_agent_handle_error("agentOS::askStream");
 
     if (!prompt.empty()) {
         auto& os = PluginRuntime::instance().os();
@@ -1891,7 +1900,7 @@ ConstantSP agentOSRun(Heap* heap, vector<ConstantSP>& args) {
 
     DDB_SAFE_BEGIN
     auto agent = PluginRuntime::instance().find_agent(handle);
-    if (!agent) throw RuntimeException("agentOS::run: invalid agent handle");
+    if (!agent) throw invalid_agent_handle_error("agentOS::run");
 
     if (!prompt.empty()) {
         auto& os = PluginRuntime::instance().os();
@@ -1938,7 +1947,7 @@ ConstantSP agentOSSave(Heap* heap, vector<ConstantSP>& args) {
 
     DDB_SAFE_BEGIN
     auto agent = PluginRuntime::instance().find_agent(handle);
-    if (!agent) throw RuntimeException("agentOS::save: invalid agent handle");
+    if (!agent) throw invalid_agent_handle_error("agentOS::save");
 
     auto& os = PluginRuntime::instance().os();
 
@@ -2048,7 +2057,7 @@ ConstantSP agentOSInfo(Heap* heap, vector<ConstantSP>& args) {
 
     DDB_SAFE_BEGIN
     auto agent = PluginRuntime::instance().find_agent(handle);
-    if (!agent) throw RuntimeException("agentOS::info: invalid agent handle");
+    if (!agent) throw invalid_agent_handle_error("agentOS::info");
 
     auto& os = PluginRuntime::instance().os();
     auto& win = os.ctx().get_window(agent->id(), agent->config().context_limit);
@@ -2144,7 +2153,7 @@ ConstantSP agentOSBlockTool(Heap* heap, vector<ConstantSP>& args) {
 
     DDB_SAFE_BEGIN
     auto agent = PluginRuntime::instance().find_agent(handle);
-    if (!agent) throw RuntimeException("agentOS::blockTool: invalid agent handle");
+    if (!agent) throw invalid_agent_handle_error("agentOS::blockTool");
 
     AgentHookManager::instance().add_blocked(handle, tool);
     return new Bool(true);
@@ -2164,7 +2173,7 @@ ConstantSP agentOSUnblockTool(Heap* heap, vector<ConstantSP>& args) {
 
     DDB_SAFE_BEGIN
     auto agent = PluginRuntime::instance().find_agent(handle);
-    if (!agent) throw RuntimeException("agentOS::unblockTool: invalid agent handle");
+    if (!agent) throw invalid_agent_handle_error("agentOS::unblockTool");
 
     AgentHookManager::instance().remove_blocked(handle, tool);
     return new Bool(true);
@@ -2184,7 +2193,7 @@ ConstantSP agentOSActivateSkill(Heap* heap, vector<ConstantSP>& args) {
 
     DDB_SAFE_BEGIN
     auto agent = PluginRuntime::instance().find_agent(handle);
-    if (!agent) throw RuntimeException("agentOS::activateSkill: invalid agent handle");
+    if (!agent) throw invalid_agent_handle_error("agentOS::activateSkill");
 
     auto& os = PluginRuntime::instance().os();
     auto& sr = skill_registry();
@@ -2215,7 +2224,7 @@ ConstantSP agentOSDeactivateSkill(Heap* heap, vector<ConstantSP>& args) {
 
     DDB_SAFE_BEGIN
     auto agent = PluginRuntime::instance().find_agent(handle);
-    if (!agent) throw RuntimeException("agentOS::deactivateSkill: invalid agent handle");
+    if (!agent) throw invalid_agent_handle_error("agentOS::deactivateSkill");
 
     auto& os = PluginRuntime::instance().os();
     unwrap_void_or_throw("agentOS::deactivateSkill",
