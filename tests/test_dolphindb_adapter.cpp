@@ -198,4 +198,5 @@ TEST(DolphinDBAdapterTest, InvalidHandleErrorsPointToCreateOrResume) {
 
     EXPECT_NE(source.find("invalid agent handle; create one with agentOS::createAgent2(...) or restore with agentOS::resume(...)"),
               std::string::npos);
+    EXPECT_EQ(source.find("Invalid agent handle "), std::string::npos);
 }

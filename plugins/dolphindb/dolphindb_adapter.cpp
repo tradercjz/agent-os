@@ -477,8 +477,7 @@ ConstantSP agentOSAskTable(Heap* heap, vector<ConstantSP>& args) {
     if (agent_handle > 0) {
         agent = runtime.find_agent(agent_handle);
         if (!agent)
-            throw IllegalArgumentException("agentOS::askTable",
-                "Invalid agent handle " + std::to_string(agent_handle));
+            throw invalid_agent_handle_error("agentOS::askTable");
     } else {
         AgentConfig cfg;
         cfg.name = "ddb_table_temp";
