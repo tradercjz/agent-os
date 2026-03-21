@@ -4,6 +4,7 @@
 // ============================================================
 #include <agentos/core/agent_snapshot.hpp>
 #include <agentos/core/co_executor.hpp>
+#include <agentos/core/delegation.hpp>
 #include <agentos/core/hot_config.hpp>
 #include <agentos/core/plugin.hpp>
 #include <agentos/bus/agent_bus.hpp>
@@ -14,6 +15,7 @@
 #include <agentos/kernel/llm_kernel.hpp>
 #include <agentos/memory/memory.hpp>
 #include <agentos/memory/consolidator.hpp>
+#include <agentos/memory/shared_memory.hpp>
 #include <agentos/scheduler/scheduler.hpp>
 #include <agentos/security/security.hpp>
 #include <agentos/tools/tool_manager.hpp>
@@ -359,6 +361,8 @@ public:
     worktree_mgr_ = std::make_unique<worktree::WorktreeManager>(
         worktree::WorktreeConfig{config_.repo_root, config_.worktree_base,
                                   config_.max_worktrees});
+    delegation_mgr_ = std::make_unique<DelegationManager>(*this);
+    shared_memory_ = std::make_unique<memory::SharedMemory>();
     co_executor_ = std::make_unique<CoExecutor>(2);
     plugin_mgr_ = std::make_unique<PluginManager>();
     scheduler_->start();
@@ -473,6 +477,8 @@ public:
   tracing::Tracer &tracer() { return *tracer_; }
   tools::ToolLearner &tool_learner() { return *tool_learner_; }
   worktree::WorktreeManager &worktree_mgr() { return *worktree_mgr_; }
+  DelegationManager &delegation() { return *delegation_mgr_; }
+  memory::SharedMemory &shared_memory() { return *shared_memory_; }
   CoExecutor& co_executor() { return *co_executor_; }
   PluginManager& plugins() { return *plugin_mgr_; }
   const Config& config() const { return config_; }
@@ -699,6 +705,8 @@ private:
   std::unique_ptr<tracing::Tracer> tracer_;
   std::unique_ptr<tools::ToolLearner> tool_learner_;
   std::unique_ptr<worktree::WorktreeManager> worktree_mgr_;
+  std::unique_ptr<DelegationManager> delegation_mgr_;
+  std::unique_ptr<memory::SharedMemory> shared_memory_;
   std::unique_ptr<CoExecutor> co_executor_;
   std::unique_ptr<PluginManager> plugin_mgr_;
   std::unique_ptr<HotConfig> hot_config_;

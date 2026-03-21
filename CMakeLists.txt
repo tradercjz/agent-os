@@ -180,6 +180,7 @@ set(AGENTOS_SOURCES
     src/memory/consolidator.cpp
     src/tools/tool_manager.cpp
     src/tools/tool_learner.cpp
+    src/tools/tool_pipeline.cpp
     src/security/security.cpp
     src/bus/agent_bus.cpp
     src/bus/sqlite_audit_store.cpp
@@ -193,6 +194,7 @@ set(AGENTOS_SOURCES
     src/core/plugin.cpp
     src/kernel/vcr_cassette.cpp
     src/core/agent_snapshot.cpp
+    src/core/delegation.cpp
     src/kernel/async_http_client.cpp
     src/dashboard/dashboard.cpp
 )
@@ -351,6 +353,9 @@ set(TEST_SOURCES
   tests/test_agent_snapshot.cpp
   tests/test_async_http.cpp
   tests/test_dashboard.cpp
+  tests/test_tool_pipeline.cpp
+  tests/test_delegation.cpp
+  tests/test_shared_memory.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
