@@ -17,6 +17,7 @@
 
 // ── Core modules ────────────────────────────────────────────
 #include <agentos/agent.hpp>
+#include <agentos/kernel/ollama_backend.hpp>
 #include <agentos/subworkers/runtime.hpp>
 #include <agentos/supervisor_agent.hpp>
 #ifndef AGENTOS_NO_DUCKDB
@@ -132,6 +133,15 @@ public:
   /// Use mock backend for testing
   AgentOSBuilder &mock() {
     backend_type_ = BackendType::Mock;
+    return *this;
+  }
+
+  /// Use Ollama local backend
+  AgentOSBuilder &ollama(std::string model = "llama3",
+                          std::string base_url = "http://localhost:11434") {
+    custom_backend_ = std::make_unique<kernel::OllamaBackend>(
+        std::move(model), std::move(base_url));
+    backend_type_ = BackendType::Custom;
     return *this;
   }
 

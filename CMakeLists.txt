@@ -171,6 +171,7 @@ endif()
 set(AGENTOS_SOURCES
     src/kernel/http_client.cpp
     src/kernel/llm_kernel.cpp
+    src/kernel/ollama_backend.cpp
     src/scheduler/scheduler.cpp
     src/context/context.cpp
     src/memory/memory.cpp
@@ -321,6 +322,7 @@ set(TEST_SOURCES
   tests/test_coroutine.cpp
   tests/test_hnsw_persistence.cpp
   tests/test_http_client.cpp
+  tests/test_ollama_backend.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
