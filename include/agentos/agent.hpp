@@ -2,7 +2,9 @@
 // ============================================================
 // AgentOS :: Agent 基类 + AgentOS 系统门面
 // ============================================================
+#include <agentos/core/agent_rate_limiter.hpp>
 #include <agentos/core/agent_snapshot.hpp>
+#include <agentos/core/circuit_breaker.hpp>
 #include <agentos/core/co_executor.hpp>
 #include <agentos/core/delegation.hpp>
 #include <agentos/core/hot_config.hpp>
@@ -365,6 +367,8 @@ public:
     shared_memory_ = std::make_unique<memory::SharedMemory>();
     co_executor_ = std::make_unique<CoExecutor>(2);
     plugin_mgr_ = std::make_unique<PluginManager>();
+    circuit_breaker_ = std::make_unique<CircuitBreaker>("agentos-llm");
+    agent_rate_limiter_ = std::make_unique<AgentRateLimiter>();
     scheduler_->start();
   }
 
@@ -481,6 +485,8 @@ public:
   memory::SharedMemory &shared_memory() { return *shared_memory_; }
   CoExecutor& co_executor() { return *co_executor_; }
   PluginManager& plugins() { return *plugin_mgr_; }
+  CircuitBreaker& circuit_breaker() { return *circuit_breaker_; }
+  AgentRateLimiter& agent_rate_limiter() { return *agent_rate_limiter_; }
   const Config& config() const { return config_; }
 
   // ── Agent 数量查询 ──────────────────────────────────────
@@ -729,6 +735,8 @@ private:
   std::unique_ptr<memory::SharedMemory> shared_memory_;
   std::unique_ptr<CoExecutor> co_executor_;
   std::unique_ptr<PluginManager> plugin_mgr_;
+  std::unique_ptr<CircuitBreaker> circuit_breaker_;
+  std::unique_ptr<AgentRateLimiter> agent_rate_limiter_;
   std::unique_ptr<HotConfig> hot_config_;
   std::unique_ptr<dashboard::DashboardServer> dashboard_;
   std::shared_ptr<std::atomic<bool>> os_alive_ = std::make_shared<std::atomic<bool>>(true);

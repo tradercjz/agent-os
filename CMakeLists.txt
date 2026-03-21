@@ -200,6 +200,8 @@ set(AGENTOS_SOURCES
     src/dashboard/dashboard.cpp
     src/context/compressor.cpp
     src/context/conversation_store.cpp
+    src/core/circuit_breaker.cpp
+    src/core/agent_rate_limiter.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -363,6 +365,8 @@ set(TEST_SOURCES
   tests/test_router_backend.cpp
   tests/test_conversation_store.cpp
   tests/test_agent_clone.cpp
+  tests/test_circuit_breaker.cpp
+  tests/test_agent_rate_limiter.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
