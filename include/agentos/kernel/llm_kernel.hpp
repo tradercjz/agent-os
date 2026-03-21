@@ -637,6 +637,14 @@ public:
     return final_resp;
   }
 
+  Task<Result<LLMResponse>> infer_async(LLMRequest req) {
+      co_return infer(std::move(req));
+  }
+
+  Task<Result<EmbeddingResponse>> embed_async(EmbeddingRequest req) {
+      co_return embed(std::move(req));
+  }
+
   ILLMBackend &backend() noexcept { return *backend_; }
   KernelMetrics &metrics() noexcept { return metrics_; }
   std::string model_name() const noexcept { return backend_->name(); }
