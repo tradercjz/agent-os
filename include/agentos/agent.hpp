@@ -596,6 +596,26 @@ public:
     return agent;
   }
 
+  // ── Agent Cloning ────────────────────────────────────────────
+  /// Clone an agent: creates a new agent with the same config, context, and memory.
+  /// The clone gets a new ID but copies config and context messages.
+  Result<std::shared_ptr<Agent>> clone_agent(AgentId source_id, std::string new_name = "") {
+    auto snap_result = snapshot_agent(source_id);
+    if (!snap_result) {
+      return make_error(snap_result.error().code,
+                        fmt::format("clone_agent: {}", snap_result.error().message));
+    }
+
+    auto& snap = *snap_result;
+    if (new_name.empty()) {
+      new_name = snap.name.empty() ? "clone" : snap.name + "-clone";
+    }
+    snap.name = std::move(new_name);
+    snap.agent_id = 0; // let restore_agent assign a new ID
+
+    return restore_agent(snap);
+  }
+
   // ── 注册工具快捷方法 ──────────────────────────────────────
   template <typename Fn>
   void register_tool(tools::ToolSchema schema, Fn &&handler) {

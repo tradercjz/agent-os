@@ -199,6 +199,7 @@ set(AGENTOS_SOURCES
     src/kernel/async_http_client.cpp
     src/dashboard/dashboard.cpp
     src/context/compressor.cpp
+    src/context/conversation_store.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -360,6 +361,8 @@ set(TEST_SOURCES
   tests/test_shared_memory.cpp
   tests/test_context_compressor.cpp
   tests/test_router_backend.cpp
+  tests/test_conversation_store.cpp
+  tests/test_agent_clone.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
