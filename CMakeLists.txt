@@ -188,6 +188,7 @@ set(AGENTOS_SOURCES
     src/worktree/worktree_manager.cpp
     src/core/hot_config.cpp
     src/core/co_executor.cpp
+    src/core/prometheus.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -336,6 +337,7 @@ set(TEST_SOURCES
   tests/test_ollama_backend.cpp
   tests/test_anthropic_backend.cpp
   tests/test_llamacpp_backend.cpp
+  tests/test_prometheus.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target

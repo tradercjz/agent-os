@@ -649,6 +649,7 @@ public:
 
   ILLMBackend &backend() noexcept { return *backend_; }
   KernelMetrics &metrics() noexcept { return metrics_; }
+  const KernelMetrics &metrics() const noexcept { return metrics_; }
   std::string model_name() const noexcept { return backend_->name(); }
   TokenBucketRateLimiter &rate_limiter() noexcept { return rate_limiter_; }
 

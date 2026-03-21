@@ -227,4 +227,70 @@ void Tracer::evict_if_needed() {
     }
 }
 
+// ── TraceContext thread_local definitions ──────────────────────
+thread_local std::string TraceContext::trace_id_;
+thread_local std::string TraceContext::span_id_;
+
+// ── OTLP JSON export ──────────────────────────────────────────
+std::string Tracer::export_otlp_json(const std::string& trace_id) const {
+    std::lock_guard lk(mu_);
+    auto it = trace_index_.find(trace_id);
+    if (it == trace_index_.end()) return "{}";
+    const auto& trace = traces_[it->second];
+
+    using Json = nlohmann::json;
+    Json scope_spans = Json::array();
+
+    for (const auto& span : trace.spans) {
+        Json j;
+        j["traceId"] = trace.trace_id;
+        j["spanId"] = span.id;
+        if (!span.parent_id.empty()) j["parentSpanId"] = span.parent_id;
+        j["name"] = span.operation;
+
+        auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            span.start_time.time_since_epoch()).count();
+        auto end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            span.end_time.time_since_epoch()).count();
+        j["startTimeUnixNano"] = std::to_string(start_ns);
+        j["endTimeUnixNano"] = std::to_string(end_ns);
+
+        Json attrs = Json::array();
+        for (const auto& [k, v] : span.tags) {
+            Json attr;
+            attr["key"] = k;
+            attr["value"]["stringValue"] = v;
+            attrs.push_back(attr);
+        }
+        if (span.tokens_used > 0) {
+            Json attr;
+            attr["key"] = "tokens_used";
+            attr["value"]["intValue"] = std::to_string(span.tokens_used);
+            attrs.push_back(attr);
+        }
+        if (!span.error.empty()) {
+            Json attr;
+            attr["key"] = "error.message";
+            attr["value"]["stringValue"] = span.error;
+            attrs.push_back(attr);
+        }
+        j["attributes"] = attrs;
+
+        Json status;
+        status["code"] = span.success ? 1 : 2;
+        j["status"] = status;
+
+        scope_spans.push_back(j);
+    }
+
+    Json result;
+    result["resourceSpans"] = Json::array({
+        {{"scopeSpans", Json::array({
+            {{"spans", scope_spans}}
+        })}}
+    });
+
+    return result.dump(2);
+}
+
 } // namespace agentos::tracing

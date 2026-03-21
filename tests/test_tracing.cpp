@@ -329,3 +329,62 @@ TEST_F(TracerIntegrationTest, MiddlewareIntegration) {
     EXPECT_TRUE(found_think) << "Expected a 'think' span from middleware";
     EXPECT_EQ(traces[0].total_tokens, 50u);
 }
+
+// ── ScopedSpan tests ──────────────────────────────────────────
+
+TEST(ScopedSpanTest, AutoEndsOnDestruction) {
+    tracing::Tracer tracer;
+    auto tid = tracer.begin_trace(1, "test");
+    {
+        tracing::ScopedSpan span(tracer, tid, "", "test.op", "input");
+        span.set_output("output");
+        span.set_tokens(100);
+    }
+    auto trace = tracer.get_trace(tid);
+    ASSERT_TRUE(trace.has_value());
+    ASSERT_EQ(trace->spans.size(), 1u);
+    EXPECT_EQ(trace->spans[0].operation, "test.op");
+    EXPECT_EQ(trace->spans[0].tokens_used, 100u);
+    EXPECT_TRUE(trace->spans[0].success);
+}
+
+TEST(ScopedSpanTest, RecordsError) {
+    tracing::Tracer tracer;
+    auto tid = tracer.begin_trace(1, "test");
+    {
+        tracing::ScopedSpan span(tracer, tid, "", "failing.op");
+        span.set_error("something broke");
+    }
+    auto trace = tracer.get_trace(tid);
+    ASSERT_TRUE(trace.has_value());
+    EXPECT_FALSE(trace->spans[0].success);
+    EXPECT_EQ(trace->spans[0].error, "something broke");
+}
+
+// ── TraceContext tests ────────────────────────────────────────
+
+TEST(TraceContextTest, ThreadLocalStorage) {
+    tracing::TraceContext::set_current("trace-1", "span-1");
+    EXPECT_EQ(tracing::TraceContext::current_trace_id(), "trace-1");
+    EXPECT_EQ(tracing::TraceContext::current_span_id(), "span-1");
+    tracing::TraceContext::clear();
+    EXPECT_TRUE(tracing::TraceContext::current_trace_id().empty());
+}
+
+// ── OTLP export test ─────────────────────────────────────────
+
+TEST(TracerOTLPTest, ExportOTLPJson) {
+    tracing::Tracer tracer;
+    auto tid = tracer.begin_trace(1, "otlp-test");
+    auto sid = tracer.begin_span(tid, "", "root.op", "hi");
+    tracer.end_span(tid, sid, "done", 50);
+    tracer.end_trace(tid);
+
+    auto json_str = tracer.export_otlp_json(tid);
+    auto j = nlohmann::json::parse(json_str);
+    EXPECT_TRUE(j.contains("resourceSpans"));
+    auto spans = j["resourceSpans"][0]["scopeSpans"][0]["spans"];
+    EXPECT_EQ(spans.size(), 1u);
+    EXPECT_EQ(spans[0]["name"], "root.op");
+    EXPECT_TRUE(spans[0].contains("traceId"));
+}

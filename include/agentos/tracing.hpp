@@ -73,6 +73,7 @@ public:
 
     // Export
     std::string export_json(const std::string& trace_id) const;
+    std::string export_otlp_json(const std::string& trace_id) const;
 
     bool enabled() const noexcept { return config_.enabled; }
     const TracerConfig& config() const noexcept { return config_; }
@@ -87,6 +88,54 @@ private:
     std::unordered_map<std::string, size_t> trace_index_;         // trace_id -> index in deque
     uint64_t span_counter_{0};
     uint64_t trace_counter_{0};
+};
+
+// ── RAII span — auto-ends on destruction ───────────────────────
+class ScopedSpan {
+public:
+    ScopedSpan(Tracer& tracer, const std::string& trace_id,
+               const std::string& parent_span_id, const std::string& operation,
+               const std::string& input = "")
+        : tracer_(tracer), trace_id_(trace_id) {
+        span_id_ = tracer_.begin_span(trace_id, parent_span_id, operation, input);
+    }
+
+    ~ScopedSpan() {
+        tracer_.end_span(trace_id_, span_id_, output_, tokens_, success_, error_);
+    }
+
+    ScopedSpan(const ScopedSpan&) = delete;
+    ScopedSpan& operator=(const ScopedSpan&) = delete;
+
+    void set_output(const std::string& output) { output_ = output; }
+    void set_tokens(TokenCount tokens) { tokens_ = tokens; }
+    void set_error(const std::string& error) { success_ = false; error_ = error; }
+    const std::string& span_id() const { return span_id_; }
+
+private:
+    Tracer& tracer_;
+    std::string trace_id_;
+    std::string span_id_;
+    std::string output_;
+    TokenCount tokens_{0};
+    bool success_{true};
+    std::string error_;
+};
+
+// ── Thread-local trace context for automatic span propagation ──
+class TraceContext {
+public:
+    static void set_current(const std::string& trace_id, const std::string& span_id) {
+        trace_id_ = trace_id;
+        span_id_ = span_id;
+    }
+    static const std::string& current_trace_id() { return trace_id_; }
+    static const std::string& current_span_id() { return span_id_; }
+    static void clear() { trace_id_.clear(); span_id_.clear(); }
+
+private:
+    static thread_local std::string trace_id_;
+    static thread_local std::string span_id_;
 };
 
 } // namespace agentos::tracing
