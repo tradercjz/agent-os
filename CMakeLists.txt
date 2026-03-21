@@ -165,6 +165,7 @@ set(AGENTOS_SOURCES
     src/tools/tool_learner.cpp
     src/security/security.cpp
     src/bus/agent_bus.cpp
+    src/bus/sqlite_audit_store.cpp
     src/tracing/tracer.cpp
     src/subworkers/runtime.cpp
     src/worktree/worktree_manager.cpp
@@ -299,6 +300,7 @@ set(TEST_SOURCES
   tests/test_mcp.cpp
   tests/test_headless.cpp
   tests/test_log_sink.cpp
+  tests/test_audit_store.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
