@@ -79,21 +79,30 @@ find_package(Threads REQUIRED)
 include(FetchContent)
 
 # ---- nlohmann/json ----
-FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.3
-)
-FetchContent_MakeAvailable(nlohmann_json)
+if(NOT TARGET nlohmann_json::nlohmann_json)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.3
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+endif()
 
 # ---- libcurl ----
 find_package(CURL REQUIRED)
 
 # ---- SQLite3 ----
-# macOS Homebrew: brew install sqlite
-# Linux: apt install libsqlite3-dev
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+# Try vcpkg first, then fall back to pkg-config
+find_package(unofficial-sqlite3 CONFIG QUIET)
+if(unofficial-sqlite3_FOUND)
+    set(SQLITE3_TARGET unofficial::sqlite3::sqlite3)
+    message(STATUS "SQLite3: found via vcpkg")
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+    set(SQLITE3_TARGET ${SQLITE3_LIBRARIES})
+    message(STATUS "SQLite3: found via pkg-config")
+endif()
 
 # ---- DuckDB (optional) ----
 # Disable with -DAGENTOS_NO_DUCKDB=ON (e.g. for DolphinDB plugin builds)
@@ -111,24 +120,28 @@ else()
 endif()
 
 # ---- GoogleTest ----
-set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
-)
-FetchContent_MakeAvailable(googletest)
+if(NOT TARGET GTest::gtest)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+      googletest
+      URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+    )
+    FetchContent_MakeAvailable(googletest)
+endif()
 
 # ---- hnswlib ----
-FetchContent_Declare(
-  hnswlib
-  URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.zip
-)
-FetchContent_MakeAvailable(hnswlib)
-# Mark hnswlib includes as SYSTEM to suppress third-party warnings under -Werror
-get_target_property(_hnswlib_dirs hnswlib INTERFACE_INCLUDE_DIRECTORIES)
-if(_hnswlib_dirs)
-    set_target_properties(hnswlib PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_hnswlib_dirs}")
+if(NOT TARGET hnswlib::hnswlib)
+    FetchContent_Declare(
+      hnswlib
+      URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.zip
+    )
+    FetchContent_MakeAvailable(hnswlib)
+    # Mark hnswlib includes as SYSTEM to suppress third-party warnings under -Werror
+    get_target_property(_hnswlib_dirs hnswlib INTERFACE_INCLUDE_DIRECTORIES)
+    if(_hnswlib_dirs)
+        set_target_properties(hnswlib PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_hnswlib_dirs}")
+    endif()
 endif()
 
 # ---- cppjieba (optional) ----
@@ -165,16 +178,18 @@ set(AGENTOS_SOURCES
     src/tools/tool_learner.cpp
     src/security/security.cpp
     src/bus/agent_bus.cpp
+    src/bus/sqlite_audit_store.cpp
     src/tracing/tracer.cpp
     src/subworkers/runtime.cpp
     src/worktree/worktree_manager.cpp
+    src/core/hot_config.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(agentos PUBLIC ${CMAKE_BINARY_DIR}/include)
 target_include_directories(agentos PUBLIC ${SQLITE3_INCLUDE_DIRS})
-target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_LIBRARIES})
+target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_TARGET})
 
 if(NOT AGENTOS_NO_DUCKDB)
     target_include_directories(agentos PUBLIC ${DUCKDB_INCLUDE_DIR})
@@ -298,6 +313,9 @@ set(TEST_SOURCES
   tests/test_worktree_integration.cpp
   tests/test_mcp.cpp
   tests/test_headless.cpp
+  tests/test_log_sink.cpp
+  tests/test_audit_store.cpp
+  tests/test_hot_config.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target

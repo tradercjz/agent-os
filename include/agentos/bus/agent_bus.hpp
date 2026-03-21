@@ -3,6 +3,8 @@
 // AgentOS :: Agent Bus — Hub-and-Spoke 通信总线
 // 支持 Request/Response + Pub/Sub，Hub 负责安全过滤
 // ============================================================
+#include <agentos/bus/bus_message.hpp>
+#include <agentos/bus/audit_store.hpp>
 #include <agentos/core/types.hpp>
 #include <agentos/security/security.hpp>
 #include <any>
@@ -23,53 +25,6 @@
 #include <vector>
 
 namespace agentos::bus {
-
-// ─────────────────────────────────────────────────────────────
-// § B.1  Message — 消息类型
-// ─────────────────────────────────────────────────────────────
-
-enum class MessageType {
-    Request,    // 发送方等待响应
-    Response,   // 响应消息
-    Event,      // 广播事件（Pub/Sub）
-    Heartbeat,  // 心跳（存活检测）
-};
-
-struct BusMessage {
-    uint64_t            id;
-    MessageType         type;
-    AgentId             from;
-    AgentId             to;        // 0 = 广播
-    std::string         topic;     // Pub/Sub 主题 / RPC 方法名
-    std::string         payload;   // JSON 字符串
-    uint64_t            reply_to{0};  // 对哪个 Request 的响应
-    TimePoint           timestamp{now()};
-    bool                redacted{false}; // Hub 脱敏标记
-
-    // Unified ID generator — avoids collisions between request/response/event IDs
-    static uint64_t next_id() {
-        static std::atomic<uint64_t> id_gen{1};
-        // Relaxed ordering sufficient for monotonic ID counter (no data published via this store)
-        return id_gen.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    static BusMessage make_request(AgentId from, AgentId to,
-                                   std::string topic, std::string payload) {
-        return {next_id(), MessageType::Request, from, to,
-                std::move(topic), std::move(payload)};
-    }
-
-    static BusMessage make_response(const BusMessage& req, std::string payload) {
-        return {next_id(), MessageType::Response, req.to, req.from,
-                req.topic, std::move(payload), req.id};
-    }
-
-    static BusMessage make_event(AgentId from, std::string topic,
-                                  std::string payload) {
-        return {next_id(), MessageType::Event, from, 0,
-                std::move(topic), std::move(payload)};
-    }
-};
 
 // ─────────────────────────────────────────────────────────────
 // § B.2  Channel — Agent 的消息队列（Spoke）
@@ -167,8 +122,9 @@ using MessageHandler = std::function<void(const BusMessage&)>;
 
 class AgentBus : private NonCopyable {
 public:
-    explicit AgentBus(security::SecurityManager* sec = nullptr)
-        : security_(sec) {}
+    explicit AgentBus(security::SecurityManager* sec = nullptr,
+                      std::shared_ptr<IAuditStore> store = nullptr)
+        : security_(sec), store_(std::move(store)) {}
 
     // ── Spoke 注册/注销 ─────────────────────────────────────
     std::shared_ptr<Channel> register_agent(AgentId id) {
@@ -208,18 +164,22 @@ public:
             }
         }
 
-        std::lock_guard lk(mu_);
-        audit_push(event);
+        BusMessage event_for_store = event; // copy for persistent write outside lock
+        {
+            std::lock_guard lk(mu_);
+            audit_push_mem(event);
 
-        for (auto& [agent_id, topics] : subscriptions_) {
-            if (topics.contains(event.topic)) {
-                auto it = channels_.find(agent_id);
-                if (it != channels_.end()) {
-                    auto redacted_event = redact_if_needed(event, agent_id);
-                    (void)it->second->push(redacted_event);  // drop on full is by-design
+            for (auto& [agent_id, topics] : subscriptions_) {
+                if (topics.contains(event.topic)) {
+                    auto it = channels_.find(agent_id);
+                    if (it != channels_.end()) {
+                        auto redacted_event = redact_if_needed(event, agent_id);
+                        (void)it->second->push(redacted_event);  // drop on full is by-design
+                    }
                 }
             }
         }
+        audit_push_store(event_for_store); // outside lock
     }
 
     // ── Request/Response ────────────────────────────────────
@@ -237,46 +197,51 @@ public:
             }
         }
 
-        std::lock_guard lk(mu_);
-        audit_push(msg);
+        BusMessage msg_for_store = msg; // copy for persistent write outside lock
 
         bool all_accepted = true;
-        std::vector<AgentId> failed_recipients;
+        {
+            std::lock_guard lk(mu_);
+            audit_push_mem(msg);
 
-        if (msg.to == 0) {
-            // 广播
-            for (auto& [id, ch] : channels_) {
-                if (id != msg.from) {
-                    if (!ch->push(msg)) {
-                        all_accepted = false;
-                        failed_recipients.push_back(id);
+            std::vector<AgentId> failed_recipients;
+
+            if (msg.to == 0) {
+                // 广播
+                for (auto& [id, ch] : channels_) {
+                    if (id != msg.from) {
+                        if (!ch->push(msg)) {
+                            all_accepted = false;
+                            failed_recipients.push_back(id);
+                        }
                     }
                 }
-            }
-        } else {
-            auto it = channels_.find(msg.to);
-            if (it != channels_.end()) {
-                if (!it->second->push(msg)) {
+            } else {
+                auto it = channels_.find(msg.to);
+                if (it != channels_.end()) {
+                    if (!it->second->push(msg)) {
+                        all_accepted = false;
+                        failed_recipients.push_back(msg.to);
+                    }
+                } else {
                     all_accepted = false;
                     failed_recipients.push_back(msg.to);
+                    LOG_WARN(fmt::format("[AgentBus] Message dropped: agent {} not registered", msg.to));
                 }
-            } else {
-                all_accepted = false;
-                failed_recipients.push_back(msg.to);
-                LOG_WARN(fmt::format("[AgentBus] Message dropped: agent {} not registered", msg.to));
             }
-        }
 
-        // Log warning if there are failed recipients
-        if (!failed_recipients.empty()) {
-            std::string failed_ids;
-            for (size_t i = 0; i < failed_recipients.size(); ++i) {
-                if (i > 0) failed_ids += ", ";
-                failed_ids += std::to_string(failed_recipients[i]);
+            // Log warning if there are failed recipients
+            if (!failed_recipients.empty()) {
+                std::string failed_ids;
+                for (size_t i = 0; i < failed_recipients.size(); ++i) {
+                    if (i > 0) failed_ids += ", ";
+                    failed_ids += std::to_string(failed_recipients[i]);
+                }
+                LOG_WARN(fmt::format("AgentBus::send() message id={} could not be delivered to agents: [{}]",
+                                     msg.id, failed_ids));
             }
-            LOG_WARN(fmt::format("AgentBus::send() message id={} could not be delivered to agents: [{}]",
-                                 msg.id, failed_ids));
         }
+        audit_push_store(msg_for_store); // outside lock — avoids blocking bus on SQLite I/O
 
         return all_accepted;
     }
@@ -353,12 +318,21 @@ private:
         return msg;
     }
 
-    void audit_push(const BusMessage& msg) {
+    // In-memory audit (called under mu_)
+    void audit_push_mem(const BusMessage& msg) {
         audit_trail_.push_back(msg);
         for (auto& m : monitors_) m(msg);
         // 限制审计日志大小，deque 前端 pop 为 O(1)
         while (audit_trail_.size() > 10000) {
             audit_trail_.pop_front();
+        }
+    }
+
+    // Persistent store write (called OUTSIDE mu_ to avoid blocking bus on SQLite I/O)
+    void audit_push_store(const BusMessage& msg) {
+        if (store_) {
+            auto entry = to_audit_entry(msg);
+            (void)store_->write(entry);
         }
     }
 
@@ -369,6 +343,7 @@ private:
     std::deque<BusMessage> audit_trail_;  // deque 保证 O(1) pop_front
     std::vector<MessageHandler> monitors_;
     security::SecurityManager* security_; // 非拥有指针
+    std::shared_ptr<IAuditStore> store_;   // optional persistent audit store
 };
 
 } // namespace agentos::bus

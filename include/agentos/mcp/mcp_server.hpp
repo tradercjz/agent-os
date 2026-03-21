@@ -4,6 +4,7 @@
 // Model Context Protocol JSON-RPC 适配器
 // 将 ToolRegistry 暴露为标准 MCP 接口
 // ============================================================
+#include <agentos/core/hot_config.hpp>
 #include <agentos/core/types.hpp>
 #include <agentos/tools/tool_manager.hpp>
 #include <string>
@@ -54,10 +55,12 @@ class MCPServer {
 public:
     MCPServer(tools::ToolManager& tool_manager,
               std::string server_name,
-              std::string version)
+              std::string version,
+              HotConfig* hot_config = nullptr)
         : tool_manager_(tool_manager),
           server_name_(std::move(server_name)),
-          version_(std::move(version)) {}
+          version_(std::move(version)),
+          hot_config_(hot_config) {}
 
     /// Handle a parsed MCP request
     MCPResponse handle(const MCPRequest& req) {
@@ -65,6 +68,9 @@ public:
         if (req.method == "tools/list") return handle_tools_list(req);
         if (req.method == "tools/call") return handle_tools_call(req);
         if (req.method == "ping") return handle_ping(req);
+        if (req.method == "config/reload") return handle_config_reload(req);
+        if (req.method == "config/get") return handle_config_get(req);
+        if (req.method == "config/set") return handle_config_set(req);
 
         return make_error_response(req.id, error_code::MethodNotFound,
                                    "Method not found: " + req.method);
@@ -101,6 +107,7 @@ private:
     tools::ToolManager& tool_manager_;
     std::string server_name_;
     std::string version_;
+    HotConfig* hot_config_{nullptr};
 
     MCPResponse handle_initialize(const MCPRequest& req) {
         Json result;
@@ -179,6 +186,58 @@ private:
         res["content"] = content;
         res["isError"] = !result.success;
         return {.jsonrpc = "2.0", .result = res, .error = nullptr, .id = req.id};
+    }
+
+    MCPResponse handle_config_reload(const MCPRequest& req) {
+        if (!hot_config_) {
+            return make_error_response(req.id, error_code::InternalError,
+                                       "HotConfig not enabled");
+        }
+        auto r = hot_config_->reload();
+        if (!r) {
+            return make_error_response(req.id, error_code::InternalError,
+                                       r.error().message);
+        }
+        Json result;
+        result["success"] = true;
+        return {.jsonrpc = "2.0", .result = result, .error = nullptr, .id = req.id};
+    }
+
+    MCPResponse handle_config_get(const MCPRequest& req) {
+        if (!hot_config_) {
+            return make_error_response(req.id, error_code::InternalError,
+                                       "HotConfig not enabled");
+        }
+        if (!req.params.contains("key")) {
+            return make_error_response(req.id, error_code::InvalidParams,
+                                       "Missing 'key' in params");
+        }
+        std::string key = req.params["key"].get<std::string>();
+        auto value = hot_config_->get<Json>(key, nullptr);
+        Json result;
+        result["key"] = key;
+        result["value"] = value;
+        return {.jsonrpc = "2.0", .result = result, .error = nullptr, .id = req.id};
+    }
+
+    MCPResponse handle_config_set(const MCPRequest& req) {
+        if (!hot_config_) {
+            return make_error_response(req.id, error_code::InternalError,
+                                       "HotConfig not enabled");
+        }
+        if (!req.params.contains("key") || !req.params.contains("value")) {
+            return make_error_response(req.id, error_code::InvalidParams,
+                                       "Missing 'key' or 'value' in params");
+        }
+        std::string key = req.params["key"].get<std::string>();
+        auto r = hot_config_->set(key, req.params["value"]);
+        if (!r) {
+            return make_error_response(req.id, error_code::InvalidParams,
+                                       r.error().message);
+        }
+        Json result;
+        result["success"] = true;
+        return {.jsonrpc = "2.0", .result = result, .error = nullptr, .id = req.id};
     }
 
     static MCPResponse make_error_response(const Json& id, int code, const std::string& message) {

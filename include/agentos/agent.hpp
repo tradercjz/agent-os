@@ -2,7 +2,9 @@
 // ============================================================
 // AgentOS :: Agent 基类 + AgentOS 系统门面
 // ============================================================
+#include <agentos/core/hot_config.hpp>
 #include <agentos/bus/agent_bus.hpp>
+#include <agentos/bus/sqlite_audit_store.hpp>
 #include <agentos/context/context.hpp>
 #include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
@@ -334,7 +336,17 @@ public:
     security_ = config_.enable_security
                     ? std::make_unique<security::SecurityManager>()
                     : nullptr;
-    bus_ = std::make_unique<bus::AgentBus>(security_.get());
+    // Create audit store for persistent bus message logging
+    std::shared_ptr<bus::IAuditStore> audit_store;
+    {
+        auto audit_db = std::filesystem::path(config_.snapshot_dir) / "audit.db";
+        try {
+            audit_store = std::make_shared<bus::SqliteAuditStore>(audit_db.string());
+        } catch (const std::exception& e) {
+            LOG_WARN(fmt::format("Audit store init failed: {} — running without persistence", e.what()));
+        }
+    }
+    bus_ = std::make_unique<bus::AgentBus>(security_.get(), std::move(audit_store));
     consolidator_ = std::make_unique<memory::MemoryConsolidator>(*memory_);
     consolidator_->start();
     tracer_ = std::make_unique<tracing::Tracer>();
@@ -522,6 +534,28 @@ public:
     return h;
   }
 
+  // ── HotConfig integration ─────────────────────────────────
+  void configure_hot_reload(const std::string& config_path) {
+    hot_config_ = std::make_unique<HotConfig>(config_path);
+    hot_config_->on_change("tpm_limit", [this](const std::string&, const nlohmann::json& v) {
+      kernel_->rate_limiter().set_rate(v.get<size_t>());
+    });
+    hot_config_->on_change("log_level", [](const std::string&, const nlohmann::json& v) {
+      auto s = v.get<std::string>();
+      LogLevel level = LogLevel::Warn;
+      if (s == "debug") level = LogLevel::Debug;
+      else if (s == "info") level = LogLevel::Info;
+      else if (s == "warn") level = LogLevel::Warn;
+      else if (s == "error") level = LogLevel::Error;
+      else if (s == "off") level = LogLevel::Off;
+      Logger::instance().set_level(level);
+    });
+    (void)hot_config_->reload();
+    hot_config_->start_watching();
+  }
+
+  HotConfig* hot_config() { return hot_config_.get(); }
+
   // ── Graceful shutdown with task draining ───────────────────
   void graceful_shutdown(Duration timeout = Duration{10000}) {
     // 1. Stop accepting new agents
@@ -546,6 +580,7 @@ private:
   std::unique_ptr<tracing::Tracer> tracer_;
   std::unique_ptr<tools::ToolLearner> tool_learner_;
   std::unique_ptr<worktree::WorktreeManager> worktree_mgr_;
+  std::unique_ptr<HotConfig> hot_config_;
   std::shared_ptr<std::atomic<bool>> os_alive_ = std::make_shared<std::atomic<bool>>(true);
 
   mutable std::mutex agents_mu_;

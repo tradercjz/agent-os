@@ -257,6 +257,16 @@ public:
     return static_cast<uint32_t>(bucket_);
   }
 
+  void set_rate(size_t new_tpm_limit) {
+    std::lock_guard lk(mu_);
+    tpm_limit_ = std::max(static_cast<uint32_t>(new_tpm_limit), 1u);
+    refill_rate_ = static_cast<double>(tpm_limit_) / 60.0;
+    // Cap bucket to new limit
+    if (bucket_ > static_cast<double>(tpm_limit_)) {
+      bucket_ = static_cast<double>(tpm_limit_);
+    }
+  }
+
 private:
   void refill_locked() {
     auto now = Clock::now();
@@ -630,6 +640,7 @@ public:
   ILLMBackend &backend() noexcept { return *backend_; }
   KernelMetrics &metrics() noexcept { return metrics_; }
   std::string model_name() const noexcept { return backend_->name(); }
+  TokenBucketRateLimiter &rate_limiter() noexcept { return rate_limiter_; }
 
 private:
   // Estimate total tokens for a chat request

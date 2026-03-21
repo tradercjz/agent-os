@@ -1,5 +1,7 @@
 #include <agentos/bus/agent_bus.hpp>
+#include <agentos/bus/sqlite_audit_store.hpp>
 #include <gtest/gtest.h>
+#include <filesystem>
 #include <thread>
 
 using namespace agentos;
@@ -367,4 +369,57 @@ TEST_F(AgentBusTest, SynchronousCallTimeout) {
 TEST_F(AgentBusTest, SynchronousCallUnregisteredCaller) {
   auto result = bus->call(999, 20, "sync_query", "sync_payload", Duration{50});
   EXPECT_FALSE(result.has_value());
+}
+
+// ── Persistent Audit Store Tests ────────────────────────────
+
+TEST(AgentBusPersistentTest, WritesToAuditStore) {
+    auto db_path = (std::filesystem::temp_directory_path() / "bus_audit_test.db").string();
+    std::filesystem::remove(db_path);
+
+    auto store = std::make_shared<bus::SqliteAuditStore>(db_path);
+    AgentBus bus_with_store(nullptr, store);
+
+    auto ch_a = bus_with_store.register_agent(100);
+    auto ch_b = bus_with_store.register_agent(200);
+
+    auto msg = BusMessage::make_request(100, 200, "hello", "world");
+    bus_with_store.send(msg);
+
+    auto results = store->query(bus::AuditFilter{});
+    EXPECT_GE(results.size(), 1u);
+    EXPECT_EQ(results[0].from_agent, 100u);
+    EXPECT_EQ(results[0].topic, "hello");
+
+    std::filesystem::remove(db_path);
+}
+
+TEST(AgentBusPersistentTest, PublishWritesToAuditStore) {
+    auto db_path = (std::filesystem::temp_directory_path() / "bus_audit_pub_test.db").string();
+    std::filesystem::remove(db_path);
+
+    auto store = std::make_shared<bus::SqliteAuditStore>(db_path);
+    AgentBus bus_with_store(nullptr, store);
+
+    auto ch_a = bus_with_store.register_agent(100);
+    bus_with_store.subscribe(100, "news");
+
+    auto event = BusMessage::make_event(99, "news", "breaking");
+    bus_with_store.publish(event);
+
+    auto results = store->query(bus::AuditFilter{});
+    EXPECT_GE(results.size(), 1u);
+    EXPECT_EQ(results[0].topic, "news");
+    EXPECT_EQ(results[0].payload, "breaking");
+
+    std::filesystem::remove(db_path);
+}
+
+TEST(AgentBusPersistentTest, NullStoreWorks) {
+    // Verify backward compatibility — bus with no store still works
+    AgentBus bus_no_store;
+    auto ch = bus_no_store.register_agent(1);
+    auto ch2 = bus_no_store.register_agent(2);
+    bus_no_store.send(BusMessage::make_request(1, 2, "t", "p"));
+    EXPECT_GE(bus_no_store.audit_trail().size(), 1u);
 }

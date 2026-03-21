@@ -3,6 +3,8 @@
 // AgentOS :: Lightweight Logger
 // 零外部依赖的分级日志系统
 // ============================================================
+#include <agentos/core/log_common.hpp>
+#include <agentos/core/log_sink.hpp>
 #include <agentos/core/types.hpp>
 #include <chrono>
 #include <condition_variable>
@@ -10,7 +12,9 @@
 #include <ctime>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -18,25 +22,8 @@
 
 namespace agentos {
 
-enum class LogLevel { Debug = 0, Info = 1, Warn = 2, Error = 3, Off = 4 };
-
-inline const char *log_level_str(LogLevel level) {
-  switch (level) {
-  case LogLevel::Debug: return "DEBUG";
-  case LogLevel::Info:  return "INFO ";
-  case LogLevel::Warn:  return "WARN ";
-  case LogLevel::Error: return "ERROR";
-  default:              return "?????";
-  }
-}
-
 // Custom log sink function signature
 using LogSink = std::function<void(LogLevel, std::string_view)>;
-
-struct LogField {
-  std::string key;
-  std::string value;
-};
 
 class Logger : private NonCopyable {
 public:
@@ -53,6 +40,16 @@ public:
   void set_sink(LogSink sink) {
     std::lock_guard lk(mu_);
     custom_sink_ = std::move(sink);
+  }
+
+  void add_sink(std::shared_ptr<ILogSink> sink) {
+    std::unique_lock lk(sinks_mu_);
+    sinks_.push_back(std::move(sink));
+  }
+
+  void clear_sinks() {
+    std::unique_lock lk(sinks_mu_);
+    sinks_.clear();
   }
 
   // Synchronous log (for emergency or early startup)
@@ -87,15 +84,6 @@ public:
   }
 
 private:
-  struct LogEvent {
-    LogLevel level;
-    std::string timestamp;
-    std::string filename;
-    int line;
-    std::string msg;
-    std::vector<LogField> fields;
-  };
-
   Logger() {
     worker_ = std::thread(&Logger::worker_loop, this);
   }
@@ -109,7 +97,7 @@ private:
     if (worker_.joinable()) worker_.join();
   }
 
-  LogEvent prepare_event(LogLevel level, std::string_view msg,
+  agentos::LogEvent prepare_event(LogLevel level, std::string_view msg,
                          std::vector<LogField> fields,
                          const char *file, int line) {
     auto now = std::chrono::system_clock::now();
@@ -118,10 +106,14 @@ private:
                   now.time_since_epoch()) % 1000;
 
     char time_buf[24];
-    std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S",
-                  std::localtime(&time_t_now));
-    
-    std::string ts = ::agentos::fmt::format("{}.{:03d}", time_buf, static_cast<int>(ms.count()));
+    struct tm utc_tm;
+#ifdef _WIN32
+    gmtime_s(&utc_tm, &time_t_now);
+#else
+    gmtime_r(&time_t_now, &utc_tm);
+#endif
+    std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%S", &utc_tm);
+    std::string ts = ::agentos::fmt::format("{}.{:03d}Z", time_buf, static_cast<int>(ms.count()));
 
     std::string_view filepath(file);
     auto slash = filepath.rfind('/');
@@ -165,10 +157,10 @@ private:
     }
   }
 
-  void process_event(const LogEvent &event) {
+  void process_event(const agentos::LogEvent &event) {
     std::string formatted;
     if (event.fields.empty()) {
-      formatted = ::agentos::fmt::format("[{}] [{}] {}:{}  {}\n", 
+      formatted = ::agentos::fmt::format("[{}] [{}] {}:{}  {}\n",
                               event.timestamp, log_level_str(event.level),
                               event.filename, event.line, event.msg);
     } else {
@@ -177,7 +169,7 @@ private:
       for (const auto &f : event.fields) {
         kv_part += ::agentos::fmt::format(" {}={}", f.key, f.value);
       }
-      formatted = ::agentos::fmt::format("[{}] [{}] {}:{}  {}{}\n", 
+      formatted = ::agentos::fmt::format("[{}] [{}] {}:{}  {}{}\n",
                               event.timestamp, log_level_str(event.level),
                               event.filename, event.line, event.msg, kv_part);
     }
@@ -193,6 +185,18 @@ private:
     } else {
       std::fputs(formatted.c_str(), stderr);
     }
+
+    // Broadcast to registered ILogSink instances
+    {
+      std::vector<std::shared_ptr<ILogSink>> sinks_snapshot;
+      {
+        std::shared_lock lk(sinks_mu_);
+        sinks_snapshot = sinks_;
+      }
+      for (auto& s : sinks_snapshot) {
+        s->write(event);
+      }
+    }
   }
 
   LogLevel level_{kDefaultLogLevel};
@@ -200,10 +204,12 @@ private:
   std::mutex mu_;
   std::condition_variable cv_;
   std::condition_variable cv_flush_;
-  std::deque<LogEvent> queue_;
+  std::deque<agentos::LogEvent> queue_;
   std::thread worker_;
   bool stop_{false};
   static constexpr size_t kMaxQueueSize = 10000;
+  std::vector<std::shared_ptr<ILogSink>> sinks_;
+  mutable std::shared_mutex sinks_mu_;
 };
 
 // Convenience macros
