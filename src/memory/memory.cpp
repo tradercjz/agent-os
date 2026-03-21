@@ -1,4 +1,5 @@
 #include <agentos/memory/memory.hpp>
+#include <cmath>
 
 #ifndef AGENTOS_NO_DUCKDB
 #include <agentos/memory/duckdb_store.hpp>
@@ -1029,6 +1030,52 @@ bool MemorySystem::consolidate(std::chrono::milliseconds timeout, float importan
       ltm->flush();
   }
   return true; // Completed successfully
+}
+
+// Promotion score: combines importance, frequency bonus, and recency decay
+static float promotion_score(const MemoryEntry& entry) {
+    // Base: importance (0-1)
+    float score = entry.importance;
+
+    // Frequency bonus: log(access_count + 1) * 0.1, capped at 0.3
+    float freq_bonus = std::min(0.3f,
+        std::log1p(static_cast<float>(entry.access_count)) * 0.1f);
+    score += freq_bonus;
+
+    // Recency decay: entries older than 1 hour lose up to 0.2
+    auto age = std::chrono::steady_clock::now() - entry.created_at;
+    auto hours = std::chrono::duration_cast<std::chrono::hours>(age).count();
+    float decay = std::min(0.2f, static_cast<float>(hours) * 0.02f);
+    score -= decay;
+
+    return std::clamp(score, 0.0f, 1.0f);
+}
+
+size_t MemorySystem::smart_consolidate(float l1_threshold, float l2_threshold) {
+    auto entries = working_->get_all();
+    size_t promoted = 0;
+
+    for (auto& entry : entries) {
+        float score = promotion_score(entry);
+
+        if (score >= l2_threshold) {
+            // High score: promote to L2 (long-term memory)
+            (void)long_term_->write(entry);
+            ++promoted;
+        } else if (score >= l1_threshold) {
+            // Moderate score: promote to L1 (short-term memory)
+            (void)short_term_->write(entry);
+            ++promoted;
+        }
+        // Below l1_threshold: stay in L0 (working memory)
+    }
+
+    // Flush LTM index once after batch write
+    if (promoted > 0) {
+        if (auto* ltm = dynamic_cast<LongTermMemory*>(long_term_.get()))
+            ltm->flush();
+    }
+    return promoted;
 }
 
 } // namespace agentos::memory

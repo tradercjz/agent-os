@@ -539,6 +539,10 @@ public:
   // 将工作记忆中的重要内容晋升到长期记忆，返回晋升数量
   size_t consolidate(float importance_threshold = 0.6f);
 
+  // Smart consolidation: L0->L1 for moderate scores, L0->L2 for high scores
+  // Uses promotion_score() which factors in importance, frequency, and recency
+  size_t smart_consolidate(float l1_threshold = 0.4f, float l2_threshold = 0.7f);
+
   // FIX #30: consolidate() with timeout to prevent blocking indefinitely
   bool consolidate(std::chrono::milliseconds timeout, float importance_threshold = 0.6f);
 

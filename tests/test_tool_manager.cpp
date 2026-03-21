@@ -977,3 +977,58 @@ TEST(ParsedArgsTest, GetWithDefault) {
   EXPECT_EQ(args.get("missing"), "");
   EXPECT_EQ(args.get("missing", "default"), "default");
 }
+
+// ════════════════════════════════════════════════════════════════
+// P3 — Shell Sandbox Enhancement Tests
+// ════════════════════════════════════════════════════════════════
+
+TEST(ShellToolTest, TimeoutKillsLongRunningCommand) {
+  ShellTool shell;
+  shell.set_timeout(std::chrono::seconds(1));
+  shell.set_allowed_commands({"sleep"});
+  ParsedArgs args;
+  args.values["cmd"] = "sleep 30";
+  std::stop_source ss;
+  auto result = shell.execute(args, ss.get_token());
+  // Should fail due to timeout, not hang for 30 seconds
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("timed out"), std::string::npos);
+}
+
+TEST(ShellToolTest, CustomAllowlist) {
+  ShellTool shell;
+  shell.set_allowed_commands({"echo"});
+  ParsedArgs args;
+  args.values["cmd"] = "ls /tmp";
+  std::stop_source ss;
+  auto result = shell.execute(args, ss.get_token());
+  EXPECT_FALSE(result.success); // ls not in custom allowlist
+}
+
+TEST(ShellToolTest, WorkingDirectoryRestriction) {
+  ShellTool shell;
+  shell.set_allowed_commands({"pwd"});
+  shell.set_working_directory("/tmp");
+  ParsedArgs args;
+  args.values["cmd"] = "pwd";
+  auto result = shell.execute(args);
+  EXPECT_TRUE(result.success);
+  // Output should show /tmp (or /private/tmp on macOS)
+  EXPECT_TRUE(result.output.find("tmp") != std::string::npos);
+}
+
+TEST(ShellToolTest, EnvironmentSanitized) {
+  ShellTool shell;
+  shell.set_allowed_commands({"env"});
+  ParsedArgs args;
+  args.values["cmd"] = "env";
+  auto result = shell.execute(args);
+  EXPECT_TRUE(result.success);
+  // Should only have PATH, HOME, LANG — not the full parent environment
+  // Count the number of lines (env vars)
+  size_t line_count = 0;
+  for (char c : result.output) {
+    if (c == '\n') ++line_count;
+  }
+  EXPECT_LE(line_count, 5u); // At most a few env vars
+}
