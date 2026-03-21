@@ -3,6 +3,7 @@
 // AgentOS :: Lightweight Logger
 // 零外部依赖的分级日志系统
 // ============================================================
+#include <agentos/core/log_common.hpp>
 #include <agentos/core/types.hpp>
 #include <chrono>
 #include <condition_variable>
@@ -18,25 +19,8 @@
 
 namespace agentos {
 
-enum class LogLevel { Debug = 0, Info = 1, Warn = 2, Error = 3, Off = 4 };
-
-inline const char *log_level_str(LogLevel level) {
-  switch (level) {
-  case LogLevel::Debug: return "DEBUG";
-  case LogLevel::Info:  return "INFO ";
-  case LogLevel::Warn:  return "WARN ";
-  case LogLevel::Error: return "ERROR";
-  default:              return "?????";
-  }
-}
-
 // Custom log sink function signature
 using LogSink = std::function<void(LogLevel, std::string_view)>;
-
-struct LogField {
-  std::string key;
-  std::string value;
-};
 
 class Logger : private NonCopyable {
 public:

@@ -298,6 +298,7 @@ set(TEST_SOURCES
   tests/test_worktree_integration.cpp
   tests/test_mcp.cpp
   tests/test_headless.cpp
+  tests/test_log_sink.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
