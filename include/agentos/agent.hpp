@@ -2,6 +2,7 @@
 // ============================================================
 // AgentOS :: Agent 基类 + AgentOS 系统门面
 // ============================================================
+#include <agentos/core/agent_snapshot.hpp>
 #include <agentos/core/co_executor.hpp>
 #include <agentos/core/hot_config.hpp>
 #include <agentos/core/plugin.hpp>
@@ -488,6 +489,103 @@ public:
     std::lock_guard lk(agents_mu_);
     auto it = agents_.find(id);
     return it != agents_.end() ? it->second : nullptr;
+  }
+
+  // ── Agent Snapshot — Save/Restore Agent State ────────────────
+  Result<AgentSnapshot> snapshot_agent(AgentId id) const {
+    std::shared_ptr<Agent> agent;
+    {
+      std::lock_guard lk(agents_mu_);
+      auto it = agents_.find(id);
+      if (it == agents_.end()) {
+        return make_error(ErrorCode::NotFound,
+                          fmt::format("snapshot_agent: agent {} not found", id));
+      }
+      agent = it->second;
+    }
+
+    AgentSnapshot snap;
+    snap.agent_id = agent->id();
+    snap.name = agent->config().name;
+    snap.role_prompt = agent->config().role_prompt;
+    snap.security_role = agent->config().security_role;
+    snap.context_limit = agent->config().context_limit;
+    snap.allowed_tools = agent->config().allowed_tools;
+
+    // Capture context window messages
+    auto& win = ctx_mgr_->get_window(id, agent->config().context_limit);
+    {
+      std::lock_guard win_lk(win.mu);
+      for (const auto& m : win.messages()) {
+        std::string role_str;
+        switch (m.role) {
+          case kernel::Role::System:    role_str = "system";    break;
+          case kernel::Role::User:      role_str = "user";      break;
+          case kernel::Role::Assistant: role_str = "assistant";  break;
+          case kernel::Role::Tool:      role_str = "tool";      break;
+        }
+        snap.messages.emplace_back(role_str, m.content);
+      }
+    }
+
+    // Capture working memory entries as JSON
+    auto entries = memory_->working().get_all();
+    for (const auto& entry : entries) {
+      nlohmann::json ej;
+      ej["id"] = entry.id;
+      ej["content"] = entry.content;
+      ej["source"] = entry.source;
+      ej["importance"] = entry.importance;
+      ej["type"] = entry.type;
+      snap.memory_entries_json.push_back(ej.dump());
+    }
+
+    return snap;
+  }
+
+  Result<std::shared_ptr<Agent>> restore_agent(const AgentSnapshot& snap) {
+    AgentConfig cfg;
+    cfg.name = snap.name;
+    cfg.role_prompt = snap.role_prompt;
+    cfg.security_role = snap.security_role;
+    cfg.context_limit = snap.context_limit;
+    cfg.allowed_tools = snap.allowed_tools;
+
+    std::shared_ptr<Agent> agent = create_agent<ReActAgent>(cfg);
+
+    // Replay non-system messages into context window
+    // (system prompt is already added by create_agent)
+    for (const auto& [role_str, content] : snap.messages) {
+      if (role_str == "system") continue;  // already added
+      kernel::Role role = kernel::Role::User;
+      if (role_str == "assistant") role = kernel::Role::Assistant;
+      else if (role_str == "tool") role = kernel::Role::Tool;
+
+      kernel::Message msg;
+      msg.role = role;
+      msg.content = content;
+      ctx_mgr_->append(agent->id(), std::move(msg));
+    }
+
+    // Restore working memory entries
+    for (const auto& entry_json : snap.memory_entries_json) {
+      try {
+        auto ej = nlohmann::json::parse(entry_json);
+        memory::MemoryEntry entry;
+        entry.id = ej.value("id", "");
+        entry.content = ej.value("content", "");
+        entry.source = ej.value("source", "");
+        entry.importance = ej.value("importance", 0.5f);
+        entry.type = ej.value("type", "episodic");
+        entry.created_at = now();
+        entry.accessed_at = now();
+        (void)memory_->working().write(std::move(entry));
+      } catch (const nlohmann::json::parse_error&) {
+        // Skip malformed entries
+      }
+    }
+
+    return agent;
   }
 
   // ── 注册工具快捷方法 ──────────────────────────────────────

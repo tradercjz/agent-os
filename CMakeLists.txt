@@ -192,6 +192,7 @@ set(AGENTOS_SOURCES
     src/core/key_loader.cpp
     src/core/plugin.cpp
     src/kernel/vcr_cassette.cpp
+    src/core/agent_snapshot.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -345,6 +346,7 @@ set(TEST_SOURCES
   tests/test_smart_consolidation.cpp
   tests/test_vcr.cpp
   tests/test_plugin.cpp
+  tests/test_agent_snapshot.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
