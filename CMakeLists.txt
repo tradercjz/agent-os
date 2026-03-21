@@ -189,6 +189,7 @@ set(AGENTOS_SOURCES
     src/core/hot_config.cpp
     src/core/co_executor.cpp
     src/core/prometheus.cpp
+    src/core/key_loader.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -338,6 +339,8 @@ set(TEST_SOURCES
   tests/test_anthropic_backend.cpp
   tests/test_llamacpp_backend.cpp
   tests/test_prometheus.cpp
+  tests/test_key_loader.cpp
+  tests/test_smart_consolidation.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target

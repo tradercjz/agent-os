@@ -17,6 +17,7 @@
 
 // ── Core modules ────────────────────────────────────────────
 #include <agentos/agent.hpp>
+#include <agentos/core/key_loader.hpp>
 #include <agentos/kernel/ollama_backend.hpp>
 #include <agentos/kernel/anthropic_backend.hpp>
 #ifdef AGENTOS_ENABLE_LLAMACPP
@@ -228,6 +229,12 @@ public:
     // Apply log level
     if (log_level_) {
       Logger::instance().set_level(*log_level_);
+    }
+
+    // Auto-load API key if not explicitly set (for OpenAI backend)
+    if (backend_type_ == BackendType::OpenAI && api_key_.empty()) {
+      auto loaded = KeyLoader::load("", "OPENAI_API_KEY", "openai");
+      if (loaded.has_value()) api_key_ = *loaded;
     }
 
     // Create backend

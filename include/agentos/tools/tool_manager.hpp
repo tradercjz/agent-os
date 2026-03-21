@@ -292,8 +292,16 @@ public:
 
   ToolResult execute(const ParsedArgs &args, std::stop_token st = {}) override;
 
+  void set_allowed_commands(std::unordered_set<std::string> cmds) {
+    allowed_cmds_ = std::move(cmds);
+  }
+  void set_timeout(std::chrono::seconds timeout) { timeout_ = timeout; }
+  void set_working_directory(std::string dir) { work_dir_ = std::move(dir); }
+
 private:
   std::unordered_set<std::string> allowed_cmds_;
+  std::chrono::seconds timeout_{10};
+  std::string work_dir_;
 };
 
 // HTTP Fetch 工具

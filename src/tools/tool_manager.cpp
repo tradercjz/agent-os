@@ -8,6 +8,9 @@
 #include <poll.h>
 #include <signal.h>
 #include <sstream>
+#ifdef __APPLE__
+#include <crt_externs.h>
+#endif
 
 namespace agentos::tools {
 
@@ -91,6 +94,37 @@ ToolResult ShellTool::execute(const ParsedArgs &args, std::stop_token st) {
     dup2(pipefd[1], STDOUT_FILENO);
     dup2(pipefd[1], STDERR_FILENO);
     close(pipefd[1]);
+
+    // Sanitize environment: clear all, set minimal safe set
+    // Use a static empty environment, then add back only safe vars
+    {
+#ifdef __APPLE__
+      char **envp = *_NSGetEnviron();
+#else
+      extern char **environ;
+      char **envp = environ;
+#endif
+      if (envp) {
+        // Collect all existing var names, then unsetenv each
+        std::vector<std::string> names;
+        for (char **ep = envp; *ep; ++ep) {
+          std::string var(*ep);
+          auto eq = var.find('=');
+          if (eq != std::string::npos)
+            names.push_back(var.substr(0, eq));
+        }
+        for (const auto &n : names) unsetenv(n.c_str());
+      }
+    }
+    setenv("PATH", "/usr/bin:/bin:/usr/local/bin", 1);
+    setenv("HOME", "/tmp", 1);
+    setenv("LANG", "en_US.UTF-8", 1);
+
+    // Change working directory if configured
+    if (!work_dir_.empty()) {
+      if (chdir(work_dir_.c_str()) != 0) _exit(126);
+    }
+
     // Execute without shell: argv[0]=program, argv[1..n]=args, NO shell parsing
     execvp(argv[0], argv.data());
     _exit(127);  // execvp failed
@@ -111,8 +145,11 @@ ToolResult ShellTool::execute(const ParsedArgs &args, std::stop_token st) {
   size_t line_count = 0;
   constexpr size_t kMaxOutputLines = 100;
   bool truncated = false;
+  bool timed_out = false;
   size_t total_bytes = 0;
   constexpr size_t kMaxOutputBytes = 1024 * 100; // 100 KB limit
+
+  auto start_time = std::chrono::steady_clock::now();
 
   ssize_t n;
   struct pollfd pfd;
@@ -126,12 +163,21 @@ ToolResult ShellTool::execute(const ParsedArgs &args, std::stop_token st) {
       break;
     }
 
+    // Check wall-clock timeout
+    auto elapsed = std::chrono::steady_clock::now() - start_time;
+    if (elapsed > timeout_) {
+      kill(pid, SIGKILL);
+      timed_out = true;
+      truncated = true;
+      break;
+    }
+
     int poll_res = poll(&pfd, 1, 100); // 100ms timeout
     if (poll_res < 0) {
       if (errno == EINTR) continue;
       break;
     } else if (poll_res == 0) {
-      // Timeout, check stop_token again
+      // Timeout, check stop_token and wall-clock again
       continue;
     }
 
@@ -167,6 +213,9 @@ ToolResult ShellTool::execute(const ParsedArgs &args, std::stop_token st) {
   waitpid(pid, &status, 0);
   int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
+  if (timed_out) {
+      return ToolResult::fail(fmt::format("Command timed out after {} seconds", timeout_.count()));
+  }
   if (st.stop_requested()) {
       return ToolResult::fail("Tool execution cancelled (timeout or user requested)");
   }
