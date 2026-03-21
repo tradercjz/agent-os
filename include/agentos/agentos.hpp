@@ -185,6 +185,12 @@ public:
     return *this;
   }
 
+  /// Set hot-reload config file path
+  AgentOSBuilder &config_file(std::string path) {
+    config_file_ = std::move(path);
+    return *this;
+  }
+
   /// Build the AgentOS instance
   std::unique_ptr<AgentOS> build() {
     // Apply log level
@@ -214,7 +220,11 @@ public:
           "Call .openai(), .mock(), or .backend() before .build()");
     }
 
-    return std::make_unique<AgentOS>(std::move(be), cfg_);
+    auto os = std::make_unique<AgentOS>(std::move(be), cfg_);
+    if (!config_file_.empty()) {
+      os->configure_hot_reload(config_file_);
+    }
+    return os;
   }
 
   /// Access the underlying config for advanced customization
@@ -231,6 +241,7 @@ private:
 
   AgentOS::Config cfg_;
   std::optional<LogLevel> log_level_;
+  std::string config_file_;
 };
 
 // ─────────────────────────────────────────────────────────────

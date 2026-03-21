@@ -169,6 +169,7 @@ set(AGENTOS_SOURCES
     src/tracing/tracer.cpp
     src/subworkers/runtime.cpp
     src/worktree/worktree_manager.cpp
+    src/core/hot_config.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -301,6 +302,7 @@ set(TEST_SOURCES
   tests/test_headless.cpp
   tests/test_log_sink.cpp
   tests/test_audit_store.cpp
+  tests/test_hot_config.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
