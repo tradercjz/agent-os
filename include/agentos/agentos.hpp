@@ -20,6 +20,7 @@
 #include <agentos/core/key_loader.hpp>
 #include <agentos/kernel/ollama_backend.hpp>
 #include <agentos/kernel/anthropic_backend.hpp>
+#include <agentos/kernel/router_backend.hpp>
 #ifdef AGENTOS_ENABLE_LLAMACPP
 #include <agentos/kernel/llamacpp_backend.hpp>
 #endif
@@ -171,6 +172,13 @@ public:
   /// Use a custom backend
   AgentOSBuilder &backend(std::unique_ptr<kernel::ILLMBackend> b) {
     custom_backend_ = std::move(b);
+    backend_type_ = BackendType::Custom;
+    return *this;
+  }
+
+  /// Use a RouterBackend for multi-model routing
+  AgentOSBuilder &router(std::unique_ptr<kernel::RouterBackend> r) {
+    custom_backend_ = std::move(r);
     backend_type_ = BackendType::Custom;
     return *this;
   }
