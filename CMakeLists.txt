@@ -190,6 +190,7 @@ set(AGENTOS_SOURCES
     src/core/co_executor.cpp
     src/core/prometheus.cpp
     src/core/key_loader.cpp
+    src/core/plugin.cpp
     src/kernel/vcr_cassette.cpp
 )
 
@@ -197,7 +198,7 @@ add_library(agentos STATIC ${AGENTOS_SOURCES})
 target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(agentos PUBLIC ${CMAKE_BINARY_DIR}/include)
 target_include_directories(agentos PUBLIC ${SQLITE3_INCLUDE_DIRS})
-target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_TARGET})
+target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_TARGET} ${CMAKE_DL_LIBS})
 
 if(NOT AGENTOS_NO_DUCKDB)
     target_include_directories(agentos PUBLIC ${DUCKDB_INCLUDE_DIR})
@@ -343,6 +344,7 @@ set(TEST_SOURCES
   tests/test_key_loader.cpp
   tests/test_smart_consolidation.cpp
   tests/test_vcr.cpp
+  tests/test_plugin.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
@@ -428,6 +430,25 @@ if(AGENTOS_BUILD_DOLPHINDB_PLUGIN)
         message(STATUS "  - ${DOLPHINDB_INCLUDE_DIR}/CoreConcept.h exists")
         message(STATUS "  - ${DOLPHINDB_LIB_DIR}/libDolphinDB.so exists")
     endif()
+endif()
+
+# ── Test plugin shared library (for PluginManager tests) ──
+add_library(test_plugin_sample SHARED tests/test_plugin_sample.cpp)
+target_link_libraries(test_plugin_sample PRIVATE agentos)
+target_compile_options(test_plugin_sample PRIVATE
+    -Wno-error=unused-parameter
+)
+
+# ── Python bindings (optional, requires pybind11) ──
+option(AGENTOS_ENABLE_PYTHON "Enable Python bindings via pybind11" OFF)
+if(AGENTOS_ENABLE_PYTHON)
+    find_package(pybind11 REQUIRED)
+    pybind11_add_module(agentos_py bindings/python/agentos_py.cpp)
+    target_link_libraries(agentos_py PRIVATE agentos)
+    target_compile_definitions(agentos_py PRIVATE AGENTOS_ENABLE_PYTHON=1)
+    message(STATUS "Python bindings: ENABLED")
+else()
+    message(STATUS "Python bindings: DISABLED (use -DAGENTOS_ENABLE_PYTHON=ON)")
 endif()
 
 # ── Build info ──
