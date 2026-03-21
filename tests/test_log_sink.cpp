@@ -119,3 +119,44 @@ TEST(JsonFileSinkTest, RotatesOnSizeLimit) {
 
     std::filesystem::remove_all(tmp_dir);
 }
+
+// ── Multi-sink integration via Logger ──
+
+#include <agentos/core/logger.hpp>
+
+TEST(LoggerMultiSinkTest, BroadcastsToAllSinks) {
+    auto& logger = agentos::Logger::instance();
+    logger.set_level(agentos::LogLevel::Info);
+
+    std::string console_out;
+    auto console = std::make_shared<agentos::ConsoleSink>(
+        [&](std::string_view s) { console_out = std::string(s); });
+
+    auto tmp = std::filesystem::temp_directory_path() / "multi_sink_test.jsonl";
+    std::filesystem::remove(tmp);
+    auto json_sink = std::make_shared<agentos::JsonFileSink>(tmp.string());
+
+    logger.clear_sinks();
+    logger.add_sink(console);
+    logger.add_sink(json_sink);
+
+    LOG_INFO("multi-sink test");
+    logger.flush();
+
+    // Console sink received
+    EXPECT_NE(console_out.find("multi-sink test"), std::string::npos);
+
+    // JSON file sink received
+    json_sink->flush();
+    std::ifstream ifs(tmp);
+    std::string line;
+    ASSERT_TRUE(std::getline(ifs, line));
+    auto j = nlohmann::json::parse(line);
+    EXPECT_EQ(j["msg"], "multi-sink test");
+
+    // Cleanup
+    logger.clear_sinks();
+    logger.set_sink(nullptr);
+    logger.set_level(agentos::LogLevel::Warn);
+    std::filesystem::remove(tmp);
+}
