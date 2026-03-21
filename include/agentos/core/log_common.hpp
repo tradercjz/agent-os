@@ -4,7 +4,6 @@
 // Shared enums and structs for the logging subsystem
 // ============================================================
 #include <string>
-#include <vector>
 
 namespace agentos {
 
