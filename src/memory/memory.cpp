@@ -144,6 +144,7 @@ Result<std::string> ShortTermMemory::write(MemoryEntry entry) {
   }
 
   store_[id] = std::move(entry);
+  dirty_ = true;
   return id;
 }
 
@@ -177,6 +178,7 @@ Result<bool> ShortTermMemory::forget(const std::string &id) {
     }
   }
 
+  dirty_ = true;
   return store_.erase(id) > 0;
 }
 
@@ -311,6 +313,169 @@ void ShortTermMemory::compact_hnsw_locked() {
     deleted_label_count_ = old_deleted_count;
     // Do NOT rethrow — compaction is best-effort
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// ShortTermMemory persistence
+// ─────────────────────────────────────────────────────────────
+
+Result<void> ShortTermMemory::save(const std::string& dir) {
+  std::lock_guard lk(mu_);
+  if (!dirty_ || !hnsw_index_) return {};
+
+  fs::create_directories(dir);
+
+  // 1. Save HNSW index
+  std::string hnsw_path = dir + "/stm_hnsw.bin";
+  std::string hnsw_tmp  = hnsw_path + ".tmp";
+  try {
+    hnsw_index_->saveIndex(hnsw_tmp);
+  } catch (const std::exception& e) {
+    return make_error(ErrorCode::MemoryWriteFailed,
+                     fmt::format("HNSW save failed: {}", e.what()));
+  }
+  std::error_code ec;
+  fs::rename(hnsw_tmp, hnsw_path, ec);
+  if (ec) {
+    return make_error(ErrorCode::MemoryWriteFailed,
+                     fmt::format("HNSW rename failed: {}", ec.message()));
+  }
+
+  // 2. Save metadata as JSON Lines
+  std::string meta_path = dir + "/stm_metadata.jsonl";
+  std::string meta_tmp  = meta_path + ".tmp";
+  {
+    std::ofstream ofs(meta_tmp);
+    if (!ofs) {
+      return make_error(ErrorCode::MemoryWriteFailed, "cannot open metadata file");
+    }
+    // First line: header with label_counter and dim
+    nlohmann::json header;
+    header["label_counter"] = label_counter_;
+    header["entry_count"]   = store_.size();
+    header["dim"]           = dim_;
+    ofs << header.dump() << "\n";
+
+    // One line per entry
+    for (const auto& [id, entry] : store_) {
+      nlohmann::json j;
+      j["id"]           = entry.id;
+      j["content"]      = entry.content;
+      j["source"]       = entry.source;
+      j["user_id"]      = entry.user_id;
+      j["agent_id"]     = entry.agent_id;
+      j["session_id"]   = entry.session_id;
+      j["type"]         = entry.type;
+      j["importance"]   = entry.importance;
+      j["access_count"] = entry.access_count;
+      if (auto it = id_to_label_.find(id); it != id_to_label_.end()) {
+        j["hnsw_label"] = it->second;
+      }
+      ofs << j.dump() << "\n";
+    }
+    if (!ofs.good()) {
+      return make_error(ErrorCode::MemoryWriteFailed, "metadata write failed");
+    }
+  }
+  fs::rename(meta_tmp, meta_path, ec);
+  if (ec) {
+    return make_error(ErrorCode::MemoryWriteFailed,
+                     fmt::format("metadata rename failed: {}", ec.message()));
+  }
+
+  dirty_ = false;
+  return {};
+}
+
+Result<void> ShortTermMemory::load(const std::string& dir) {
+  std::lock_guard lk(mu_);
+
+  std::string hnsw_path = dir + "/stm_hnsw.bin";
+  std::string meta_path = dir + "/stm_metadata.jsonl";
+
+  if (!fs::exists(hnsw_path) || !fs::exists(meta_path)) {
+    return {}; // Fresh start
+  }
+
+  // 1. Read metadata header first (need dim before loading HNSW)
+  std::ifstream ifs(meta_path);
+  if (!ifs) {
+    return make_error(ErrorCode::MemoryReadFailed, "cannot open metadata file");
+  }
+
+  std::string line;
+  if (!std::getline(ifs, line)) {
+    return make_error(ErrorCode::MemoryReadFailed, "empty metadata file");
+  }
+  nlohmann::json header;
+  try {
+    header = nlohmann::json::parse(line);
+  } catch (const nlohmann::json::parse_error& e) {
+    return make_error(ErrorCode::MemoryReadFailed,
+                     fmt::format("metadata header parse failed: {}", e.what()));
+  }
+  label_counter_ = header.value("label_counter", hnswlib::labeltype{0});
+  dim_ = header.value("dim", size_t{0});
+
+  if (dim_ == 0) {
+    return make_error(ErrorCode::MemoryReadFailed, "invalid dim in metadata header");
+  }
+
+  // 2. Recreate space and load HNSW index
+  space_ = std::make_unique<hnswlib::InnerProductSpace>(dim_);
+  try {
+    hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+        space_.get(), hnsw_path);
+  } catch (const std::exception& e) {
+    hnsw_index_.reset();
+    space_.reset();
+    return make_error(ErrorCode::MemoryReadFailed,
+                     fmt::format("HNSW load failed: {}", e.what()));
+  }
+
+  // 3. Load entry metadata
+  store_.clear();
+  id_to_label_.clear();
+  label_to_id_.clear();
+
+  while (std::getline(ifs, line)) {
+    if (line.empty()) continue;
+    nlohmann::json j;
+    try {
+      j = nlohmann::json::parse(line);
+    } catch (const nlohmann::json::parse_error& e) {
+      return make_error(ErrorCode::MemoryReadFailed,
+                       fmt::format("metadata entry parse failed: {}", e.what()));
+    }
+    MemoryEntry entry;
+    entry.id         = j.value("id", "");
+    entry.content    = j.value("content", "");
+    entry.source     = j.value("source", "");
+    entry.user_id    = j.value("user_id", "");
+    entry.agent_id   = j.value("agent_id", std::string{});
+    entry.session_id = j.value("session_id", "");
+    entry.type       = j.value("type", "episodic");
+    entry.importance = j.value("importance", 0.0f);
+    entry.access_count = j.value("access_count", 0u);
+
+    if (j.contains("hnsw_label")) {
+      hnswlib::labeltype label = j["hnsw_label"].get<hnswlib::labeltype>();
+      id_to_label_[entry.id] = label;
+      label_to_id_[label]    = entry.id;
+
+      // Retrieve embedding from HNSW index
+      try {
+        entry.embedding = hnsw_index_->getDataByLabel<float>(label);
+      } catch (const std::exception&) {
+        // Label not found in HNSW — skip embedding recovery
+      }
+    }
+
+    store_[entry.id] = std::move(entry);
+  }
+
+  dirty_ = false;
+  return {};
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -708,6 +873,7 @@ MemorySystem::MemorySystem(fs::path ltm_dir, LTMBackend backend)
   if (ltm_dir.empty()) {
     ltm_dir = fs::temp_directory_path() / "agentos_ltm";
   }
+  ltm_dir_ = ltm_dir;
   // 根据后端类型创建 LTM（都实现 IMemoryStore 接口，可热切换）
 #ifndef AGENTOS_NO_DUCKDB
   if (backend == LTMBackend::DuckDB) {
@@ -723,6 +889,7 @@ MemorySystem::MemorySystem(fs::path ltm_dir, LTMBackend backend)
     (void)backend;  // suppress unused warning when both disabled
     long_term_ = std::make_unique<LongTermMemory>(std::move(ltm_dir));
   }
+  load_indexes();
 }
 
 Result<std::string> MemorySystem::remember(std::string content, const Embedding &emb,

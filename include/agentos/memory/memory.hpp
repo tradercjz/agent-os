@@ -9,6 +9,7 @@
 #include <chrono>
 #include <concepts>
 #include <filesystem>
+#include <fstream>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -234,6 +235,12 @@ public:
   }
   std::string name() const noexcept override { return "ShortTermMemory"; }
 
+  /// Persist HNSW index + metadata to disk (atomic write via temp+rename)
+  [[nodiscard]] Result<void> save(const std::string& dir);
+
+  /// Load HNSW index + metadata from disk (missing files = fresh start)
+  [[nodiscard]] Result<void> load(const std::string& dir);
+
 private:
   mutable std::mutex mu_;
   std::unordered_map<std::string, MemoryEntry> store_;
@@ -249,6 +256,7 @@ private:
   std::unordered_map<std::string, hnswlib::labeltype> id_to_label_;
   std::unordered_map<hnswlib::labeltype, std::string> label_to_id_;
   bool compacting_{false}; // FIX #11: guards against reentrant compaction
+  bool dirty_{false};      // Track whether save() is needed
 
   // Rebuild HNSW index with only live entries (caller must hold mu_)
   void compact_hnsw_locked();
@@ -452,12 +460,17 @@ public:
   explicit MemorySystem(fs::path ltm_dir = "",
                         LTMBackend backend = LTMBackend::FileBased);
 
+  ~MemorySystem() { save_indexes(); }
+
   // 高级构造：注入自定义 LTM 后端（如 SQLiteLongTermMemory）
   MemorySystem(fs::path ltm_dir, std::unique_ptr<IMemoryStore> custom_ltm)
       : working_(std::make_unique<WorkingMemory>(32)),
         short_term_(std::make_unique<ShortTermMemory>(512)),
         long_term_(std::move(custom_ltm)),
-        graph_(std::make_unique<LocalGraphMemory>(std::move(ltm_dir))) {}
+        graph_(std::make_unique<LocalGraphMemory>(ltm_dir)),
+        ltm_dir_(std::move(ltm_dir)) {
+    load_indexes();
+  }
 
   // 运行时切换 LTM 后端
   void set_long_term_store(std::unique_ptr<IMemoryStore> store) {
@@ -538,11 +551,28 @@ public:
   IGraphMemory &graph() { return *graph_; }
   const IGraphMemory &graph() const { return *graph_; }
 
+  /// Persist STM HNSW index to ltm_dir_
+  void save_indexes() {
+    if (ltm_dir_.empty()) return;
+    try {
+      (void)short_term_->save(ltm_dir_.string());
+    } catch (const std::exception& e) {
+      LOG_WARN(fmt::format("MemorySystem: save_indexes failed: {}", e.what()));
+    }
+  }
+
+  /// Load STM HNSW index from ltm_dir_
+  void load_indexes() {
+    if (ltm_dir_.empty()) return;
+    (void)short_term_->load(ltm_dir_.string());
+  }
+
 private:
   std::unique_ptr<WorkingMemory> working_;
   std::unique_ptr<ShortTermMemory> short_term_;
   std::unique_ptr<IMemoryStore> long_term_;
   std::unique_ptr<IGraphMemory> graph_;
+  fs::path ltm_dir_;
 };
 
 } // namespace agentos::memory
