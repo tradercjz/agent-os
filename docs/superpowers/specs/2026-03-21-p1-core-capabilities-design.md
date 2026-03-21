@@ -36,23 +36,25 @@ public:
     T await_resume();
 
     // Blocking bridge for non-coroutine callers
-    T get();
+    T run();   // NOTE: existing task.hpp uses run(), not get()
 
     // Check if result is ready
-    bool is_ready() const noexcept;
+    bool done() const noexcept;  // NOTE: existing task.hpp uses done(), not is_ready()
 };
 
-// Void specialization
+// Void specialization — already implemented in task.hpp
 template<>
-class Task<void> { ... };
+class Task<void> { /* ... already exists ... */ };
 
 } // namespace agentos
 ```
 
+**Note:** `Task<T>` and `Task<void>` already exist in `include/agentos/core/task.hpp` with `run()` and `done()` methods. No new implementation needed — only the `CoExecutor` and async wrappers are new.
+
 **Key design decisions:**
 - `promise_type` stores `Result<T>` for the return value or exception
-- Lazy start: coroutine doesn't run until awaited or `get()` called
-- `get()` blocks current thread (bridge for existing synchronous API)
+- Lazy start: coroutine doesn't run until awaited or `run()` called
+- `run()` blocks current thread (bridge for existing synchronous API)
 - `await_suspend` stores the continuation and resumes it when value is ready
 
 #### 1.2 CoExecutor — Simple Coroutine Scheduler
@@ -88,6 +90,10 @@ private:
 
 A simple thread-pool-based executor that runs ready coroutines. Not a full async I/O runtime — just dispatches coroutine continuations.
 
+**Lifetime:** `CoExecutor` is owned by `AgentOS` as a member. Initialized after `Scheduler`, stopped during `graceful_shutdown()` before scheduler shutdown. The executor uses a separate thread pool from the scheduler (default 2 threads) to avoid contention with task scheduling.
+
+**Threading model:** `infer_async()` dispatches the coroutine onto the `CoExecutor` thread pool. Each coroutine blocks its executor thread during curl I/O (same as current `infer()`). The benefit is that callers can `co_await` without occupying a scheduler thread — the scheduler threads remain free for task dispatch. True non-blocking I/O via `curl_multi` is deferred to a future iteration.
+
 #### 1.3 Async LLM Inference
 
 ```cpp
@@ -109,17 +115,20 @@ Task<std::string> run_co(const std::string& input);
 
 The ReAct loop becomes:
 ```cpp
-Task<std::string> ReActAgent::run_co(const std::string& input) {
+Task<Result<std::string>> ReActAgent::run_co(const std::string& input) {
     for (int step = 0; step < max_steps_; ++step) {
         auto response = co_await os_->kernel().infer_async(req);
-        if (response.has_value() && response->wants_tool_call()) {
+        if (!response.has_value()) {
+            co_return make_error(response.error().code, response.error().message);
+        }
+        if (response->wants_tool_call()) {
             auto tool_result = dispatch_tool(response->tool_calls);
             // ... add tool result to context ...
         } else {
             co_return response->content;
         }
     }
-    co_return "max steps reached";
+    co_return make_error(ErrorCode::Timeout, "max steps reached");
 }
 ```
 
@@ -180,9 +189,11 @@ private:
 **API differences from OpenAI:**
 - Endpoint: `/api/chat` (not `/v1/chat/completions`)
 - No auth header needed (local)
-- Response format slightly different: `message.content` directly (no `choices` array)
-- Embedding endpoint: `/api/embeddings` (not `/v1/embeddings`)
-- Streaming: NDJSON (not SSE `data:` prefix)
+- Response: `{"message": {"role": "assistant", "content": "..."}, "done": true, "eval_count": N, "prompt_eval_count": M}` — no `choices` array
+- Token usage: `eval_count` → completion_tokens, `prompt_eval_count` → prompt_tokens
+- Tool calling (Ollama 0.3+): `message.tool_calls` array (similar to OpenAI format), `done_reason: "stop"`
+- Embedding endpoint: `/api/embed` (not `/api/embeddings` — singular is current, plural is deprecated)
+- Streaming: NDJSON (newline-delimited JSON, not SSE `data:` prefix) — each line is a complete JSON object
 
 **Implementation:** Extract shared curl helpers (`http_post`, `CurlHandle`, `CurlHeaders`) from `llm_kernel.cpp` into `src/kernel/http_client.cpp`. Both OpenAI and Ollama backends reuse them.
 
@@ -210,12 +221,21 @@ private:
 
 **API differences from OpenAI:**
 - Auth: `x-api-key` header (not `Authorization: Bearer`)
-- Version header: `anthropic-version: 2023-06-01`
+- Version header: `anthropic-version: 2024-10-22` (configurable, use latest stable)
 - System prompt: separate `system` field (not a message with role "system")
 - Request body: `{ model, max_tokens, system, messages: [{role, content}] }`
-- Response: `{ content: [{type: "text", text: "..."}], usage: {input_tokens, output_tokens} }`
-- Tool use: `content: [{type: "tool_use", id, name, input}]` — different structure from OpenAI
-- Streaming: SSE with event types `content_block_delta`, `message_delta`, etc.
+- Response: `{ content: [{type: "text", text: "..."}], stop_reason, usage: {input_tokens, output_tokens} }`
+- Streaming: SSE with event types `content_block_start`, `content_block_delta`, `message_delta`
+
+**Tool use mapping to ToolCallRequest:**
+- Anthropic returns `content: [{type: "text", text: "..."}, {type: "tool_use", id, name, input: {...}}]`
+- `text` blocks → concatenate into `LLMResponse::content`
+- `tool_use` blocks → map to `ToolCallRequest{.id = id, .name = name, .args_json = input.dump()}`
+  - Note: Anthropic's `input` is a JSON object, must be serialized to string for `args_json`
+- `stop_reason: "end_turn"` with `tool_use` blocks present → map to `finish_reason = "tool_calls"` for compatibility with existing `wants_tool_call()` logic
+- Tool results sent back as: `{role: "user", content: [{type: "tool_result", tool_use_id, content: "..."}]}`
+
+**Embedding limitation:** Anthropic has no embedding API. `embed()` returns default error. If users need embeddings with Anthropic chat, they should configure a separate embedding backend (e.g., OpenAI) — future multi-backend support. For P1, this is documented as a known limitation.
 
 ### 2.3 LlamaCppBackend
 
@@ -249,9 +269,11 @@ private:
 
 **Build integration:**
 - Optional: `cmake -DAGENTOS_ENABLE_LLAMACPP=ON`
-- FetchContent from `https://github.com/ggerganov/llama.cpp`
+- FetchContent from `https://github.com/ggerganov/llama.cpp` with `BUILD_SHARED_LIBS OFF`, only link `llama` target
 - Compile-guarded with `#ifdef AGENTOS_ENABLE_LLAMACPP`
 - Pimpl pattern to isolate llama.h headers from public API
+
+**Thread safety:** `llama_context` is NOT thread-safe for concurrent inference. `Impl` holds a `std::mutex` and serializes all `complete()`/`stream()`/`embed()` calls. Consistent with project's `std::lock_guard` pattern.
 
 ### 2.4 AgentOSBuilder Integration
 
@@ -280,11 +302,16 @@ struct HttpResponse {
 
 class HttpClient {
 public:
-    HttpClient();
+    HttpClient();  // calls curl_global_init via std::once_flag
+
     Result<HttpResponse> post(const std::string& url,
                               const std::string& body,
                               const std::vector<std::string>& headers,
                               int timeout_sec = 60);
+
+    // on_data delivers raw bytes — each backend handles its own framing:
+    //   OpenAI/Anthropic: SSE parsing (data: prefix)
+    //   Ollama: NDJSON parsing (one JSON per line)
     Result<HttpResponse> post_stream(const std::string& url,
                                      const std::string& body,
                                      const std::vector<std::string>& headers,
@@ -293,6 +320,13 @@ public:
 };
 
 } // namespace agentos::kernel
+```
+
+**Design notes:**
+- `HttpClient` constructor uses `static std::once_flag` for `curl_global_init()` — safe for multi-instance
+- SSE/NDJSON framing is NOT in `HttpClient` — each backend handles its own protocol
+- Timeout is configurable per-call (llama.cpp local inference may need longer)
+- RAII `CurlHandle` and `CurlHeaders` extracted from `llm_kernel.cpp` anonymous namespace
 ```
 
 ### 2.6 Files
@@ -310,9 +344,11 @@ public:
 | `src/kernel/llm_kernel.cpp` | **Modify** — extract HTTP helpers, use HttpClient |
 | `include/agentos/agentos.hpp` | **Modify** — add builder methods |
 | `CMakeLists.txt` | **Modify** — add sources, optional llama.cpp |
-| `tests/test_ollama_backend.cpp` | **New** — Ollama backend tests (mock HTTP) |
-| `tests/test_anthropic_backend.cpp` | **New** — Anthropic backend tests (mock HTTP) |
-| `tests/test_llamacpp_backend.cpp` | **New** — llama.cpp backend tests (conditional) |
+| `tests/test_ollama_backend.cpp` | **New** — Ollama tests: JSON serialization/parsing with injectable HttpClient |
+| `tests/test_anthropic_backend.cpp` | **New** — Anthropic tests: message format, tool use mapping, with injectable HttpClient |
+| `tests/test_llamacpp_backend.cpp` | **New** — llama.cpp tests (conditional `#ifdef AGENTOS_ENABLE_LLAMACPP`) |
+
+**Test strategy:** `HttpClient` is passed as constructor parameter to each backend, allowing injection of a mock that returns canned responses. Tests verify JSON request building and response parsing without network access.
 
 ---
 
@@ -328,19 +364,33 @@ public:
 
 #### 3.1 ShortTermMemory Persistence
 
-Add to `ShortTermMemory`:
-```cpp
-    // Save HNSW index to file
-    Result<void> save_index(const std::string& path);
+Add `dir` parameter to `ShortTermMemory` constructor for persistence path:
 
-    // Load HNSW index from file (call before any search)
-    Result<void> load_index(const std::string& path);
+```cpp
+    explicit ShortTermMemory(size_t capacity = 512,
+                             const std::string& persist_dir = "");
+
+    // Save HNSW index + metadata to disk
+    Result<void> save(const std::string& dir);
+
+    // Load HNSW index + metadata from disk
+    Result<void> load(const std::string& dir);
 ```
 
+**Two files are persisted:**
+1. `{dir}/stm_hnsw.bin` — HNSW graph + vectors via `saveIndex()`/`loadIndex()`
+2. `{dir}/stm_metadata.bin` — application-level metadata:
+   - `store_` map (all `MemoryEntry` objects, serialized as JSON Lines)
+   - `id_to_label_` / `label_to_id_` bidirectional maps
+   - `label_counter_` value
+
+**Why two files:** `hnswlib::saveIndex()` only stores the graph structure and vectors. It does NOT store string IDs, importance scores, tags, or other `MemoryEntry` fields. Without the metadata file, loaded vectors cannot be mapped back to entries.
+
 Implementation:
-- `save_index()`: `hnsw_index_->saveIndex(path)` wrapped in try-catch for hnswlib exceptions
-- `load_index()`: `hnsw_index_->loadIndex(path, max_elements)`, then rebuild `id_to_label` / `label_to_id` maps from stored entries
-- Path convention: `{data_dir}/stm_hnsw.bin`
+- `save()`: holds `mu_` lock, saves HNSW to temp file + rename (disk-full safety), then writes metadata. `noexcept`-safe for destructor use (errors logged, not thrown).
+- `load()`: holds `mu_` lock, loads HNSW then metadata. Rebuilds `id_to_label_`/`label_to_id_` maps. If files don't exist, silently starts with empty index.
+- Thread safety: both `save()` and `load()` acquire `mu_` to prevent concurrent modification.
+- Dirty flag: `dirty_` bool tracks whether save is needed (set on write/forget, cleared on save).
 
 #### 3.2 MemorySystem Integration
 
@@ -355,8 +405,10 @@ public:
 };
 ```
 
+- `MemorySystem` constructor passes `ltm_dir` to `ShortTermMemory` for persistence
 - `MemorySystem` constructor calls `load_indexes(ltm_dir_)` after creating L1/L2
-- `MemorySystem` destructor / `flush()` calls `save_indexes(ltm_dir_)`
+- `MemorySystem` destructor calls `save_indexes(ltm_dir_)` — `noexcept`, errors logged not thrown
+- `MemorySystem::flush()` also calls `save_indexes()` for explicit save
 - `LongTermMemory` already has partial persistence — extend to use consistent path convention
 
 #### 3.3 Files
