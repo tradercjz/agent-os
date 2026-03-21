@@ -169,7 +169,11 @@ endif()
 
 # ---- Library sources ----
 set(AGENTOS_SOURCES
+    src/kernel/http_client.cpp
     src/kernel/llm_kernel.cpp
+    src/kernel/ollama_backend.cpp
+    src/kernel/anthropic_backend.cpp
+    src/kernel/llamacpp_backend.cpp
     src/scheduler/scheduler.cpp
     src/context/context.cpp
     src/memory/memory.cpp
@@ -183,6 +187,7 @@ set(AGENTOS_SOURCES
     src/subworkers/runtime.cpp
     src/worktree/worktree_manager.cpp
     src/core/hot_config.cpp
+    src/core/co_executor.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -219,6 +224,15 @@ if(AGENTOS_ENABLE_JIEBA)
         AGENTOS_ENABLE_JIEBA=1
         CPPJIEBA_DICT_DIR="${cppjieba_SOURCE_DIR}/dict"
     )
+endif()
+
+# ---- llama.cpp (optional) ----
+option(AGENTOS_ENABLE_LLAMACPP "Enable llama.cpp local inference backend" OFF)
+if(AGENTOS_ENABLE_LLAMACPP)
+    message(STATUS "llama.cpp backend: ENABLED")
+    target_compile_definitions(agentos PUBLIC AGENTOS_ENABLE_LLAMACPP=1)
+else()
+    message(STATUS "llama.cpp backend: DISABLED (use -DAGENTOS_ENABLE_LLAMACPP=ON)")
 endif()
 
 # ---- Examples ----
@@ -316,6 +330,12 @@ set(TEST_SOURCES
   tests/test_log_sink.cpp
   tests/test_audit_store.cpp
   tests/test_hot_config.cpp
+  tests/test_coroutine.cpp
+  tests/test_hnsw_persistence.cpp
+  tests/test_http_client.cpp
+  tests/test_ollama_backend.cpp
+  tests/test_anthropic_backend.cpp
+  tests/test_llamacpp_backend.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target

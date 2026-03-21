@@ -2,6 +2,7 @@
 // ============================================================
 // AgentOS :: Agent 基类 + AgentOS 系统门面
 // ============================================================
+#include <agentos/core/co_executor.hpp>
 #include <agentos/core/hot_config.hpp>
 #include <agentos/bus/agent_bus.hpp>
 #include <agentos/bus/sqlite_audit_store.hpp>
@@ -354,11 +355,13 @@ public:
     worktree_mgr_ = std::make_unique<worktree::WorktreeManager>(
         worktree::WorktreeConfig{config_.repo_root, config_.worktree_base,
                                   config_.max_worktrees});
+    co_executor_ = std::make_unique<CoExecutor>(2);
     scheduler_->start();
   }
 
   ~AgentOS() {
     os_alive_->store(false, std::memory_order_release);
+    if (co_executor_) co_executor_->stop();
     consolidator_->stop();
     scheduler_->shutdown();
   }
@@ -462,6 +465,7 @@ public:
   tracing::Tracer &tracer() { return *tracer_; }
   tools::ToolLearner &tool_learner() { return *tool_learner_; }
   worktree::WorktreeManager &worktree_mgr() { return *worktree_mgr_; }
+  CoExecutor& co_executor() { return *co_executor_; }
   const Config& config() const { return config_; }
 
   // ── Agent 数量查询 ──────────────────────────────────────
@@ -580,6 +584,7 @@ private:
   std::unique_ptr<tracing::Tracer> tracer_;
   std::unique_ptr<tools::ToolLearner> tool_learner_;
   std::unique_ptr<worktree::WorktreeManager> worktree_mgr_;
+  std::unique_ptr<CoExecutor> co_executor_;
   std::unique_ptr<HotConfig> hot_config_;
   std::shared_ptr<std::atomic<bool>> os_alive_ = std::make_shared<std::atomic<bool>>(true);
 

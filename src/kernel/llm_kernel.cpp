@@ -1,76 +1,22 @@
 #include <agentos/kernel/llm_kernel.hpp>
+#include <agentos/kernel/http_client.hpp>
 #include <algorithm>
-#include <curl/curl.h>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
 // ============================================================
-// 文件局部 RAII 辅助类（libcurl 资源管理）
+// SSE streaming context (OpenAI-specific)
 // ============================================================
 
 namespace {
 
-/// RAII wrapper for CURL* easy handle
-struct CurlHandle {
-  CURL *handle = nullptr;
-  char errbuf[CURL_ERROR_SIZE] = {};
-
-  CurlHandle() : handle(curl_easy_init()) {
-    if (handle) {
-      curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, errbuf);
-      curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L); // 多线程安全
-      curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L); // TLS peer verification
-      curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L); // hostname verification
-    }
-  }
-  ~CurlHandle() {
-    if (handle)
-      curl_easy_cleanup(handle);
-  }
-
-  CurlHandle(const CurlHandle &) = delete;
-  CurlHandle &operator=(const CurlHandle &) = delete;
-
-  explicit operator bool() const { return handle != nullptr; }
-  CURL *get() const { return handle; }
-};
-
-/// RAII wrapper for curl_slist* header list
-struct CurlHeaders {
-  curl_slist *list = nullptr;
-
-  CurlHeaders() = default;
-
-  void append(const char *header) {
-    list = curl_slist_append(list, header);
-  }
-  ~CurlHeaders() {
-    if (list)
-      curl_slist_free_all(list);
-  }
-
-  CurlHeaders(const CurlHeaders &) = delete;
-  CurlHeaders &operator=(const CurlHeaders &) = delete;
-};
-
-/// 标准 write callback：将响应数据追加到 std::string
-size_t write_string_callback(void *contents, size_t size, size_t nmemb,
-                              void *userp) {
-  auto *buf = static_cast<std::string *>(userp);
-  size_t total = size * nmemb;
-  buf->append(static_cast<char *>(contents), total);
-  return total;
-}
-
-// ── SSE 流式回调上下文 ──────────────────────────────────────
-
 struct StreamContext {
   agentos::kernel::ILLMBackend::TokenCallback token_cb;
   agentos::kernel::LLMResponse *response;
-  std::string line_buffer; // 行缓冲（处理 SSE 分块到达）
+  std::string line_buffer; // line buffer for SSE chunked delivery
 
-  // 工具调用累积状态
+  // Tool call accumulation state
   std::string current_tool_id;
   std::string current_tool_name;
   std::string current_tool_args;
@@ -80,11 +26,9 @@ struct StreamContext {
   bool stream_done{false};  // Set true when "data: [DONE]" is received
 
   // Synchronization for response modification
-  // Note: libcurl's easy interface is sequential, not truly async, but we add
-  // proper synchronization for correctness and thread-safety.
   std::mutex response_mu;
 
-  /// 处理一行完整的 SSE 数据
+  /// Process a complete SSE data line
   void process_sse_line(std::string_view line) {
     using namespace agentos;
     using namespace agentos::kernel;
@@ -107,11 +51,11 @@ struct StreamContext {
 
       auto &choice = j["choices"][0];
 
-      // 解析 delta 内容
+      // Parse delta content
       if (choice.contains("delta")) {
         auto &delta = choice["delta"];
 
-        // 文本内容
+        // Text content
         if (delta.contains("content") && delta["content"].is_string()) {
           std::string text = delta["content"].get<std::string>();
           if (token_cb)
@@ -122,7 +66,7 @@ struct StreamContext {
           }
         }
 
-        // 工具调用（增量式）
+        // Tool calls (incremental)
         if (delta.contains("tool_calls") && delta["tool_calls"].is_array() &&
             !delta["tool_calls"].empty()) {
           auto &tc = delta["tool_calls"][0];
@@ -155,14 +99,13 @@ struct StreamContext {
             std::lock_guard lk(response_mu);
             response->tool_calls.push_back(std::move(tcr));
           }
-          // 重置累積状態（支持多個 tool call）
           current_tool_id.clear();
           current_tool_name.clear();
           current_tool_args.clear();
         }
       }
 
-      // usage（stream_options.include_usage=true 时返回）
+      // usage (returned when stream_options.include_usage=true)
       if (j.contains("usage")) {
         auto &usage = j["usage"];
         if (usage.contains("prompt_tokens") &&
@@ -182,13 +125,9 @@ struct StreamContext {
   }
 };
 
-/// SSE 流式 write callback：行缓冲 + 逐行处理
-size_t stream_write_callback(void *contents, size_t size, size_t nmemb,
-                              void *userp) {
-  auto *ctx = static_cast<StreamContext *>(userp);
-  if (nmemb != 0 && size > (SIZE_MAX / nmemb)) return 0;  // abort curl transfer
-  size_t total = size * nmemb;
-
+/// SSE streaming write callback: line-buffered processing.
+/// Returns chunk size to the HttpClient's on_data callback.
+size_t sse_line_callback(const char *contents, size_t total, StreamContext *ctx) {
   // Safety: cap line buffer at 1 MiB to prevent DoS via no-newline streams
   constexpr size_t MAX_LINE_BUFFER = 1024 * 1024;
   {
@@ -200,15 +139,15 @@ size_t stream_write_callback(void *contents, size_t size, size_t nmemb,
     }
   }
 
-  ctx->line_buffer.append(static_cast<char *>(contents), total);
+  ctx->line_buffer.append(contents, total);
 
-  // 处理所有完整行
+  // Process all complete lines
   size_t pos;
   while ((pos = ctx->line_buffer.find('\n')) != std::string::npos) {
     std::string line = ctx->line_buffer.substr(0, pos);
     ctx->line_buffer.erase(0, pos + 1);
 
-    // 去除 \r
+    // Strip \r
     if (!line.empty() && line.back() == '\r')
       line.pop_back();
     if (line.empty())
@@ -216,7 +155,7 @@ size_t stream_write_callback(void *contents, size_t size, size_t nmemb,
 
     ctx->process_sse_line(line);
     if (ctx->done)
-      return total; // 收到 [DONE]，让 curl 结束
+      return total; // Received [DONE], let curl finish
   }
 
   return total;
@@ -256,7 +195,7 @@ static std::string redact_auth(const std::string &msg) {
 } // anonymous namespace
 
 // ============================================================
-// OpenAIBackend 实现
+// OpenAIBackend implementation
 // ============================================================
 
 namespace agentos::kernel {
@@ -392,67 +331,42 @@ OpenAIBackend::parse_response(const std::string &json_str) const {
   return resp;
 }
 
-// ── http_post: 使用 libcurl C API（替代 popen）──────────────
+// ── http_post: now delegates to HttpClient ──────────────────
 
 Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
                                              const std::string &body) const {
-  CurlHandle curl;
-  if (!curl)
-    return make_error(ErrorCode::LLMBackendError, "Failed to init libcurl");
-
   std::string url = base_url_ + endpoint;
-  std::string response_body;
 
-  // 构建 HTTP 头
-  CurlHeaders headers;
-  headers.append("Content-Type: application/json");
-  std::string auth_header = "Authorization: Bearer " + api_key_;
-  headers.append(auth_header.c_str());
+  // Build HTTP headers
+  std::vector<std::string> headers;
+  headers.emplace_back("Content-Type: application/json");
+  headers.emplace_back("Authorization: Bearer " + api_key_);
 
-  // 配置 curl 选项
-  curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.list);
-  curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.c_str());
-  curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE,
-                   static_cast<long>(body.size()));
-  curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, write_string_callback);
-  curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response_body);
-  curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 60L);
-  curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 10L);
-  curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 5L);  // Prevent redirect loops
-
-  // 执行请求
-  CURLcode res = curl_easy_perform(curl.get());
-  if (res != CURLE_OK) {
+  auto result = http_client_.post(url, body, headers, 60);
+  if (!result) {
     // R7-16: Redact sensitive data from error messages
-    return make_error(
-        ErrorCode::LLMBackendError,
-        fmt::format("HTTP request failed: {} ({})", redact_auth(curl.errbuf),
-                    curl_easy_strerror(res)));
+    return make_error(result.error().code,
+                      redact_auth(result.error().message));
   }
 
-  // 检查 HTTP 状态码
-  long http_code = 0;
-  curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_code);
+  long http_code = result->status_code;
 
   if (http_code == 401) {
     return make_error(ErrorCode::LLMBackendError,
         "OpenAI API: authentication failed (check API key)");
   } else if (http_code == 429) {
-    // R7-16: Redact sensitive data from error messages
     return make_error(ErrorCode::RateLimitExceeded,
         fmt::format("OpenAI API: rate limited (HTTP 429): {}",
-                    redact_auth(response_body.substr(0, 500))));
+                    redact_auth(result->body.substr(0, 500))));
   } else if (http_code >= 500 && http_code < 600) {
-    // R7-16: Redact sensitive data from error messages
     return make_error(ErrorCode::LLMBackendError,
         fmt::format("OpenAI API: server error (HTTP {}): {}",
-                    http_code, redact_auth(response_body.substr(0, 500))));
+                    http_code, redact_auth(result->body.substr(0, 500))));
   } else if (http_code >= 400) {
     // Parse API error response for better error messages
     std::string error_msg;
     try {
-      Json err_json = Json::parse(response_body);
+      Json err_json = Json::parse(result->body);
       if (err_json.contains("error") && err_json["error"].is_object()) {
         auto &err_obj = err_json["error"];
         if (err_obj.contains("message") && err_obj["message"].is_string())
@@ -461,18 +375,17 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
     } catch (...) { /* not JSON, use raw body */ }
 
     if (error_msg.empty())
-      error_msg = response_body.substr(0, 500); // Truncate long error bodies
+      error_msg = result->body.substr(0, 500);
 
-    // R7-16: Redact sensitive data from error messages
     return make_error(ErrorCode::LLMBackendError,
         fmt::format("OpenAI API: unexpected status (HTTP {}): {}",
                     http_code, redact_auth(error_msg)));
   }
 
-  return response_body;
+  return result->body;
 }
 
-// ── complete: 同步推理 ─────────────────────────────────────
+// ── complete: synchronous inference ─────────────────────────
 
 Result<LLMResponse> OpenAIBackend::complete(const LLMRequest &req) {
   // Auto-generate request_id for tracing if not provided
@@ -495,11 +408,11 @@ Result<LLMResponse> OpenAIBackend::complete(const LLMRequest &req) {
   return parse_response(*http_result);
 }
 
-// ── stream: SSE 流式推理（libcurl + 行缓冲回调）────────────
+// ── stream: SSE streaming inference ─────────────────────────
 
 Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
                                           TokenCallback cb) {
-  // 构建请求体，注入 stream 标志（通过 JSON 库安全修改）
+  // Build request body with stream flag
   std::string body;
   try {
     Json j = Json::parse(build_request_json(req));
@@ -511,16 +424,11 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
                       fmt::format("Failed to build stream request: {}", e.what()));
   }
 
-  CurlHandle curl;
-  if (!curl)
-    return make_error(ErrorCode::LLMBackendError, "Failed to init libcurl");
-
   std::string url = base_url_ + "/chat/completions";
 
-  CurlHeaders headers;
-  headers.append("Content-Type: application/json");
-  std::string auth_header = "Authorization: Bearer " + api_key_;
-  headers.append(auth_header.c_str());
+  std::vector<std::string> headers;
+  headers.emplace_back("Content-Type: application/json");
+  headers.emplace_back("Authorization: Bearer " + api_key_);
 
   LLMResponse resp;
   resp.finish_reason = "stop";
@@ -528,43 +436,28 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
   StreamContext sctx;
   sctx.token_cb = cb;  // copy, not move — cb may still be needed by caller
   sctx.response = &resp;
-  // NOTE: StreamContext holds raw pointer to resp (stack variable).
-  // This is safe because curl_easy_perform() is synchronous: all write
-  // callbacks complete before curl_easy_perform() returns, so resp is
-  // always valid during callback execution.
 
-  curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.list);
-  curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.c_str());
-  curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE,
-                   static_cast<long>(body.size()));
-  curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, stream_write_callback);
-  curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &sctx);
-  curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 120L);
-  curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 10L);
-  curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 5L);  // Prevent redirect loops
+  auto stream_result = http_client_.post_stream(
+      url, body, headers,
+      [&sctx](const char *data, size_t len) -> size_t {
+        return sse_line_callback(data, len, &sctx);
+      },
+      120);
 
-  CURLcode res = curl_easy_perform(curl.get());
-
-  // CURLE_WRITE_ERROR 在 [DONE] 后 callback 返回提前终止是正常的
-  if (res != CURLE_OK && res != CURLE_WRITE_ERROR) {
-    // 检查是否已收到完整数据（done=true 说明流正常结束）
+  if (!stream_result) {
+    // Check if we already received complete data
     if (!sctx.done) {
-      // R7-16: Redact sensitive data from error messages
-      return make_error(
-          ErrorCode::LLMBackendError,
-          fmt::format("Stream request failed: {} ({})", redact_auth(curl.errbuf),
-                      curl_easy_strerror(res)));
+      return make_error(stream_result.error().code,
+                        redact_auth(stream_result.error().message));
     }
   }
 
   // R7-15: Validate that stream was properly terminated with [DONE] marker
-  if (res == CURLE_OK && !sctx.stream_done) {
+  if (stream_result && !sctx.stream_done) {
     LOG_WARN(fmt::format("[LLM] Stream ended without [DONE] marker — response may be incomplete"));
-    // Still return the partial response, but flag it
   }
 
-  // 若流未返回 usage（旧版 API），用启发式估算
+  // If stream didn't return usage (older API), use heuristic estimates
   if (resp.prompt_tokens == 0) {
     for (auto &m : req.messages)
       resp.prompt_tokens += ILLMBackend::estimate_tokens(m.content);
@@ -576,7 +469,7 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
   return resp;
 }
 
-// ── embed: 向量嵌入 ────────────────────────────────────────
+// ── embed: vector embedding ─────────────────────────────────
 
 Result<EmbeddingResponse> OpenAIBackend::embed(const EmbeddingRequest &req) {
   Json root_obj = Json::object();

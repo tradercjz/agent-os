@@ -17,6 +17,11 @@
 
 // ── Core modules ────────────────────────────────────────────
 #include <agentos/agent.hpp>
+#include <agentos/kernel/ollama_backend.hpp>
+#include <agentos/kernel/anthropic_backend.hpp>
+#ifdef AGENTOS_ENABLE_LLAMACPP
+#include <agentos/kernel/llamacpp_backend.hpp>
+#endif
 #include <agentos/subworkers/runtime.hpp>
 #include <agentos/supervisor_agent.hpp>
 #ifndef AGENTOS_NO_DUCKDB
@@ -134,6 +139,33 @@ public:
     backend_type_ = BackendType::Mock;
     return *this;
   }
+
+  /// Use Ollama local backend
+  AgentOSBuilder &ollama(std::string model = "llama3",
+                          std::string base_url = "http://localhost:11434") {
+    custom_backend_ = std::make_unique<kernel::OllamaBackend>(
+        std::move(model), std::move(base_url));
+    backend_type_ = BackendType::Custom;
+    return *this;
+  }
+
+  /// Set Anthropic Claude backend
+  AgentOSBuilder &anthropic(std::string api_key,
+                            std::string model = "claude-sonnet-4-20250514") {
+    custom_backend_ = std::make_unique<kernel::AnthropicBackend>(
+        std::move(api_key), std::move(model));
+    backend_type_ = BackendType::Custom;
+    return *this;
+  }
+
+#ifdef AGENTOS_ENABLE_LLAMACPP
+  /// Set llama.cpp local inference backend
+  AgentOSBuilder &llamacpp(kernel::LlamaCppBackend::Config config) {
+    custom_backend_ = std::make_unique<kernel::LlamaCppBackend>(std::move(config));
+    backend_type_ = BackendType::Custom;
+    return *this;
+  }
+#endif
 
   /// Use a custom backend
   AgentOSBuilder &backend(std::unique_ptr<kernel::ILLMBackend> b) {
