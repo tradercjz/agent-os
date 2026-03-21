@@ -16,6 +16,7 @@
 #include <agentos/security/security.hpp>
 #include <agentos/tools/tool_manager.hpp>
 #include <agentos/tools/tool_learner.hpp>
+#include <agentos/core/prometheus.hpp>
 #include <agentos/tracing.hpp>
 #include <agentos/worktree/worktree_manager.hpp>
 #include <atomic>
@@ -461,6 +462,7 @@ public:
 
   security::SecurityManager *security() { return security_.get(); }
   bus::AgentBus &bus() { return *bus_; }
+  [[nodiscard]] const bus::AgentBus& bus() const noexcept { return *bus_; }
   memory::MemoryConsolidator &consolidator() { return *consolidator_; }
   tracing::Tracer &tracer() { return *tracer_; }
   tools::ToolLearner &tool_learner() { return *tool_learner_; }
@@ -536,6 +538,12 @@ public:
     }
     h.healthy = h.scheduler_running && h.backend_available;
     return h;
+  }
+
+  // ── Prometheus Metrics ───────────────────────────────────────
+  std::string metrics_prometheus() const {
+      PrometheusFormatter formatter(*this);
+      return formatter.format();
   }
 
   // ── HotConfig integration ─────────────────────────────────
