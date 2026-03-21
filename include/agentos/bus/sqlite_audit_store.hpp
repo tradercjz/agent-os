@@ -5,6 +5,7 @@
 // ============================================================
 #include <agentos/bus/audit_store.hpp>
 #include <sqlite3.h>
+#include <mutex>
 #include <string>
 
 namespace agentos::bus {
@@ -42,8 +43,10 @@ public:
     void flush() override;
 
 private:
+    mutable std::mutex mu_;  // serialize all SQLite operations (thread-safe)
     SqliteGuard db_;
 
+    Result<void> write_one(const AuditEntry& entry);  // internal, caller holds mu_
     static std::string message_type_to_str(MessageType t);
     static MessageType str_to_message_type(const std::string& s);
     static std::string timepoint_to_iso(WallTimePoint tp);

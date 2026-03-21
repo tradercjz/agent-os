@@ -113,7 +113,8 @@ WallTimePoint SqliteAuditStore::iso_to_timepoint(const std::string& s) {
 
 // ── write ────────────────────────────────────────────────────
 
-Result<void> SqliteAuditStore::write(const AuditEntry& entry) {
+// Internal write without locking (caller must hold mu_)
+Result<void> SqliteAuditStore::write_one(const AuditEntry& entry) {
     const char* sql = "INSERT INTO audit_log (id, timestamp, from_agent, to_agent, type, topic, payload, redacted) "
                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
 
@@ -144,9 +145,15 @@ Result<void> SqliteAuditStore::write(const AuditEntry& entry) {
     return Result<void>{};
 }
 
+Result<void> SqliteAuditStore::write(const AuditEntry& entry) {
+    std::lock_guard lk(mu_);
+    return write_one(entry);
+}
+
 // ── write_batch ──────────────────────────────────────────────
 
 Result<void> SqliteAuditStore::write_batch(std::span<const AuditEntry> entries) {
+    std::lock_guard lk(mu_);
     char* err = nullptr;
     int rc = sqlite3_exec(db_.db, "BEGIN TRANSACTION", nullptr, nullptr, &err);
     if (rc != SQLITE_OK) {
@@ -157,7 +164,7 @@ Result<void> SqliteAuditStore::write_batch(std::span<const AuditEntry> entries) 
     }
 
     for (const auto& entry : entries) {
-        auto r = write(entry);
+        auto r = write_one(entry);
         if (!r.has_value()) {
             // Rollback
             sqlite3_exec(db_.db, "ROLLBACK", nullptr, nullptr, nullptr);
@@ -223,6 +230,7 @@ void SqliteAuditStore::build_where_clause(const AuditFilter& filter,
 // ── query ────────────────────────────────────────────────────
 
 std::vector<AuditEntry> SqliteAuditStore::query(const AuditFilter& filter) {
+    std::lock_guard lk(mu_);
     std::string sql = "SELECT id, timestamp, from_agent, to_agent, type, topic, payload, redacted FROM audit_log";
     std::vector<std::string> bind_values;
     build_where_clause(filter, sql, bind_values);
@@ -272,6 +280,7 @@ std::vector<AuditEntry> SqliteAuditStore::query(const AuditFilter& filter) {
 // ── count ────────────────────────────────────────────────────
 
 size_t SqliteAuditStore::count(const AuditFilter& filter) {
+    std::lock_guard lk(mu_);
     std::string sql = "SELECT COUNT(*) FROM audit_log";
     std::vector<std::string> bind_values;
     build_where_clause(filter, sql, bind_values);
@@ -299,6 +308,7 @@ size_t SqliteAuditStore::count(const AuditFilter& filter) {
 // ── rotate ───────────────────────────────────────────────────
 
 Result<void> SqliteAuditStore::rotate(const RotationPolicy& policy) {
+    std::lock_guard lk(mu_);
     // 1. Delete by max_entries: keep newest, delete oldest
     {
         std::string sql = fmt::format(
@@ -345,6 +355,7 @@ Result<void> SqliteAuditStore::rotate(const RotationPolicy& policy) {
 // ── flush ────────────────────────────────────────────────────
 
 void SqliteAuditStore::flush() {
+    std::lock_guard lk(mu_);
     sqlite3_wal_checkpoint_v2(db_.db, nullptr, SQLITE_CHECKPOINT_PASSIVE, nullptr, nullptr);
 }
 

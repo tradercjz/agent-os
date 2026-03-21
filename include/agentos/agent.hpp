@@ -3,6 +3,7 @@
 // AgentOS :: Agent 基类 + AgentOS 系统门面
 // ============================================================
 #include <agentos/bus/agent_bus.hpp>
+#include <agentos/bus/sqlite_audit_store.hpp>
 #include <agentos/context/context.hpp>
 #include <agentos/core/logger.hpp>
 #include <agentos/core/types.hpp>
@@ -334,7 +335,17 @@ public:
     security_ = config_.enable_security
                     ? std::make_unique<security::SecurityManager>()
                     : nullptr;
-    bus_ = std::make_unique<bus::AgentBus>(security_.get());
+    // Create audit store for persistent bus message logging
+    std::shared_ptr<bus::IAuditStore> audit_store;
+    {
+        auto audit_db = std::filesystem::path(config_.snapshot_dir) / "audit.db";
+        try {
+            audit_store = std::make_shared<bus::SqliteAuditStore>(audit_db.string());
+        } catch (const std::exception& e) {
+            LOG_WARN(fmt::format("Audit store init failed: {} — running without persistence", e.what()));
+        }
+    }
+    bus_ = std::make_unique<bus::AgentBus>(security_.get(), std::move(audit_store));
     consolidator_ = std::make_unique<memory::MemoryConsolidator>(*memory_);
     consolidator_->start();
     tracer_ = std::make_unique<tracing::Tracer>();

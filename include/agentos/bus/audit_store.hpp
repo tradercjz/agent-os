@@ -4,7 +4,7 @@
 // Structured audit trail for bus messages
 // ============================================================
 #include <agentos/core/types.hpp>
-#include <agentos/bus/agent_bus.hpp>
+#include <agentos/bus/bus_message.hpp>
 #include <chrono>
 #include <optional>
 #include <span>
