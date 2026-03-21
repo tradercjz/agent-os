@@ -6,6 +6,7 @@
 #include <agentos/core/logger.hpp>
 #include <agentos/core/task.hpp>
 #include <agentos/core/types.hpp>
+#include <agentos/kernel/http_client.hpp>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -486,6 +487,7 @@ private:
   std::string api_key_;
   std::string base_url_;
   std::string default_model_;
+  HttpClient http_client_;
 };
 
 // ─────────────────────────────────────────────────────────────
