@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "agentos",
+  "version": "0.1.0",
+  "description": "C++23 LLM Agent Operating System",
+  "dependencies": [
+    "nlohmann-json",
+    "curl",
+    "sqlite3",
+    "gtest",
+    "hnswlib"
+  ],
+  "features": {
+    "duckdb": {
+      "description": "DuckDB columnar storage backend",
+      "dependencies": ["duckdb"]
+    }
+  }
+}
