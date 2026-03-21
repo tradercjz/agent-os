@@ -74,18 +74,16 @@ private:
 };
 
 // ── JsonFileSink: JSON Lines file output with rotation ──
+
+struct JsonFileRotationConfig {
+    size_t max_bytes = 50 * 1024 * 1024;  // 50MB default
+};
+
 class JsonFileSink : public ILogSink {
 public:
-    struct RotationConfig {
-        size_t max_bytes = 50 * 1024 * 1024;  // 50MB default
-    };
+    using RotationConfig = JsonFileRotationConfig;
 
-    explicit JsonFileSink(std::string path)
-        : path_(std::move(path)), rot_(), bytes_written_(0) {
-        ofs_.open(path_, std::ios::app);
-    }
-
-    JsonFileSink(std::string path, RotationConfig rot)
+    explicit JsonFileSink(std::string path, RotationConfig rot = {})
         : path_(std::move(path)), rot_(rot), bytes_written_(0) {
         ofs_.open(path_, std::ios::app);
     }

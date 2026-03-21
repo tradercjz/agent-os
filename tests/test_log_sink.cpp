@@ -1,8 +1,6 @@
 #include <agentos/core/log_sink.hpp>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
-#include <filesystem>
-#include <fstream>
 #include <string>
 
 using namespace agentos;
