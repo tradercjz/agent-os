@@ -20,11 +20,12 @@
 
 ```cpp
 // include/agentos/core/log_sink.hpp
+#include <span>
 namespace agentos {
 
 struct LogEvent {
     LogLevel           level;
-    std::string        timestamp;   // ISO-8601 with ms
+    std::string        timestamp;   // UTC ISO-8601 "YYYY-MM-DDTHH:MM:SS.mmmZ"
     std::string        filename;
     int                line;
     std::string        msg;
@@ -41,6 +42,8 @@ public:
 } // namespace agentos
 ```
 
+**Timestamp change:** `prepare_event()` will switch from local time to UTC ISO-8601 (`2026-03-21T14:00:01.234Z`). `ConsoleSink` uses this format directly (consistent with structured logging best practices). This is a visible behavioral change in console output.
+
 #### 1.2 ConsoleSink
 
 Default sink. Formats as current human-readable style:
@@ -53,13 +56,15 @@ Output to `stderr` via `std::fputs`.
 
 Writes JSON Lines (one JSON object per line) to a configured file path:
 ```json
-{"ts":"2026-03-21T14:00:01.234Z","level":"INFO","file":"logger.hpp","line":42,"msg":"Message","agent_id":"a1","extra":{"key1":"val1"}}
+{"ts":"2026-03-21T14:00:01.234Z","level":"INFO","file":"logger.hpp","line":42,"msg":"Message","extra":{"key1":"val1"}}
 ```
+
+Note: `agent_id` is not a dedicated `LogEvent` field — it comes from `fields` KV pairs when callers use `LOG_INFO_KV("msg", KV("agent_id", id))`. The JSON sink flattens all `fields` into the `extra` object.
 
 Features:
 - Atomic open with append mode
 - Configurable rotation: by file size (default 50MB) or by day
-- On rotation: rename current file to `<name>.<date>.jsonl`, open new file
+- On rotation: write to temp file, check `ofs.good()`, then rename (consistent with project disk-full safety pattern). If rename fails (target exists), append timestamp suffix to avoid collision.
 - `flush()` calls `fflush` on the underlying file
 
 #### 1.4 Logger Refactor
@@ -67,14 +72,17 @@ Features:
 ```cpp
 class Logger {
 public:
-    void add_sink(std::unique_ptr<ILogSink> sink);
+    void add_sink(std::shared_ptr<ILogSink> sink);
     void clear_sinks();  // for testing
     // ...existing log/log_kv/flush methods unchanged...
 private:
-    std::vector<std::unique_ptr<ILogSink>> sinks_;  // replaces custom_sink_
+    std::vector<std::shared_ptr<ILogSink>> sinks_;  // replaces custom_sink_
+    std::shared_mutex sinks_mu_;                     // separate from queue mu_
     // worker_loop broadcasts each LogEvent to all sinks
 };
 ```
+
+**Thread safety for multi-sink:** Use `std::shared_ptr` (not `unique_ptr`) for sinks to enable safe snapshotting. Worker loop takes a shared lock on `sinks_mu_` to snapshot the sink vector, releases the lock, then iterates and calls `sink->write()` outside the lock. `add_sink()`/`clear_sinks()` take an exclusive lock on `sinks_mu_`. This avoids blocking log producers during slow sink I/O (e.g., JsonFileSink rotation), matching the existing `sink_copy` pattern.
 
 - `LogEvent` struct promoted from private inner class to public (in `log_sink.hpp`)
 - `prepare_event()` returns `LogEvent`, worker loop calls `sink->write(event)` for each sink
@@ -105,27 +113,34 @@ private:
 
 ```cpp
 // include/agentos/bus/audit_store.hpp
+#include <span>
+#include <chrono>
 namespace agentos::bus {
 
+// Use system_clock (wall clock) for audit timestamps — NOT steady_clock.
+// steady_clock is monotonic but meaningless across restarts and cannot be
+// serialized as a human-readable timestamp.
+using WallTimePoint = std::chrono::system_clock::time_point;
+
 struct AuditEntry {
-    uint64_t    id;
-    TimePoint   timestamp;
-    AgentId     from_agent;
-    AgentId     to_agent;
-    MessageType type;
-    std::string topic;
-    std::string payload;
-    bool        redacted;
+    uint64_t      id;
+    WallTimePoint timestamp;
+    AgentId       from_agent;
+    AgentId       to_agent;
+    MessageType   type;
+    std::string   topic;
+    std::string   payload;
+    bool          redacted;
 };
 
 struct AuditFilter {
-    std::optional<AgentId>     agent_id;      // from OR to
-    std::optional<MessageType> type;
-    std::optional<TimePoint>   after;
-    std::optional<TimePoint>   before;
-    std::optional<std::string> topic;
-    size_t                     limit{100};
-    size_t                     offset{0};
+    std::optional<AgentId>       agent_id;      // from OR to
+    std::optional<MessageType>   type;
+    std::optional<WallTimePoint> after;
+    std::optional<WallTimePoint> before;
+    std::optional<std::string>   topic;
+    size_t                       limit{100};
+    size_t                       offset{0};
 };
 
 struct RotationPolicy {
@@ -136,16 +151,21 @@ struct RotationPolicy {
 class IAuditStore {
 public:
     virtual ~IAuditStore() = default;
-    virtual void write(const AuditEntry& entry) = 0;
-    virtual void write_batch(std::span<const AuditEntry> entries) = 0;
+    virtual Result<void> write(const AuditEntry& entry) = 0;
+    virtual Result<void> write_batch(std::span<const AuditEntry> entries) = 0;
     virtual std::vector<AuditEntry> query(const AuditFilter& filter) = 0;
     virtual size_t count(const AuditFilter& filter) = 0;
-    virtual void rotate(const RotationPolicy& policy) = 0;
+    virtual Result<void> rotate(const RotationPolicy& policy) = 0;
     virtual void flush() {}
 };
 
 } // namespace agentos::bus
 ```
+
+**Key design decisions:**
+- `WallTimePoint` (system_clock) instead of `TimePoint` (steady_clock) — critical for persistence across restarts and human-readable serialization.
+- `write`/`write_batch`/`rotate` return `Result<void>` — SQLite operations can fail (disk full, corruption). Follows project `[[nodiscard]]` Expected convention.
+- `#include <span>` explicitly included for `write_batch` parameter.
 
 #### 2.2 SqliteAuditStore
 
@@ -153,7 +173,19 @@ public:
 // include/agentos/bus/sqlite_audit_store.hpp
 namespace agentos::bus {
 
-class SqliteAuditStore : public IAuditStore {
+// RAII wrapper for sqlite3 handle (project convention: CurlGuard, PipeGuard)
+struct SqliteGuard {
+    sqlite3* db = nullptr;
+    SqliteGuard() = default;
+    explicit SqliteGuard(const std::string& path) {
+        sqlite3_open(path.c_str(), &db);
+    }
+    ~SqliteGuard() { if (db) sqlite3_close(db); }
+    SqliteGuard(const SqliteGuard&) = delete;
+    SqliteGuard& operator=(const SqliteGuard&) = delete;
+};
+
+class SqliteAuditStore : public IAuditStore, private NonCopyable {
 public:
     explicit SqliteAuditStore(const std::string& db_path);
     // Implements all IAuditStore methods
@@ -170,8 +202,9 @@ public:
     //   );
     //   CREATE INDEX idx_audit_ts ON audit_log(timestamp);
     //   CREATE INDEX idx_audit_agent ON audit_log(from_agent, to_agent);
+    //   CREATE INDEX idx_audit_type_ts ON audit_log(type, timestamp);
 private:
-    sqlite3* db_;
+    SqliteGuard db_;
 };
 
 } // namespace agentos::bus
@@ -181,6 +214,10 @@ Features:
 - WAL mode for concurrent read/write
 - Batch insert via transaction (write_batch)
 - `rotate()` deletes rows by age or count via `DELETE FROM audit_log WHERE ...`
+- Rotation is caller-driven: AgentOS wires a periodic timer (or on `write()` every N entries) to call `store->rotate(policy)`. Not auto-triggered inside the store.
+- RAII `SqliteGuard` for handle lifecycle (project convention)
+- `NonCopyable` to prevent accidental copy of raw DB handle
+- Additional index on `(type, timestamp)` for common "show all Events in last hour" queries
 
 #### 2.3 AgentBus Integration
 
@@ -192,18 +229,29 @@ public:
     // ...
 private:
     void audit_push(const BusMessage& msg) {
-        // Convert BusMessage → AuditEntry
-        if (store_) store_->write(entry);
-        // Keep in-memory trail as before (for monitors + backward compat)
+        // 1. In-memory trail + monitors (under mu_, fast)
         audit_trail_.push_back(msg);
         while (audit_trail_.size() > 10000) audit_trail_.pop_front();
         for (auto& m : monitors_) m(msg);
+
+        // 2. Persistent store write OUTSIDE mu_ lock to avoid blocking
+        //    send()/publish() during slow disk I/O.
+        //    Build AuditEntry under lock, then write after releasing.
+        if (store_) {
+            auto entry = to_audit_entry(msg);  // pure conversion, no I/O
+            // mu_ already released by caller pattern (see below)
+            (void)store_->write(entry);
+        }
     }
+
+    // Callers (send/publish) restructured:
+    //   {lock_guard lk(mu_); ...; audit_push_mem(msg); }  // in-memory only
+    //   audit_push_store(msg);  // persistent store, outside lock
     std::shared_ptr<IAuditStore> store_;
 };
 ```
 
-In-memory `audit_trail_` stays for backward compatibility and monitor dispatch. The persistent store runs in parallel.
+**Performance note:** `store_->write()` (SQLite disk I/O) runs outside `mu_` to avoid blocking all bus traffic. The in-memory trail and monitor dispatch remain under the lock for consistency. `send()`/`publish()` are restructured to split the lock scope: in-memory operations under lock, store write after lock release.
 
 #### 2.4 Files
 
@@ -254,14 +302,14 @@ class HotConfig : private NonCopyable {
 public:
     explicit HotConfig(const std::string& config_path = "");
 
-    // Get current value (thread-safe read)
+    // Get current value (thread-safe shared read)
     template<typename T>
     T get(const std::string& key, const T& default_val) const;
 
-    // Programmatic update
-    void set(const std::string& key, const nlohmann::json& value);
+    // Programmatic update (validated, then applied)
+    Result<void> set(const std::string& key, const nlohmann::json& value);
 
-    // Reload from file
+    // Reload from file (all-or-nothing: validates entire file before applying)
     Result<void> reload();
 
     // Register change observer
@@ -278,12 +326,24 @@ private:
     std::unordered_map<std::string, std::vector<ConfigChangeCallback>> observers_;
     std::jthread watcher_thread_;
 
-    void notify(const std::string& key, const nlohmann::json& value);
+    // Validate a single key-value pair (type check, range check)
+    Result<void> validate(const std::string& key, const nlohmann::json& value) const;
+
+    // Collect changes under lock, notify OUTSIDE lock to prevent deadlock.
+    // Pattern: snapshot changed keys + callbacks, release mu_, then invoke.
+    void apply_and_notify(const nlohmann::json& new_config);
+
     void file_watch_loop(std::stop_token st);  // platform-specific
 };
 
 } // namespace agentos
 ```
+
+**Deadlock prevention:** `apply_and_notify()` acquires exclusive `mu_` to diff old vs new config and snapshot the affected callbacks, then releases `mu_` before invoking any callbacks. This prevents deadlock when observer callbacks call `get()` (which takes shared `mu_`).
+
+**Validation:** `reload()` parses the file, validates ALL keys against known schemas (type + range), and only applies if all pass (all-or-nothing). Returns `Result<void>` with error details on failure. `set()` also validates before applying.
+
+**Atomicity:** Multi-key updates from file reload are applied atomically — config JSON is swapped in one step under exclusive lock, then all observers are notified sequentially outside the lock. Observers always see a consistent snapshot.
 
 #### 3.3 File Watch Implementation
 
@@ -293,6 +353,11 @@ private:
 //   macOS: kqueue + EVFILT_VNODE (NOTE_WRITE)
 //   Linux: inotify (IN_MODIFY)
 // Falls back to polling (stat every 2s) if neither available
+//
+// Debounce: after receiving a file change event, wait 200ms before reload.
+// Editors often write files in multiple steps (truncate + write, or
+// write temp + rename), so reading immediately may catch a truncated file.
+// The debounce window coalesces rapid events into a single reload.
 ```
 
 #### 3.4 Integration with AgentOS
@@ -312,11 +377,14 @@ auto os = AgentOSBuilder()
 
 #### 3.5 MCP Integration
 
-Add `config/reload` and `config/get` methods to `MCPServer`:
+Add `config/reload`, `config/get`, and `config/set` methods to `MCPServer`:
 ```json
 {"jsonrpc":"2.0","method":"config/reload","id":1}
 {"jsonrpc":"2.0","method":"config/get","params":{"key":"tpm_limit"},"id":2}
+{"jsonrpc":"2.0","method":"config/set","params":{"key":"tpm_limit","value":200000},"id":3}
 ```
+
+`config/set` exposes `HotConfig::set()` via MCP. Validation runs server-side; invalid values return a JSON-RPC error response.
 
 #### 3.6 Config File Format
 
@@ -362,6 +430,7 @@ Dependencies managed via mixed `FetchContent` (nlohmann_json, googletest, hnswli
   "name": "agentos",
   "version": "0.1.0",
   "description": "C++23 LLM Agent Operating System",
+  "builtin-baseline": "<pin to a recent vcpkg commit hash at implementation time>",
   "dependencies": [
     "nlohmann-json",
     "curl",
@@ -373,14 +442,16 @@ Dependencies managed via mixed `FetchContent` (nlohmann_json, googletest, hnswli
     "duckdb": {
       "description": "DuckDB columnar storage backend",
       "dependencies": ["duckdb"]
-    },
-    "jieba": {
-      "description": "Chinese tokenization support",
-      "dependencies": ["cppjieba"]
     }
   }
 }
 ```
+
+**Registry availability notes:**
+- `nlohmann-json`, `curl`, `sqlite3`, `gtest`, `duckdb` are all available in the official vcpkg registry.
+- `hnswlib` is available in vcpkg as `hnswlib`.
+- `cppjieba` is NOT in the official vcpkg registry — it stays as FetchContent-only (no vcpkg feature). The `jieba` feature is removed from vcpkg.json.
+- `builtin-baseline` must be pinned to a specific vcpkg commit hash for reproducible version resolution.
 
 #### 4.2 CMakePresets.json
 
@@ -407,7 +478,8 @@ Dependencies managed via mixed `FetchContent` (nlohmann_json, googletest, hnswli
       "name": "default",
       "displayName": "FetchContent Build (no vcpkg)",
       "cacheVariables": {
-        "CMAKE_CXX_STANDARD": "23"
+        "CMAKE_CXX_STANDARD": "23",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
     }
   ]
@@ -432,6 +504,18 @@ endif()
 
 Same pattern for googletest, hnswlib, cppjieba.
 
+**sqlite3 handling:** vcpkg provides `unofficial-sqlite3` via `find_package(unofficial-sqlite3 CONFIG)`, while non-vcpkg builds use `pkg_check_modules(SQLITE3 REQUIRED sqlite3)`. Use a try-find_package-first pattern:
+
+```cmake
+# ---- SQLite3 ----
+find_package(unofficial-sqlite3 CONFIG QUIET)
+if(NOT unofficial-sqlite3_FOUND)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+endif()
+# Link: use unofficial::sqlite3::sqlite3 if available, else ${SQLITE3_LIBRARIES}
+```
+
 #### 4.4 Files
 
 | File | Action |
@@ -454,9 +538,10 @@ Same pattern for googletest, hnswlib, cppjieba.
 7. `vcpkg.json`
 8. `CMakePresets.json`
 
-### New Test Files (2)
+### New Test Files (3)
 9. `tests/test_audit_store.cpp`
 10. `tests/test_hot_config.cpp`
+11. `tests/test_log_sink.cpp` — JsonFileSink rotation edge cases, concurrent sink writes
 
 ### Modified Files (7)
 11. `include/agentos/core/logger.hpp` — multi-sink
@@ -476,6 +561,9 @@ Same pattern for googletest, hnswlib, cppjieba.
 
 ### Testing Strategy
 - Unit tests per new component (ILogSink, IAuditStore, HotConfig)
+- `test_log_sink.cpp`: JsonFileSink rotation (size-based, day-based), rename failure recovery, concurrent multi-sink writes
+- `test_audit_store.cpp`: CRUD, batch write, query with filters, rotation by age/count, WAL concurrency
+- `test_hot_config.cpp`: reload validation (reject invalid values), observer notification order, deadlock-free concurrent get+set, file watch debounce
 - Integration: AgentOS with all P0 features enabled end-to-end
 - Thread safety: concurrent config reload + log write + audit write
 - All existing 719 tests must continue to pass
