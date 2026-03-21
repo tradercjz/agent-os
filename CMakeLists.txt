@@ -190,6 +190,7 @@ set(AGENTOS_SOURCES
     src/core/co_executor.cpp
     src/core/prometheus.cpp
     src/core/key_loader.cpp
+    src/kernel/vcr_cassette.cpp
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
@@ -341,6 +342,7 @@ set(TEST_SOURCES
   tests/test_prometheus.cpp
   tests/test_key_loader.cpp
   tests/test_smart_consolidation.cpp
+  tests/test_vcr.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
@@ -358,6 +360,23 @@ gtest_discover_tests(test_agentos)
 # ---- Benchmarks ----
 add_executable(benchmark_graph_memory tests/benchmark_graph_memory.cpp)
 target_link_libraries(benchmark_graph_memory PRIVATE agentos)
+
+add_executable(benchmark_stress tests/benchmark_stress.cpp)
+target_link_libraries(benchmark_stress PRIVATE agentos)
+
+# ---- Fuzz targets (optional, requires clang with libFuzzer) ----
+option(AGENTOS_ENABLE_FUZZER "Enable fuzz test targets" OFF)
+if(AGENTOS_ENABLE_FUZZER)
+    add_executable(fuzz_json_parse tests/fuzz_json_parse.cpp)
+    target_link_libraries(fuzz_json_parse PRIVATE agentos)
+    target_compile_options(fuzz_json_parse PRIVATE -fsanitize=fuzzer)
+    target_link_options(fuzz_json_parse PRIVATE -fsanitize=fuzzer)
+
+    add_executable(fuzz_memory_entry tests/fuzz_memory_entry.cpp)
+    target_link_libraries(fuzz_memory_entry PRIVATE agentos)
+    target_compile_options(fuzz_memory_entry PRIVATE -fsanitize=fuzzer)
+    target_link_options(fuzz_memory_entry PRIVATE -fsanitize=fuzzer)
+endif()
 
 # ── Install rules ──
 include(GNUInstallDirs)
