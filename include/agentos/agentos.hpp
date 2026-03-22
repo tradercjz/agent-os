@@ -24,6 +24,8 @@
 #ifdef AGENTOS_ENABLE_LLAMACPP
 #include <agentos/kernel/llamacpp_backend.hpp>
 #endif
+#include <agentos/agents/cot_agent.hpp>
+#include <agentos/agents/plan_execute_agent.hpp>
 #include <agentos/subworkers/runtime.hpp>
 #include <agentos/supervisor_agent.hpp>
 #ifndef AGENTOS_NO_DUCKDB
@@ -109,6 +111,16 @@ public:
   std::shared_ptr<AgentT> create(Args &&...args) {
     return os_->create_agent<AgentT>(std::move(cfg_),
                                       std::forward<Args>(args)...);
+  }
+
+  /// Build a Chain-of-Thought agent
+  std::shared_ptr<CoTAgent> create_cot() {
+    return os_->create_agent<CoTAgent>(std::move(cfg_));
+  }
+
+  /// Build a Plan-and-Execute agent
+  std::shared_ptr<PlanExecuteAgent> create_plan_execute() {
+    return os_->create_agent<PlanExecuteAgent>(std::move(cfg_));
   }
 
   /// Access the underlying config for advanced customization

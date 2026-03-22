@@ -197,6 +197,7 @@ set(AGENTOS_SOURCES
     src/core/agent_snapshot.cpp
     src/core/delegation.cpp
     src/kernel/async_http_client.cpp
+    src/api/api_server.cpp
     src/dashboard/dashboard.cpp
     src/context/compressor.cpp
     src/context/conversation_store.cpp
@@ -372,6 +373,9 @@ set(TEST_SOURCES
   tests/test_tool_timeout.cpp
   tests/test_lifecycle.cpp
   tests/test_agent_team.cpp
+  tests/test_cot_agent.cpp
+  tests/test_plan_execute_agent.cpp
+  tests/test_api_server.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
