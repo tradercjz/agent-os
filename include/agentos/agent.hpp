@@ -4,6 +4,8 @@
 // ============================================================
 #include <agentos/core/agent_rate_limiter.hpp>
 #include <agentos/core/agent_snapshot.hpp>
+#include <agentos/core/agent_team.hpp>
+#include <agentos/core/lifecycle.hpp>
 #include <agentos/core/circuit_breaker.hpp>
 #include <agentos/core/co_executor.hpp>
 #include <agentos/core/delegation.hpp>
@@ -369,6 +371,8 @@ public:
     plugin_mgr_ = std::make_unique<PluginManager>();
     circuit_breaker_ = std::make_unique<CircuitBreaker>("agentos-llm");
     agent_rate_limiter_ = std::make_unique<AgentRateLimiter>();
+    lifecycle_mgr_ = std::make_unique<LifecycleManager>();
+    team_mgr_ = std::make_unique<TeamManager>();
     scheduler_->start();
   }
 
@@ -420,6 +424,7 @@ public:
 
     consolidator_->register_agent(id);
     agent->on_start();
+    lifecycle_mgr_->emit({LifecycleEvent::AgentCreated, id, agent->config().name, ""});
     return agent;
   }
 
@@ -487,6 +492,8 @@ public:
   PluginManager& plugins() { return *plugin_mgr_; }
   CircuitBreaker& circuit_breaker() { return *circuit_breaker_; }
   AgentRateLimiter& agent_rate_limiter() { return *agent_rate_limiter_; }
+  LifecycleManager& lifecycle() { return *lifecycle_mgr_; }
+  TeamManager& teams() { return *team_mgr_; }
   const Config& config() const { return config_; }
 
   // ── Agent 数量查询 ──────────────────────────────────────
@@ -737,6 +744,8 @@ private:
   std::unique_ptr<PluginManager> plugin_mgr_;
   std::unique_ptr<CircuitBreaker> circuit_breaker_;
   std::unique_ptr<AgentRateLimiter> agent_rate_limiter_;
+  std::unique_ptr<LifecycleManager> lifecycle_mgr_;
+  std::unique_ptr<TeamManager> team_mgr_;
   std::unique_ptr<HotConfig> hot_config_;
   std::unique_ptr<dashboard::DashboardServer> dashboard_;
   std::shared_ptr<std::atomic<bool>> os_alive_ = std::make_shared<std::atomic<bool>>(true);
