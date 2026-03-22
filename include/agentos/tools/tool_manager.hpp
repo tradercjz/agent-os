@@ -424,10 +424,36 @@ public:
     return registry_.contains(id);
   }
 
+  // Set per-tool timeout override
+  void set_tool_timeout(const std::string& tool_id, std::chrono::seconds timeout) {
+    std::lock_guard lk(mu_);
+    timeout_overrides_ms_[tool_id] = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
+  }
+
+  // Get effective timeout for a tool (override > schema default > 30s fallback)
+  std::chrono::seconds get_tool_timeout(const std::string& tool_id) const {
+    auto ms = get_tool_timeout_ms(tool_id);
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::milliseconds(ms));
+  }
+
+  // Get effective timeout in milliseconds (preserves sub-second precision from schema)
+  uint32_t get_tool_timeout_ms(const std::string& tool_id) const {
+    std::lock_guard lk(mu_);
+    auto ov = timeout_overrides_ms_.find(tool_id);
+    if (ov != timeout_overrides_ms_.end()) return ov->second;
+    auto it = registry_.find(tool_id);
+    if (it != registry_.end()) {
+      return it->second->schema().timeout_ms;
+    }
+    return 30000; // default 30s
+  }
+
   void unregister(const std::string &id) {
     std::lock_guard lk(mu_);
     registry_.erase(id);
     cached_jsons_.erase(id);
+    timeout_overrides_ms_.erase(id);
     invalidate_cache_locked();
   }
 
@@ -439,6 +465,7 @@ private:
   mutable std::mutex mu_;
   std::unordered_map<std::string, std::shared_ptr<ITool>> registry_;
   std::unordered_map<std::string, std::string> cached_jsons_;
+  std::unordered_map<std::string, uint32_t> timeout_overrides_ms_;
   mutable std::string all_tools_json_cache_;
 };
 
@@ -618,9 +645,12 @@ public:
     if (auto v = validate_tool_args(schema, args); !v)
       return ToolResult::fail(v.error().message);
 
+    // Apply per-tool timeout override from registry if set
+    auto effective_timeout_ms = registry_.get_tool_timeout_ms(call.name);
+
     // Execute with timeout protection
     try {
-      if (schema.timeout_ms > 0) {
+      if (effective_timeout_ms > 0) {
         // Use thread pool and std::stop_token for cooperative cancellation
         std::stop_source stop_source;
         auto st = stop_source.get_token();
@@ -630,14 +660,14 @@ public:
             [tool, args, st]() { return tool->execute(args, st); });
 
         auto status = future.wait_for(
-            std::chrono::milliseconds(schema.timeout_ms));
+            std::chrono::milliseconds(effective_timeout_ms));
 
         if (status == std::future_status::timeout) {
           // Cancel the tool execution cooperatively
           stop_source.request_stop();
           return ToolResult::fail(
               fmt::format("Tool '{}' timed out after {}ms",
-                          call.name, schema.timeout_ms));
+                          call.name, effective_timeout_ms));
         }
         try {
           return future.get();

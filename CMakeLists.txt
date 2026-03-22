@@ -367,6 +367,8 @@ set(TEST_SOURCES
   tests/test_agent_clone.cpp
   tests/test_circuit_breaker.cpp
   tests/test_agent_rate_limiter.cpp
+  tests/test_batch_inference.cpp
+  tests/test_tool_timeout.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target

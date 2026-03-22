@@ -14,6 +14,7 @@
 #include <concepts>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -637,6 +638,29 @@ public:
       return make_unexpected(result.error());
     }
     return final_resp;
+  }
+
+  // Batch inference: process multiple requests sequentially (respects rate limiter)
+  std::vector<Result<LLMResponse>> infer_batch(std::vector<LLMRequest> requests) {
+    std::vector<Result<LLMResponse>> results;
+    results.reserve(requests.size());
+    for (auto& req : requests) {
+      results.push_back(infer(req));
+    }
+    return results;
+  }
+
+  // Async batch: returns futures (parallel execution)
+  std::vector<std::future<Result<LLMResponse>>> infer_batch_async(
+      std::vector<LLMRequest> requests) {
+    std::vector<std::future<Result<LLMResponse>>> futures;
+    futures.reserve(requests.size());
+    for (auto& req : requests) {
+      futures.push_back(std::async(std::launch::async, [this, r = std::move(req)]() mutable {
+        return infer(r);
+      }));
+    }
+    return futures;
   }
 
   Task<Result<LLMResponse>> infer_async(LLMRequest req) {
