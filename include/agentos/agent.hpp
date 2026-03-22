@@ -27,6 +27,7 @@
 #include <agentos/core/prometheus.hpp>
 #include <agentos/tracing.hpp>
 #include <agentos/worktree/worktree_manager.hpp>
+#include <agentos/api/api_server.hpp>
 #include <agentos/dashboard/dashboard.hpp>
 #include <atomic>
 #include <cassert>
@@ -378,6 +379,7 @@ public:
 
   ~AgentOS() {
     os_alive_->store(false, std::memory_order_release);
+    api_server_.reset();  // stop API server before subsystems
     dashboard_.reset();   // stop dashboard before subsystems
     plugin_mgr_.reset();  // unload plugins before subsystems
     if (co_executor_) co_executor_->stop();
@@ -725,6 +727,9 @@ public:
   // Start the HTTP dashboard on the given port (defined in dashboard.cpp)
   Result<void> start_dashboard(uint16_t port = 8080);
 
+  // Start the REST API server on the given port (defined in api_server.cpp)
+  Result<void> start_api(uint16_t port = 9090);
+
 private:
   Config config_;
   std::unique_ptr<kernel::LLMKernel> kernel_;
@@ -748,6 +753,7 @@ private:
   std::unique_ptr<TeamManager> team_mgr_;
   std::unique_ptr<HotConfig> hot_config_;
   std::unique_ptr<dashboard::DashboardServer> dashboard_;
+  std::unique_ptr<api::ApiServer> api_server_;
   std::shared_ptr<std::atomic<bool>> os_alive_ = std::make_shared<std::atomic<bool>>(true);
 
   mutable std::mutex agents_mu_;
