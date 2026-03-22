@@ -376,3 +376,149 @@ cpp-agent-os/
 ## License
 
 MIT
+
+---
+
+## New Features (P0-P15)
+
+### Multi-Backend Support
+
+```cpp
+// Ollama (local)
+auto os = AgentOSBuilder().ollama("llama3").build();
+
+// Anthropic Claude
+auto os = AgentOSBuilder().anthropic("sk-ant-...").build();
+
+// Router: route by task complexity
+auto router = std::make_unique<kernel::RouterBackend>();
+router->set_default(ollama_backend);
+router->add_rule({.name = "complex", .predicate = routing::by_complexity(500), .backend = claude_backend});
+auto os = AgentOSBuilder().router(std::move(router)).build();
+```
+
+### Agent Reasoning Patterns
+
+```cpp
+// Chain-of-Thought
+auto cot = os->agent("thinker").prompt("Think step by step.").create_cot();
+auto answer = cot->run("What is 15% of 240?");
+
+// Plan-and-Execute
+auto planner = os->agent("planner").prompt("You plan projects.").create_plan_execute();
+auto result = planner->run("Organize a team meeting");
+```
+
+### REST API Server
+
+```cpp
+os->start_api(9090);        // REST API at :9090
+os->start_dashboard(8080);   // Web dashboard at :8080
+```
+
+```bash
+# Create agent via API
+curl -X POST http://localhost:9090/api/v1/agents \
+  -d '{"name":"bot","prompt":"You are helpful"}'
+
+# Run inference
+curl -X POST http://localhost:9090/api/v1/infer \
+  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### Multi-Agent Collaboration
+
+```cpp
+// Delegation
+DelegationRequest req{.from = coordinator->id(), .to = worker->id(), .task = "research AI"};
+auto result = os->delegation().delegate(req);
+
+// Shared memory
+os->shared_memory().put("key", "value", agent->id());
+auto val = os->shared_memory().get("key");
+
+// Teams
+os->teams().create_team("research", {.max_members = 5});
+os->teams().assign(agent->id(), "research");
+```
+
+### Tool Pipelines
+
+```cpp
+ToolPipeline pipe(os->tools());
+pipe.then("step1", transform_fn)
+    .then_if(condition, "step2", transform_fn)
+    .then("step3");
+auto result = pipe.execute("input");
+```
+
+### Observability
+
+```cpp
+// Prometheus metrics
+std::cout << os->metrics_prometheus();
+
+// Distributed tracing (OTLP)
+auto tid = tracer.begin_trace(agent_id, "task");
+{ ScopedSpan span(tracer, tid, "", "inference"); ... }
+auto otlp_json = tracer.export_otlp_json(tid);
+
+// Circuit breaker
+os->circuit_breaker().allow_request();
+
+// Agent lifecycle events
+os->lifecycle().on(LifecycleEvent::AgentCreated, callback);
+```
+
+### Agent Persistence
+
+```cpp
+// Snapshot + restore
+auto snap = os->snapshot_agent(agent->id());
+snap->save("agent.json");
+auto restored = os->restore_agent(AgentSnapshot::load("agent.json").value());
+
+// Clone
+auto clone = os->clone_agent(agent->id(), "clone-name");
+
+// Conversation history
+ConversationStore store("/data/conversations");
+store.save(record);
+auto loaded = store.load("conv-001");
+```
+
+### Plugin System
+
+```cpp
+os->plugins().load("path/to/plugin.dylib", *os);
+auto* p = os->plugins().find("my-plugin");
+```
+
+### Hot Configuration
+
+```cpp
+auto os = AgentOSBuilder().mock().config_file("agentos.json").build();
+// Config reloads automatically on file change (kqueue/inotify)
+// Or manually: os->hot_config()->reload();
+```
+
+### Build Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `AGENTOS_NO_DUCKDB` | OFF | Disable DuckDB backend |
+| `AGENTOS_ENABLE_JIEBA` | ON | Chinese tokenization |
+| `AGENTOS_ENABLE_LLAMACPP` | OFF | llama.cpp local inference |
+| `AGENTOS_ENABLE_PYTHON` | OFF | Python bindings (pybind11) |
+| `AGENTOS_ENABLE_FUZZER` | OFF | Fuzz test targets |
+| `AGENTOS_ENABLE_ASAN` | OFF | AddressSanitizer |
+| `AGENTOS_ENABLE_UBSAN` | OFF | UndefinedBehaviorSanitizer |
+
+### Examples
+
+Run any example:
+```bash
+cd build && cmake .. && make reasoning_demo && ./reasoning_demo
+```
+
+Available demos: `multi_backend_demo`, `reasoning_demo`, `api_server_demo`, `delegation_demo`, `tool_pipeline_demo`, `snapshot_demo`, `observability_demo`

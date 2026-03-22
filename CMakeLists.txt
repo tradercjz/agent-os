@@ -284,6 +284,27 @@ target_link_libraries(mcp_demo agentos)
 add_executable(headless_demo examples/headless_demo.cpp)
 target_link_libraries(headless_demo agentos)
 
+add_executable(multi_backend_demo examples/multi_backend_demo.cpp)
+target_link_libraries(multi_backend_demo agentos)
+
+add_executable(reasoning_demo examples/reasoning_demo.cpp)
+target_link_libraries(reasoning_demo agentos)
+
+add_executable(api_server_demo examples/api_server_demo.cpp)
+target_link_libraries(api_server_demo agentos)
+
+add_executable(delegation_demo examples/delegation_demo.cpp)
+target_link_libraries(delegation_demo agentos)
+
+add_executable(tool_pipeline_demo examples/tool_pipeline_demo.cpp)
+target_link_libraries(tool_pipeline_demo agentos)
+
+add_executable(snapshot_demo examples/snapshot_demo.cpp)
+target_link_libraries(snapshot_demo agentos)
+
+add_executable(observability_demo examples/observability_demo.cpp)
+target_link_libraries(observability_demo agentos)
+
 if(NOT AGENTOS_NO_DUCKDB)
     add_executable(rag_agent_demo examples/rag_agent_demo.cpp)
     target_link_libraries(rag_agent_demo agentos)
