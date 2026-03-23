@@ -1,0 +1,58 @@
+@PACKAGE_INIT@
+
+# ── AgentOSConfig.cmake ──
+# Config-mode package file for AgentOS.
+# Provides the imported target: AgentOS::AgentOS
+#
+# Usage:
+#   find_package(AgentOS REQUIRED)
+#   target_link_libraries(my_app PRIVATE AgentOS::AgentOS)
+
+include(CMakeFindDependencyMacro)
+
+# ── Required dependencies ──
+find_dependency(Threads)
+find_dependency(CURL)
+
+# nlohmann_json: try CONFIG first (vcpkg / system install), fall back to MODULE
+find_dependency(nlohmann_json CONFIG)
+
+# SQLite3: mirror the upstream search strategy
+find_package(unofficial-sqlite3 CONFIG QUIET)
+if(NOT unofficial-sqlite3_FOUND)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+    else()
+        message(FATAL_ERROR "AgentOS requires SQLite3 but neither vcpkg target "
+                "nor pkg-config could locate it.")
+    endif()
+endif()
+
+# hnswlib: header-only, try CONFIG
+find_dependency(hnswlib CONFIG)
+
+# ── Optional: DuckDB ──
+set(AgentOS_DUCKDB_ENABLED @_AGENTOS_DUCKDB_ENABLED@)
+
+if(AgentOS_DUCKDB_ENABLED)
+    find_library(_AgentOS_DUCKDB_LIBRARY duckdb
+        HINTS /usr/local/lib /opt/homebrew/lib /usr/lib64 /usr/lib)
+    find_path(_AgentOS_DUCKDB_INCLUDE_DIR duckdb.hpp
+        HINTS /usr/local/include /opt/homebrew/include /usr/include)
+    if(NOT _AgentOS_DUCKDB_LIBRARY OR NOT _AgentOS_DUCKDB_INCLUDE_DIR)
+        message(WARNING "AgentOS was built with DuckDB support but DuckDB was "
+                "not found on this system. Some features may be unavailable.")
+    endif()
+endif()
+
+# ── Optional: cppjieba ──
+set(AgentOS_JIEBA_ENABLED @_AGENTOS_JIEBA_ENABLED@)
+
+# ── Import targets ──
+include("${CMAKE_CURRENT_LIST_DIR}/AgentOSTargets.cmake")
+
+# ── Helper macros ──
+include("${CMAKE_CURRENT_LIST_DIR}/AgentOS.cmake" OPTIONAL)
+
+check_required_components(AgentOS)

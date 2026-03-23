@@ -207,8 +207,11 @@ set(AGENTOS_SOURCES
 )
 
 add_library(agentos STATIC ${AGENTOS_SOURCES})
-target_include_directories(agentos PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(agentos PUBLIC ${CMAKE_BINARY_DIR}/include)
+target_include_directories(agentos PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 target_include_directories(agentos PUBLIC ${SQLITE3_INCLUDE_DIRS})
 target_link_libraries(agentos PUBLIC Threads::Threads nlohmann_json::nlohmann_json CURL::libcurl hnswlib::hnswlib ${SQLITE3_TARGET} ${CMAKE_DL_LIBS})
 
@@ -397,6 +400,12 @@ set(TEST_SOURCES
   tests/test_cot_agent.cpp
   tests/test_plan_execute_agent.cpp
   tests/test_api_server.cpp
+  tests/test_api_streaming.cpp
+  tests/test_multimodal.cpp
+  tests/test_plugin_enhanced.cpp
+  tests/test_subworker_runtime.cpp
+  tests/test_e2e_scenarios.cpp
+  tests/test_smoke_real_llm.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
@@ -418,6 +427,9 @@ target_link_libraries(benchmark_graph_memory PRIVATE agentos)
 add_executable(benchmark_stress tests/benchmark_stress.cpp)
 target_link_libraries(benchmark_stress PRIVATE agentos)
 
+add_executable(benchmark_e2e tests/benchmark_e2e.cpp)
+target_link_libraries(benchmark_e2e PRIVATE agentos)
+
 # ---- Fuzz targets (optional, requires clang with libFuzzer) ----
 option(AGENTOS_ENABLE_FUZZER "Enable fuzz test targets" OFF)
 if(AGENTOS_ENABLE_FUZZER)
@@ -434,6 +446,8 @@ endif()
 
 # ── Install rules ──
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 install(TARGETS agentos
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -441,6 +455,35 @@ install(TARGETS agentos
 install(DIRECTORY include/agentos
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     FILES_MATCHING PATTERN "*.hpp"
+)
+
+# ── Config-mode packaging (find_package support) ──
+if(NOT AGENTOS_NO_DUCKDB)
+    set(_AGENTOS_DUCKDB_ENABLED TRUE)
+else()
+    set(_AGENTOS_DUCKDB_ENABLED FALSE)
+endif()
+if(AGENTOS_ENABLE_JIEBA)
+    set(_AGENTOS_JIEBA_ENABLED TRUE)
+else()
+    set(_AGENTOS_JIEBA_ENABLED FALSE)
+endif()
+
+configure_package_config_file(
+    "${CMAKE_SOURCE_DIR}/cmake/AgentOSConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/AgentOSConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/AgentOS
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/AgentOSConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/AgentOSConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/AgentOSConfigVersion.cmake"
+    "${CMAKE_SOURCE_DIR}/cmake/AgentOS.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/AgentOS
 )
 
 # ── DolphinDB Plugin (optional) ──

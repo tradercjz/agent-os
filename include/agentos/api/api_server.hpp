@@ -3,6 +3,7 @@
 // AgentOS :: API — REST API server with agent management
 // ============================================================
 #include <agentos/core/types.hpp>
+#include <agentos/api/streaming.hpp>
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -61,6 +62,7 @@ private:
     void handle_client(int client_fd);
     ApiRequest parse_request(const std::string& raw);
     ApiResponse dispatch(const ApiRequest& req);
+    bool is_stream_route(const std::string& method, const std::string& path) const;
 
     // Built-in routes
     void register_default_routes();
@@ -71,6 +73,7 @@ private:
     ApiResponse handle_get_agent(const ApiRequest& req);
     ApiResponse handle_delete_agent(const ApiRequest& req);
     ApiResponse handle_infer(const ApiRequest& req);
+    void handle_infer_stream(int client_fd, const ApiRequest& req);
     ApiResponse handle_health(const ApiRequest& req);
     ApiResponse handle_metrics(const ApiRequest& req);
     ApiResponse handle_prometheus(const ApiRequest& req);

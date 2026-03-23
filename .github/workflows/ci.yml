@@ -6,33 +6,48 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  DUCKDB_VERSION: "1.1.0"
+
 jobs:
-  build-linux:
+  # ── Build & Test ──────────────────────────────────────────────
+  build-and-test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        compiler: [gcc, clang]
+        compiler: [clang-17]
+        build_type: [RelWithDebInfo]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev pkg-config
-          # DuckDB - download pre-built
-          wget -q https://github.com/duckdb/duckdb/releases/download/v1.1.0/libduckdb-linux-amd64.zip
+          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev pkg-config \
+            clang-17 libc++-17-dev libc++abi-17-dev
+
+      - name: Install DuckDB
+        run: |
+          wget -q https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip
           unzip -q libduckdb-linux-amd64.zip -d /tmp/duckdb
           sudo cp /tmp/duckdb/duckdb.hpp /usr/local/include/
           sudo cp /tmp/duckdb/libduckdb.so /usr/local/lib/
           sudo ldconfig
 
-      - name: Configure CMake (GCC)
-        if: matrix.compiler == 'gcc'
-        run: cmake -B build -DCMAKE_CXX_COMPILER=g++-13 -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fetchcontent-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-
 
-      - name: Configure CMake (Clang)
-        if: matrix.compiler == 'clang'
-        run: cmake -B build -DCMAKE_CXX_COMPILER=clang++-17 -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_CXX_COMPILER=clang++-17 \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
 
       - name: Build
         run: cmake --build build -j$(nproc)
@@ -40,14 +55,55 @@ jobs:
       - name: Test
         run: cd build && ctest --output-on-failure -j$(nproc)
 
+  # ── Build without DuckDB ──────────────────────────────────────
+  build-no-duckdb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev pkg-config \
+            clang-17 libc++-17-dev libc++abi-17-dev
+
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fetchcontent-noduckdb-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            fetchcontent-noduckdb-${{ runner.os }}-
+
+      - name: Configure (no DuckDB)
+        run: |
+          cmake -B build \
+            -DCMAKE_CXX_COMPILER=clang++-17 \
+            -DAGENTOS_NO_DUCKDB=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test
+        run: cd build && ctest --output-on-failure -j$(nproc)
+
+  # ── macOS Build ───────────────────────────────────────────────
   build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: |
-          brew install curl sqlite duckdb pkg-config
+        run: brew install curl sqlite duckdb pkg-config
+
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fetchcontent-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-
 
       - name: Configure CMake
         run: cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -58,53 +114,103 @@ jobs:
       - name: Test
         run: cd build && ctest --output-on-failure -j$(sysctl -n hw.ncpu)
 
-  build-no-duckdb:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev pkg-config
-
-      - name: Configure (no DuckDB)
-        run: cmake -B build -DAGENTOS_NO_DUCKDB=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-
-      - name: Build
-        run: cmake --build build -j$(nproc)
-
-      - name: Test
-        run: cd build && ctest --output-on-failure
-
+  # ── Sanitizers ────────────────────────────────────────────────
   sanitizers:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        sanitizer: [asan, ubsan]
+        sanitizer:
+          - { name: asan, cmake_flag: AGENTOS_ENABLE_ASAN }
+          - { name: ubsan, cmake_flag: AGENTOS_ENABLE_UBSAN }
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev pkg-config
-          wget -q https://github.com/duckdb/duckdb/releases/download/v1.1.0/libduckdb-linux-amd64.zip
+          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev pkg-config \
+            clang-17 libc++-17-dev libc++abi-17-dev
+
+      - name: Install DuckDB
+        run: |
+          wget -q https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip
           unzip -q libduckdb-linux-amd64.zip -d /tmp/duckdb
           sudo cp /tmp/duckdb/duckdb.hpp /usr/local/include/
           sudo cp /tmp/duckdb/libduckdb.so /usr/local/lib/
           sudo ldconfig
 
-      - name: Configure with ASAN
-        if: matrix.sanitizer == 'asan'
-        run: cmake -B build -DAGENTOS_ENABLE_ASAN=ON -DCMAKE_BUILD_TYPE=Debug
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fetchcontent-san-${{ matrix.sanitizer.name }}-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            fetchcontent-san-${{ matrix.sanitizer.name }}-${{ runner.os }}-
 
-      - name: Configure with UBSAN
-        if: matrix.sanitizer == 'ubsan'
-        run: cmake -B build -DAGENTOS_ENABLE_UBSAN=ON -DCMAKE_BUILD_TYPE=Debug
+      - name: Configure with ${{ matrix.sanitizer.name }}
+        run: |
+          cmake -B build \
+            -DCMAKE_CXX_COMPILER=clang++-17 \
+            -D${{ matrix.sanitizer.cmake_flag }}=ON \
+            -DCMAKE_BUILD_TYPE=Debug
 
       - name: Build
         run: cmake --build build -j$(nproc)
 
       - name: Test
-        run: cd build && ctest --output-on-failure
+        env:
+          ASAN_OPTIONS: "detect_leaks=1:halt_on_error=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: cd build && ctest --output-on-failure -j$(nproc)
+
+  # ── Clang-Tidy Static Analysis ───────────────────────────────
+  clang-tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev pkg-config \
+            clang-17 clang-tidy-17 libc++-17-dev libc++abi-17-dev
+
+      - name: Install DuckDB
+        run: |
+          wget -q https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip
+          unzip -q libduckdb-linux-amd64.zip -d /tmp/duckdb
+          sudo cp /tmp/duckdb/duckdb.hpp /usr/local/include/
+          sudo cp /tmp/duckdb/libduckdb.so /usr/local/lib/
+          sudo ldconfig
+
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fetchcontent-tidy-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            fetchcontent-tidy-${{ runner.os }}-
+
+      - name: Configure CMake (generate compile_commands.json)
+        run: |
+          cmake -B build \
+            -DCMAKE_CXX_COMPILER=clang++-17 \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build (needed for generated headers)
+        run: cmake --build build -j$(nproc)
+
+      - name: Run clang-tidy on source files
+        run: |
+          find src -name '*.cpp' | head -50 | \
+            xargs -P$(nproc) -I{} clang-tidy-17 \
+              -p build \
+              --config-file=.clang-tidy \
+              {} 2>&1 | tee clang-tidy-output.txt
+          # Fail if there were warnings treated as errors
+          if grep -q "error:" clang-tidy-output.txt; then
+            echo "::error::clang-tidy found issues"
+            exit 1
+          fi

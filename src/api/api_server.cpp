@@ -12,6 +12,7 @@
 #include <poll.h>
 
 #include <array>
+#include <sstream>
 #include <string_view>
 
 namespace agentos::api {
@@ -125,11 +126,24 @@ void ApiServer::handle_client(int client_fd) {
 
     std::string raw(buf.data(), static_cast<size_t>(n));
     auto req = parse_request(raw);
+
+    // Streaming routes bypass normal dispatch — they write directly to the fd
+    if (is_stream_route(req.method, req.path)) {
+        handle_infer_stream(client_fd, req);
+        close(client_fd);
+        return;
+    }
+
     auto resp = dispatch(req);
 
     std::string http_resp = http_response(resp.status, resp.content_type, resp.body);
     (void)write(client_fd, http_resp.data(), http_resp.size());
     close(client_fd);
+}
+
+bool ApiServer::is_stream_route(const std::string& method,
+                                const std::string& path) const {
+    return method == "POST" && path == "/api/v1/infer/stream";
 }
 
 ApiRequest ApiServer::parse_request(const std::string& raw) {
@@ -397,6 +411,88 @@ ApiResponse ApiServer::handle_infer(const ApiRequest& req) {
     resp["tokens"]["prompt"] = result->prompt_tokens;
     resp["tokens"]["completion"] = result->completion_tokens;
     return ApiResponse::ok(resp);
+}
+
+void ApiServer::handle_infer_stream(int client_fd, const ApiRequest& req) {
+    StreamWriter writer(client_fd);
+
+    // Parse request body
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(req.body);
+    } catch (const nlohmann::json::parse_error& e) {
+        // Send error as normal HTTP response (stream not started yet)
+        auto err_resp = http_response(400, "application/json",
+            nlohmann::json({{"error", std::string("Invalid JSON: ") + e.what()},
+                            {"status", 400}}).dump());
+        (void)write(client_fd, err_resp.data(), err_resp.size());
+        return;
+    }
+
+    if (!j.contains("messages") || !j["messages"].is_array()) {
+        auto err_resp = http_response(400, "application/json",
+            nlohmann::json({{"error", "Missing or invalid 'messages' array"},
+                            {"status", 400}}).dump());
+        (void)write(client_fd, err_resp.data(), err_resp.size());
+        return;
+    }
+
+    // Build LLM request
+    kernel::LLMRequest llm_req;
+    for (const auto& msg : j["messages"]) {
+        auto role_str = msg.value("role", "user");
+        auto content = msg.value("content", "");
+        if (role_str == "system") {
+            llm_req.messages.push_back(kernel::Message::system(content));
+        } else if (role_str == "assistant") {
+            llm_req.messages.push_back(kernel::Message::assistant(content));
+        } else {
+            llm_req.messages.push_back(kernel::Message::user(content));
+        }
+    }
+    if (j.contains("model")) {
+        llm_req.model = j["model"].get<std::string>();
+    }
+
+    // Begin SSE stream
+    auto begin_r = writer.begin();
+    if (!begin_r.has_value()) {
+        LOG_ERROR(fmt::format("SSE stream begin failed: {}", begin_r.error().message));
+        return;
+    }
+
+    // Perform inference
+    auto result = os_.kernel().infer(llm_req);
+    if (!result.has_value()) {
+        // Send error event then close
+        (void)writer.send(make_error_event(result.error().message));
+        (void)writer.end();
+        return;
+    }
+
+    // Stream the content as token events.
+    // Since the underlying kernel returns a complete response, we simulate
+    // token-by-token streaming by splitting on whitespace boundaries.
+    const auto& content = result->content;
+    if (!content.empty()) {
+        std::istringstream iss(content);
+        std::string word;
+        bool first = true;
+        while (iss >> word) {
+            std::string token = first ? word : " " + word;
+            first = false;
+            auto sr = writer.send(make_token_event(token));
+            if (!sr.has_value()) {
+                LOG_WARN("SSE client disconnected during streaming");
+                return;
+            }
+        }
+    }
+
+    // Send done event with token counts
+    (void)writer.send(make_done_event(result->prompt_tokens,
+                                       result->completion_tokens));
+    (void)writer.end();
 }
 
 ApiResponse ApiServer::handle_prometheus(const ApiRequest& /*req*/) {

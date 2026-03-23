@@ -189,7 +189,7 @@ std::optional<ContextSnapshot> ContextSnapshot::deserialize_binary(std::span<con
     std::string name = read_str();
     std::string tc_id = read_str();
     if (!ok) return std::nullopt;
-    snap.messages.push_back({role, std::move(content), std::move(name), std::move(tc_id), {}});
+    snap.messages.push_back({role, std::move(content), std::move(name), std::move(tc_id), {}, {}});
   }
   snap.metadata_json = read_str();
   if (!ok) return std::nullopt;

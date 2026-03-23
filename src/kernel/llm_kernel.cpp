@@ -243,6 +243,47 @@ std::string OpenAIBackend::build_request_json(const LLMRequest &req) const {
         }
         msg_obj["tool_calls"] = tool_calls_arr;
       }
+    } else if (!m.attachments.empty()) {
+      // Multi-modal: build content array with text + attachments
+      Json content_arr = Json::array();
+      if (!m.content.empty()) {
+        content_arr.push_back(Json{{"type", "text"}, {"text", m.content}});
+      }
+      for (const auto &part : m.attachments) {
+        switch (part.type) {
+        case ContentType::Image: {
+          Json img_obj = Json::object();
+          img_obj["type"] = "image_url";
+          Json url_obj = Json::object();
+          if (part.is_base64 && !part.data.empty()) {
+            url_obj["url"] = fmt::format("data:{};base64,{}", part.mime_type, part.data);
+          } else {
+            url_obj["url"] = part.url;
+          }
+          img_obj["image_url"] = url_obj;
+          content_arr.push_back(img_obj);
+          break;
+        }
+        case ContentType::Audio: {
+          Json audio_obj = Json::object();
+          audio_obj["type"] = "input_audio";
+          Json audio_data = Json::object();
+          audio_data["data"] = part.data;
+          audio_data["format"] = part.mime_type;
+          audio_obj["input_audio"] = audio_data;
+          content_arr.push_back(audio_obj);
+          break;
+        }
+        case ContentType::Video:
+        case ContentType::Text:
+          // Video/Text attachments: include as text reference
+          if (!part.data.empty()) {
+            content_arr.push_back(Json{{"type", "text"}, {"text", part.data}});
+          }
+          break;
+        }
+      }
+      msg_obj["content"] = content_arr;
     } else {
       msg_obj["content"] = m.content;
     }

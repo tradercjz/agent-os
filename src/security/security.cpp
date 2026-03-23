@@ -142,8 +142,63 @@ size_t InjectionDetector::pattern_count() const noexcept {
 }
 
 void InjectionDetector::build_trie() const {
-    // Stub or implementation of AC trie
-    // For now we use the O(n*m) scan below which doesn't use the trie.
+    // Build Aho-Corasick automaton from patterns_
+    // Caller must hold mu_
+    trie_.clear();
+    trie_.push_back(ACTrieNode{}); // root node at index 0
+
+    // Phase 1: Insert all patterns into the trie (goto function)
+    for (size_t pi = 0; pi < patterns_.size(); ++pi) {
+        int cur = 0;
+        for (char c : patterns_[pi]) {
+            auto it = trie_[static_cast<size_t>(cur)].children.find(c);
+            if (it == trie_[static_cast<size_t>(cur)].children.end()) {
+                auto next = static_cast<int>(trie_.size());
+                trie_[static_cast<size_t>(cur)].children[c] = next;
+                trie_.push_back(ACTrieNode{});
+                cur = next;
+            } else {
+                cur = it->second;
+            }
+        }
+        trie_[static_cast<size_t>(cur)].match_indices.push_back(pi);
+    }
+
+    // Phase 2: Build failure links via BFS
+    std::queue<int> bfs;
+    // Initialize depth-1 nodes: their fail links point to root
+    for (auto& [ch, child_idx] : trie_[0].children) {
+        trie_[static_cast<size_t>(child_idx)].fail = 0;
+        bfs.push(child_idx);
+    }
+
+    while (!bfs.empty()) {
+        int u = bfs.front();
+        bfs.pop();
+        for (auto& [ch, v] : trie_[static_cast<size_t>(u)].children) {
+            // Walk up failure links to find longest proper suffix that is a prefix
+            int f = trie_[static_cast<size_t>(u)].fail;
+            while (f != 0 &&
+                   trie_[static_cast<size_t>(f)].children.find(ch) ==
+                       trie_[static_cast<size_t>(f)].children.end()) {
+                f = trie_[static_cast<size_t>(f)].fail;
+            }
+            auto fit = trie_[static_cast<size_t>(f)].children.find(ch);
+            if (fit != trie_[static_cast<size_t>(f)].children.end() && fit->second != v) {
+                trie_[static_cast<size_t>(v)].fail = fit->second;
+            } else {
+                trie_[static_cast<size_t>(v)].fail = 0;
+            }
+            // Merge output from the fail node (dictionary suffix links)
+            auto& fail_matches = trie_[static_cast<size_t>(trie_[static_cast<size_t>(v)].fail)].match_indices;
+            for (auto idx : fail_matches) {
+                trie_[static_cast<size_t>(v)].match_indices.push_back(idx);
+            }
+            bfs.push(v);
+        }
+    }
+
+    trie_dirty_ = false;
 }
 
 InjectionDetector::DetectionResult InjectionDetector::scan(std::string_view text) const {
@@ -207,11 +262,42 @@ InjectionDetector::DetectionResult InjectionDetector::scan(std::string_view text
     };
 
     std::lock_guard lk(mu_);
-    // O(n*m) scan — acceptable for kMaxScanLength=100KB and ~14 patterns
-    // TODO: Switch to Aho-Corasick if pattern count exceeds 50
-    for (const auto& pat : patterns_) {
-        if (contains_keyword(lower, pat)) {
-            return {true, pat, 0.9f};  // early exit on first match
+
+    if (patterns_.size() > 50) {
+        // Use Aho-Corasick for large pattern sets: O(n + m + z) total
+        if (trie_dirty_) {
+            build_trie();
+        }
+
+        int cur = 0;
+        for (size_t i = 0; i < lower.size(); ++i) {
+            char c = lower[i];
+            // Follow failure links until we find a transition or reach root
+            while (cur != 0 &&
+                   trie_[static_cast<size_t>(cur)].children.find(c) ==
+                       trie_[static_cast<size_t>(cur)].children.end()) {
+                cur = trie_[static_cast<size_t>(cur)].fail;
+            }
+            auto it = trie_[static_cast<size_t>(cur)].children.find(c);
+            if (it != trie_[static_cast<size_t>(cur)].children.end()) {
+                cur = it->second;
+            }
+            // Check all patterns that end at this position
+            for (size_t pi : trie_[static_cast<size_t>(cur)].match_indices) {
+                const auto& pat = patterns_[pi];
+                // Verify word boundary: match ends at position i, starts at i+1-pat.size()
+                size_t match_start = i + 1 - pat.size();
+                if (at_word_boundary(lower, match_start, pat.size())) {
+                    return {true, pat, 0.9f};
+                }
+            }
+        }
+    } else {
+        // O(n*m) linear scan — acceptable for small pattern sets
+        for (const auto& pat : patterns_) {
+            if (contains_keyword(lower, pat)) {
+                return {true, pat, 0.9f};
+            }
         }
     }
 

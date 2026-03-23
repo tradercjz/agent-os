@@ -33,6 +33,17 @@ namespace agentos::kernel {
 
 enum class Role { System, User, Assistant, Tool };
 
+// ── Multi-modal content types ──────────────────────────────
+enum class ContentType { Text, Image, Audio, Video };
+
+struct ContentPart {
+  ContentType type{ContentType::Text};
+  std::string data;       // Text content, base64 data, or empty
+  std::string mime_type;  // e.g. "image/png", "audio/wav"
+  std::string url;        // URL for remote resources
+  bool is_base64{false};  // true if data is base64-encoded binary
+};
+
 struct ToolCallRequest {
   std::string id;        // 工具调用 ID（LLM 生成）
   std::string name;      // 工具名
@@ -44,9 +55,12 @@ struct Message {
   std::string content;
   std::string name;                        // 工具名（role=Tool 时）
   std::string tool_call_id;                // 工具调用时填写
-  
+
   static constexpr size_t kSmallToolCalls = 4;
-  std::vector<ToolCallRequest> tool_calls; 
+  std::vector<ToolCallRequest> tool_calls;
+
+  // Multi-modal attachments (images, audio, video)
+  std::vector<ContentPart> attachments;
 
   // R5-5: Cache token count to avoid redundant estimation.
   mutable TokenCount cached_tokens{0};
@@ -55,13 +69,38 @@ struct Message {
 
   // 静态工厂方法
   static Message system(std::string c) {
-    return {.role = Role::System, .content = std::move(c), .name = {}, .tool_call_id = {}, .tool_calls = {}};
+    return {.role = Role::System, .content = std::move(c), .name = {}, .tool_call_id = {}, .tool_calls = {}, .attachments = {}};
   }
   static Message user(std::string c) {
-    return {.role = Role::User, .content = std::move(c), .name = {}, .tool_call_id = {}, .tool_calls = {}};
+    return {.role = Role::User, .content = std::move(c), .name = {}, .tool_call_id = {}, .tool_calls = {}, .attachments = {}};
   }
   static Message assistant(std::string c) {
-    return {.role = Role::Assistant, .content = std::move(c), .name = {}, .tool_call_id = {}, .tool_calls = {}};
+    return {.role = Role::Assistant, .content = std::move(c), .name = {}, .tool_call_id = {}, .tool_calls = {}, .attachments = {}};
+  }
+
+  // Multi-modal factory methods
+  static Message user_with_image(std::string text, std::string image_url) {
+    Message msg{.role = Role::User, .content = std::move(text), .name = {}, .tool_call_id = {}, .tool_calls = {}, .attachments = {}};
+    msg.attachments.push_back(ContentPart{
+      .type = ContentType::Image,
+      .data = {},
+      .mime_type = "image/png",
+      .url = std::move(image_url),
+      .is_base64 = false,
+    });
+    return msg;
+  }
+
+  static Message user_with_audio(std::string text, std::string audio_data, std::string mime = "audio/wav") {
+    Message msg{.role = Role::User, .content = std::move(text), .name = {}, .tool_call_id = {}, .tool_calls = {}, .attachments = {}};
+    msg.attachments.push_back(ContentPart{
+      .type = ContentType::Audio,
+      .data = std::move(audio_data),
+      .mime_type = std::move(mime),
+      .url = {},
+      .is_base64 = true,
+    });
+    return msg;
   }
 };
 
@@ -130,6 +169,12 @@ public:
   }
   LLMRequestBuilder& tools_json(std::string json) {
     req_.tools_json = std::move(json);
+    return *this;
+  }
+  LLMRequestBuilder& attachments(std::vector<ContentPart> parts) {
+    if (!req_.messages.empty()) {
+      req_.messages.back().attachments = std::move(parts);
+    }
     return *this;
   }
 
