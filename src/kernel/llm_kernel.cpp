@@ -413,7 +413,7 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
         if (err_obj.contains("message") && err_obj["message"].is_string())
           error_msg = err_obj["message"].get<std::string>();
       }
-    } catch (...) { /* not JSON, use raw body */ }
+    } catch (const nlohmann::json::exception&) { /* not JSON, use raw body */ }
 
     if (error_msg.empty())
       error_msg = result->body.substr(0, 500);

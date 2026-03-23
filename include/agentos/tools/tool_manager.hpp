@@ -625,13 +625,13 @@ public:
   dispatch(const kernel::ToolCallRequest &call,
            const std::unordered_set<std::string> &allowed_tools = {}) {
     // 检查工具是否被允许
-    if (!allowed_tools.empty() && !allowed_tools.contains(call.name)) {
+    if (!allowed_tools.empty() && !allowed_tools.contains(call.name)) [[unlikely]] {
       return ToolResult::fail(
           fmt::format("Tool '{}' not in allowed set", call.name));
     }
 
     auto tool = registry_.find(call.name);
-    if (!tool) {
+    if (!tool) [[unlikely]] {
       return ToolResult::fail(
           fmt::format("Tool '{}' not found in registry", call.name));
     }
@@ -642,7 +642,7 @@ public:
     // Validate required arguments before spawning async task (early return avoids
     // creating unnecessary threads for malformed requests)
     auto schema = tool->schema();
-    if (auto v = validate_tool_args(schema, args); !v)
+    if (auto v = validate_tool_args(schema, args); !v) [[unlikely]]
       return ToolResult::fail(v.error().message);
 
     // Apply per-tool timeout override from registry if set
@@ -662,7 +662,7 @@ public:
         auto status = future.wait_for(
             std::chrono::milliseconds(effective_timeout_ms));
 
-        if (status == std::future_status::timeout) {
+        if (status == std::future_status::timeout) [[unlikely]] {
           // Cancel the tool execution cooperatively
           stop_source.request_stop();
           return ToolResult::fail(
@@ -673,8 +673,6 @@ public:
           return future.get();
         } catch (const std::exception &e) {
           return ToolResult{false, fmt::format("Tool threw exception: {}", e.what()), {}};
-        } catch (...) {
-          return ToolResult{false, "Tool threw unknown exception", {}};
         }
       }
       return tool->execute(args, {});

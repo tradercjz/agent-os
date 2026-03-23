@@ -102,7 +102,7 @@ public:
         std::thread([os, agent, promise, task = req.task, aid]() mutable {
             try {
                 promise->set_value(agent->run(std::move(task)));
-            } catch (...) {
+            } catch (const std::exception& e) {
                 promise->set_exception(std::current_exception());
             }
             os->destroy_agent(aid);
@@ -143,7 +143,7 @@ public:
         Json j;
         try {
             j = Json::parse(json_str);
-        } catch (...) {
+        } catch (const nlohmann::json::exception&) {
             return {.success = false, .output = "",
                     .error = "Invalid JSON", .duration_ms = 0, .tokens_used = 0};
         }

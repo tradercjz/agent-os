@@ -80,7 +80,7 @@ public:
 
   void flush() {
     std::unique_lock lk(mu_);
-    cv_flush_.wait(lk, [this] { return queue_.empty(); });
+    cv_flush_.wait(lk, [this] { return queue_.empty() && !processing_; });
   }
 
 private:
@@ -148,10 +148,15 @@ private:
           batch.push_back(std::move(queue_.front()));
           queue_.pop_front();
         }
+        processing_ = true;
       }
-      
+
       for (const auto &event : batch) {
         process_event(event);
+      }
+      {
+        std::lock_guard lk(mu_);
+        processing_ = false;
       }
       cv_flush_.notify_all();
     }
@@ -207,6 +212,7 @@ private:
   std::deque<agentos::LogEvent> queue_;
   std::thread worker_;
   bool stop_{false};
+  bool processing_{false};
   static constexpr size_t kMaxQueueSize = 10000;
   std::vector<std::shared_ptr<ILogSink>> sinks_;
   mutable std::shared_mutex sinks_mu_;

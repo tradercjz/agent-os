@@ -563,7 +563,8 @@ private:
             e.source_id = unescape(parts[1]);
             e.target_id = unescape(parts[2]);
             e.relation = unescape(parts[3]);
-            e.weight = std::stof(parts[4]);
+            try { e.weight = std::stof(parts[4]); }
+            catch (const std::exception&) { e.weight = 1.0f; }
             e.start_ts = std::stoull(parts[5]);
             e.end_ts = std::stoull(parts[6]);
 

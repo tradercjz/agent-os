@@ -807,7 +807,7 @@ AgentBase<Derived>::act(const kernel::ToolCallRequest &call) {
 
   // Parse args for tool-level hooks
   Json parsed_args;
-  try { parsed_args = Json::parse(call.args_json); } catch (...) { parsed_args = Json::object(); }
+  try { parsed_args = Json::parse(call.args_json); } catch (const nlohmann::json::exception&) { parsed_args = Json::object(); }
 
   // Pre-tool-use hook: can cancel specific tool calls
   HookContext pre_tool_ctx{this->id_, "pre_tool_use", call.name, parsed_args, false, {}, nullptr};

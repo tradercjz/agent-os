@@ -397,7 +397,7 @@ public:
             if (is_regex) {
                 try {
                     return std::regex_search(text.begin(), text.end(), std::regex(trigger_pattern));
-                } catch (...) { return false; }
+                } catch (const std::regex_error&) { return false; }
             }
             return text.find(trigger_pattern) != std::string_view::npos;
         }

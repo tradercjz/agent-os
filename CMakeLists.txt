@@ -54,6 +54,36 @@ if(AGENTOS_ENABLE_UBSAN)
     add_link_options(-fsanitize=undefined)
 endif()
 
+# ── Link-Time Optimization (enable via cmake -DAGENTOS_ENABLE_LTO=ON) ──
+option(AGENTOS_ENABLE_LTO "Enable Link-Time Optimization" OFF)
+if(AGENTOS_ENABLE_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
+    if(lto_supported)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+        message(STATUS "LTO: enabled")
+    else()
+        message(WARNING "LTO requested but not supported: ${lto_error}")
+    endif()
+endif()
+
+# ── Native architecture (enable via cmake -DAGENTOS_NATIVE_ARCH=ON) ──
+option(AGENTOS_NATIVE_ARCH "Enable -march=native for non-portable optimized builds" OFF)
+if(AGENTOS_NATIVE_ARCH)
+    add_compile_options(-march=native)
+    message(STATUS "Native arch: -march=native enabled")
+endif()
+
+# ── Release build profile ──
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options(-O3 -DNDEBUG)
+    if(AGENTOS_NATIVE_ARCH)
+        message(STATUS "Release build: -O3 -DNDEBUG -march=native")
+    else()
+        message(STATUS "Release build: -O3 -DNDEBUG")
+    endif()
+endif()
+
 # ── Static analysis ──
 option(AGENTOS_ENABLE_CLANG_TIDY "Enable clang-tidy" OFF)
 if(AGENTOS_ENABLE_CLANG_TIDY)

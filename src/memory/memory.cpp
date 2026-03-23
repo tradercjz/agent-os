@@ -54,6 +54,7 @@ Result<std::vector<SearchResult>> WorkingMemory::search(const Embedding &q_emb,
                                          size_t top_k) {
   std::lock_guard lk(mu_);
   std::vector<SearchResult> results;
+  results.reserve(std::min(store_.size(), top_k));
   for (auto &[id, entry] : store_) {
     if (!filter.match(entry.user_id, entry.agent_id, entry.session_id,
                       entry.type))
@@ -228,6 +229,7 @@ Result<std::vector<SearchResult>> ShortTermMemory::search(const Embedding &q_emb
     return results;
   }
 
+  results.reserve(res.size());
   while (!res.empty()) {
     auto [dist, label] = res.top();
     res.pop();
@@ -619,7 +621,7 @@ Result<std::vector<SearchResult>> LongTermMemory::search(const Embedding &q_emb,
   std::lock_guard lk(mu_);
   std::vector<SearchResult> results;
 
-  if (q_emb.empty() || !hnsw_index_ || hnsw_index_->cur_element_count == 0) {
+  if (q_emb.empty() || !hnsw_index_ || hnsw_index_->cur_element_count == 0) [[unlikely]] {
     // 退化线性过滤
     for (auto &[id, rec] : index_) {
       if (filter.match(rec.user_id, rec.agent_id, rec.session_id, rec.type)) {
@@ -634,7 +636,7 @@ Result<std::vector<SearchResult>> LongTermMemory::search(const Embedding &q_emb,
     return results;
   }
 
-  if (q_emb.size() != dim_)
+  if (q_emb.size() != dim_) [[unlikely]]
     return make_error(ErrorCode::InvalidArgument, "Dim mismatch");
 
   // 使用持久化反向映射，O(1) 构造过滤器
@@ -653,6 +655,7 @@ Result<std::vector<SearchResult>> LongTermMemory::search(const Embedding &q_emb,
     return results;
   }
 
+  results.reserve(res.size());
   while (!res.empty()) {
     auto [dist, label] = res.top();
     res.pop();
@@ -939,6 +942,7 @@ Result<std::vector<SearchResult>> MemorySystem::recall(const Embedding &q_emb,
                                          const MemoryFilter &filter,
                                          size_t top_k) {
   std::vector<SearchResult> results;
+  results.reserve(top_k * 3); // Pre-allocate for L0+L1+L2 merge
   std::unordered_set<std::string> seen_ids; // O(1) 去重
 
   auto merge = [&](Result<std::vector<SearchResult>> &r) {

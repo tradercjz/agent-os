@@ -79,8 +79,8 @@ void AsyncHttpClient::stop() {
     {
         std::lock_guard lk(mu_);
         for (auto* req : new_requests_) {
-            if (req->promise_ptr) {
-                req->promise_ptr->set_value(
+            if (req->promise) {
+                req->promise->set_value(
                     make_error(ErrorCode::Cancelled, "AsyncHttpClient shutting down"));
             }
             if (req->result_ptr) {
@@ -219,9 +219,8 @@ Result<HttpResponse> AsyncHttpClient::post_blocking(
     curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
     req->easy = easy;
 
-    std::promise<Result<HttpResponse>> prom;
-    auto fut = prom.get_future();
-    req->promise_ptr = &prom;
+    req->promise.emplace();
+    auto fut = req->promise->get_future();
 
     // Enqueue
     {
@@ -317,19 +316,24 @@ void AsyncHttpClient::process_completed(CURLMsg* msg) {
         result = HttpResponse{http_code, std::move(req->response_body)};
     }
 
-    // Save handles before cleanup
+    // Save coroutine handle before cleanup (promise is owned by req)
     auto continuation = req->continuation;
-    auto* promise_ptr = req->promise_ptr;
     auto* result_ptr = req->result_ptr;
 
-    // Deliver result: exactly one of coroutine or promise path is active
+    // Deliver result: exactly one of coroutine or promise path is active.
+    // For the promise path, set_value MUST happen before cleanup_request
+    // deletes req (which owns the promise). The blocked future::get() in
+    // post_blocking will unblock and read the value before the promise is
+    // destroyed, because std::future retains the shared state.
     if (result_ptr) {
         *result_ptr = std::move(result);
-    } else if (promise_ptr) {
-        promise_ptr->set_value(std::move(result));
+    } else if (req->promise) {
+        req->promise->set_value(std::move(result));
     }
 
-    // Cleanup the request (frees easy, headers, deletes req)
+    // Cleanup the request (frees easy, headers, deletes req and its promise).
+    // This is safe: std::future holds a reference to the shared state, so
+    // the shared state outlives the promise object.
     cleanup_request(req);
 
     // Resume coroutine continuation (after cleanup so req is done)

@@ -12,6 +12,7 @@
 #include <functional>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -60,8 +61,9 @@ private:
         // Coroutine path
         std::coroutine_handle<> continuation;
         Result<HttpResponse>* result_ptr{nullptr};
-        // Future path (for post_blocking)
-        std::promise<Result<HttpResponse>>* promise_ptr{nullptr};
+        // Future path (for post_blocking) -- promise owned by PendingRequest
+        // to prevent use-after-free from stack-allocated promises.
+        std::optional<std::promise<Result<HttpResponse>>> promise;
     };
 
     void event_loop();

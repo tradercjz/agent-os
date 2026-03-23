@@ -365,7 +365,7 @@ inline Result<std::string> SupervisorAgent::run(std::string user_input) {
                     auto j = nlohmann::json::parse(call.args_json);
                     if (j.contains("task") && j["task"].is_string())
                         task_str = j["task"].get<std::string>();
-                } catch (...) {}
+                } catch (const nlohmann::json::exception&) { /* use raw args_json as task */ }
 
                 auto sub_res = run_subworker(call.name, task_str);
                 obs = sub_res ? format_subworker_observation(*sub_res)
@@ -379,7 +379,7 @@ inline Result<std::string> SupervisorAgent::run(std::string user_input) {
                         auto j = nlohmann::json::parse(call.args_json);
                         if (j.contains("task") && j["task"].is_string())
                             task_str = j["task"].get<std::string>();
-                    } catch (...) {}
+                    } catch (const nlohmann::json::exception&) { /* use raw args_json as task */ }
 
                     tool_res = dispatch_worker(it->second, task_str, call_counts[call.name]);
                 } else {

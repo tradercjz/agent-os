@@ -81,7 +81,7 @@ public:
         Json j;
         try {
             j = Json::parse(json_str);
-        } catch (...) {
+        } catch (const nlohmann::json::exception&) {
             return make_error_response(nullptr, error_code::ParseError,
                                        "Parse error");
         }
