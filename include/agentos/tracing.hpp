@@ -76,6 +76,7 @@ public:
     std::string export_otlp_json(const std::string& trace_id) const;
 
     bool enabled() const noexcept { return config_.enabled; }
+    void set_enabled(bool v) noexcept { config_.enabled = v; }
     const TracerConfig& config() const noexcept { return config_; }
 
 private:

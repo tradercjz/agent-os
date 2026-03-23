@@ -12,6 +12,17 @@ protected:
         wt_base_ = repo_root_ / "build" / "test_wt_integration";
         if (fs::exists(wt_base_)) fs::remove_all(wt_base_);
 
+        // Clean up stale worktrees and agent/* branches from prior runs
+        std::string prune = "git -C '" + repo_root_.string()
+                          + "' worktree prune 2>/dev/null";
+        (void)system(prune.c_str());
+
+        std::string cleanup = "git -C '" + repo_root_.string()
+                            + "' for-each-ref --format='%(refname:short)'"
+                              " refs/heads/agent/ | xargs git -C '"
+                            + repo_root_.string() + "' branch -D 2>/dev/null";
+        (void)system(cleanup.c_str());
+
         auto backend = std::make_unique<kernel::MockLLMBackend>("mock");
         os_ = std::make_unique<AgentOS>(
             std::move(backend),
@@ -32,7 +43,8 @@ protected:
 
         // Delete agent/* branches left behind
         std::string cleanup = "git -C '" + repo_root_.string()
-                            + "' branch --list 'agent/*' | xargs -r git -C '"
+                            + "' for-each-ref --format='%(refname:short)'"
+                              " refs/heads/agent/ | xargs git -C '"
                             + repo_root_.string() + "' branch -D 2>/dev/null";
         (void)system(cleanup.c_str());
 

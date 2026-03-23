@@ -2,6 +2,7 @@
 // ============================================================
 // AgentOS :: Anthropic Claude Backend
 // ============================================================
+#include <agentos/kernel/base_backend.hpp>
 #include <agentos/kernel/http_client.hpp>
 #include <agentos/kernel/llm_kernel.hpp>
 #include <memory>

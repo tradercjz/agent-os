@@ -146,21 +146,13 @@ Result<LLMResponse> AnthropicBackend::complete(const LLMRequest& req) {
     auto body = build_request(req);
     auto headers = build_headers();
 
-    auto result = http_->post(base_url_ + "/v1/messages", body.dump(), headers);
-    if (!result.has_value()) {
-        return make_error(result.error().code,
-                         ::agentos::fmt::format("Anthropic HTTP error: {}", result.error().message));
+    auto http_result = BackendUtils::http_post_json(
+        "Anthropic", *http_, base_url_ + "/v1/messages", body.dump(), headers);
+    if (!http_result.has_value()) {
+        return make_error(http_result.error().code, http_result.error().message);
     }
 
-    if (result->status_code != 200) {
-        // Try to parse error from body
-        auto parsed = parse_response(result->body);
-        if (!parsed.has_value()) return parsed;
-        return make_error(ErrorCode::LLMBackendError,
-                         ::agentos::fmt::format("Anthropic: HTTP {}", result->status_code));
-    }
-
-    return parse_response(result->body);
+    return parse_response(*http_result);
 }
 
 Result<LLMResponse> AnthropicBackend::stream(const LLMRequest& req, TokenCallback cb) {

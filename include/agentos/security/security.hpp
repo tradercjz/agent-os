@@ -215,6 +215,7 @@ private:
     static constexpr size_t kMaxScanLength = 100000; // 100KB scan cap
     mutable std::mutex mu_;
     std::vector<std::string> patterns_;
+    std::unordered_set<std::string> pattern_set_; // O(1) contains/dedup index
     mutable std::vector<ACTrieNode> trie_;
     mutable bool trie_dirty_ = true;
 

@@ -306,7 +306,10 @@ cpp-agent-os/
 │       ├── core/
 │       │   ├── compat.hpp          # 兼容层与辅助 polyfill
 │       │   ├── types.hpp           # 核心类型、错误体系、Result<T>
-│       │   └── task.hpp            # Task<T> 抽象
+│       │   ├── task.hpp            # Task<T> 抽象
+│       │   └── plugin.hpp          # 插件系统（dlopen, 热重载, 依赖排序）
+│       ├── api/
+│       │   └── streaming.hpp       # SSE 流式推理
 │       ├── kernel/
 │       │   └── llm_kernel.hpp      # LLM 内核 + 后端抽象
 │       ├── scheduler/
@@ -358,8 +361,14 @@ cpp-agent-os/
 - **Header-first Public API**：公共接口集中在 `include/agentos/`，但核心实现仍在 `src/`
 - **C++23 构建基线**：当前 CMake 以 `C++23` 编译，面向现代编译器工具链
 - **可插拔后端**：`ILLMBackend` 接口可对接任意 LLM API
-- **纵深安全**：RBAC + Taint + Injection Detection + ECL 四道防线
+- **SSE 流式推理**：`/api/v1/infer/stream` 端点，基于 Server-Sent Events 的实时 token 流
+- **多模态支持**：`ContentPart` 类型支持图片、音频、视频附件
+- **增强插件系统**：热重载、依赖拓扑排序、目录批量扫描
+- **Aho-Corasick 注入检测**：高性能多模式匹配替代逐条正则扫描
+- **纵深安全**：RBAC + Taint + Injection Detection (Aho-Corasick) + ECL 四道防线
 - **可观测性**：内置 `KernelMetrics`、ECL `audit_log`、Bus `audit_trail`
+- **CI/CD**：GitHub Actions 自动构建、测试、sanitizer 检查和静态分析
+- **CMake find_package**：下游项目可通过 `find_package(AgentOS)` 集成
 
 ---
 
@@ -425,6 +434,41 @@ curl -X POST http://localhost:9090/api/v1/agents \
 curl -X POST http://localhost:9090/api/v1/infer \
   -d '{"messages":[{"role":"user","content":"Hello"}]}'
 ```
+
+### SSE Streaming
+
+Real-time token streaming via Server-Sent Events on `/api/v1/infer/stream`:
+
+```cpp
+// Server-side: stream tokens to client
+api::StreamWriter writer(client_fd);
+writer.begin();
+writer.send(api::make_token_event("Hello"));
+writer.send(api::make_token_event(" world"));
+writer.send(api::make_done_event(/*prompt_tokens=*/10, /*completion_tokens=*/2));
+writer.end();
+```
+
+See [`include/agentos/api/streaming.hpp`](include/agentos/api/streaming.hpp) for full API.
+
+### Multimodal Support
+
+Messages can carry image, audio, or video attachments via `ContentPart`:
+
+```cpp
+// Image from URL
+auto msg = kernel::Message::user_with_image("Describe this", "https://example.com/photo.png");
+
+// Audio (base64)
+auto msg2 = kernel::Message::user_with_audio("Transcribe this", audio_b64, "audio/wav");
+
+// Arbitrary attachments via ContentPart
+kernel::ContentPart part{.type = kernel::ContentType::Video, .data = video_b64,
+                         .mime_type = "video/mp4", .is_base64 = true};
+msg.attachments.push_back(part);
+```
+
+See [`include/agentos/kernel/llm_kernel.hpp`](include/agentos/kernel/llm_kernel.hpp) for `ContentType`, `ContentPart`, and factory methods.
 
 ### Multi-Agent Collaboration
 
@@ -492,7 +536,18 @@ auto loaded = store.load("conv-001");
 ```cpp
 os->plugins().load("path/to/plugin.dylib", *os);
 auto* p = os->plugins().find("my-plugin");
+
+// Scan a directory for all plugins
+os->plugins().scan_directory("/opt/agentos/plugins", *os);
+
+// Hot-reload a plugin at runtime
+os->plugins().reload("my-plugin", *os);
+
+// Load with dependency ordering (topological sort)
+os->plugins().load_ordered({"a.dylib", "b.dylib", "c.dylib"}, *os);
 ```
+
+Plugins declare dependencies via `IPlugin::dependencies()`. See [`include/agentos/core/plugin.hpp`](include/agentos/core/plugin.hpp).
 
 ### Hot Configuration
 
@@ -513,6 +568,41 @@ auto os = AgentOSBuilder().mock().config_file("agentos.json").build();
 | `AGENTOS_ENABLE_FUZZER` | OFF | Fuzz test targets |
 | `AGENTOS_ENABLE_ASAN` | OFF | AddressSanitizer |
 | `AGENTOS_ENABLE_UBSAN` | OFF | UndefinedBehaviorSanitizer |
+
+### CI/CD
+
+GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and PR to `main`:
+
+- **Build & Test** — clang-17, Linux and macOS, with and without DuckDB
+- **Sanitizers** — AddressSanitizer and UndefinedBehaviorSanitizer
+- **Static Analysis** — clang-tidy on all source files (bugprone/performance warnings as errors)
+- **FetchContent caching** for fast incremental CI
+
+**2376 tests** passing across all configurations.
+
+### Code Quality
+
+- **clang-tidy** (`.clang-tidy`) — readability, performance, bugprone, modernize, and cppcoreguidelines checks enabled. `bugprone-*` and `performance-*` treated as errors.
+- **clang-format** (`.clang-format`) — LLVM-based style, C++23, 100-column limit, automated include regrouping.
+
+```bash
+# Format all source files
+find src include -name '*.hpp' -o -name '*.cpp' | xargs clang-format -i
+
+# Run clang-tidy
+clang-tidy -p build src/kernel/llm_kernel.cpp
+```
+
+### CMake Integration
+
+Downstream projects can consume AgentOS via `find_package`:
+
+```cmake
+find_package(AgentOS REQUIRED)
+target_link_libraries(my_app PRIVATE AgentOS::AgentOS)
+```
+
+The config-mode package file automatically locates transitive dependencies (Threads, CURL, nlohmann_json, SQLite3, hnswlib, and optionally DuckDB). See [`cmake/AgentOSConfig.cmake.in`](cmake/AgentOSConfig.cmake.in).
 
 ### Examples
 

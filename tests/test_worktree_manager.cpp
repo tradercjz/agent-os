@@ -14,6 +14,16 @@ protected:
         if (fs::exists(worktree_base_)) {
             fs::remove_all(worktree_base_);
         }
+        // Clean up stale worktrees and agent/* branches from prior runs
+        std::string prune = "git -C '" + repo_root_.string()
+                          + "' worktree prune 2>/dev/null";
+        (void)system(prune.c_str());
+
+        std::string cleanup = "git -C '" + repo_root_.string()
+                            + "' for-each-ref --format='%(refname:short)'"
+                              " refs/heads/agent/ | xargs git -C '"
+                            + repo_root_.string() + "' branch -D 2>/dev/null";
+        (void)system(cleanup.c_str());
     }
 
     void TearDown() override {
@@ -29,6 +39,16 @@ protected:
         if (fs::exists(worktree_base_)) {
             fs::remove_all(worktree_base_);
         }
+        // Prune stale worktree metadata and delete leftover agent/* branches
+        std::string prune = "git -C '" + repo_root_.string()
+                          + "' worktree prune 2>/dev/null";
+        (void)system(prune.c_str());
+
+        std::string cleanup = "git -C '" + repo_root_.string()
+                            + "' for-each-ref --format='%(refname:short)'"
+                              " refs/heads/agent/ | xargs git -C '"
+                            + repo_root_.string() + "' branch -D 2>/dev/null";
+        (void)system(cleanup.c_str());
     }
 
     void make_mgr(uint32_t max_concurrent = 4) {

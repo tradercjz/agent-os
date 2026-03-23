@@ -110,29 +110,36 @@ InjectionDetector::InjectionDetector() {
         "现在你是",
         "扮演",
     };
+    pattern_set_.insert(patterns_.begin(), patterns_.end());
     trie_dirty_ = true;
 }
 
 void InjectionDetector::add_pattern(std::string pat) {
     std::lock_guard lk(mu_);
-    patterns_.push_back(std::move(pat));
-    trie_dirty_ = true;
+    if (pattern_set_.insert(pat).second) {
+        patterns_.push_back(std::move(pat));
+        trie_dirty_ = true;
+    }
 }
 
 bool InjectionDetector::remove_pattern(const std::string &pat) {
     std::lock_guard lk(mu_);
+    if (pattern_set_.erase(pat) == 0) {
+        return false;
+    }
     auto it = std::find(patterns_.begin(), patterns_.end(), pat);
     if (it != patterns_.end()) {
         patterns_.erase(it);
-        trie_dirty_ = true;
-        return true;
     }
-    return false;
+    trie_dirty_ = true;
+    return true;
 }
 
 void InjectionDetector::set_patterns(std::vector<std::string> pats) {
     std::lock_guard lk(mu_);
     patterns_ = std::move(pats);
+    pattern_set_.clear();
+    pattern_set_.insert(patterns_.begin(), patterns_.end());
     trie_dirty_ = true;
 }
 

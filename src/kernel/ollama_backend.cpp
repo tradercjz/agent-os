@@ -1,4 +1,5 @@
 #include <agentos/kernel/ollama_backend.hpp>
+#include <agentos/kernel/base_backend.hpp>
 #include <agentos/core/logger.hpp>
 #include <algorithm>
 
@@ -161,20 +162,13 @@ Result<LLMResponse> OllamaBackend::complete(const LLMRequest& req) {
     std::vector<std::string> headers;
     headers.emplace_back("Content-Type: application/json");
 
-    auto result = http_->post(url, body, headers, 120);
-    if (!result) {
-        return make_error(result.error().code,
-                          fmt::format("Ollama request failed: {}", result.error().message));
+    auto http_result = BackendUtils::http_post_json(
+        "Ollama", *http_, url, body, headers, 120);
+    if (!http_result) {
+        return make_error(http_result.error().code, http_result.error().message);
     }
 
-    if (result->status_code >= 400) {
-        std::string error_detail = result->body.substr(0, 500);
-        return make_error(ErrorCode::LLMBackendError,
-                          fmt::format("Ollama API error (HTTP {}): {}",
-                                      result->status_code, error_detail));
-    }
-
-    return parse_chat_response(result->body);
+    return parse_chat_response(*http_result);
 }
 
 // ============================================================
@@ -280,13 +274,7 @@ Result<LLMResponse> OllamaBackend::stream(const LLMRequest& req, TokenCallback c
     }
 
     // Fallback token estimation
-    if (resp.prompt_tokens == 0) {
-        for (const auto& m : req.messages)
-            resp.prompt_tokens += ILLMBackend::estimate_tokens(m.content);
-    }
-    if (resp.completion_tokens == 0) {
-        resp.completion_tokens = ILLMBackend::estimate_tokens(resp.content);
-    }
+    BackendUtils::apply_fallback_token_estimates(resp, req);
 
     return resp;
 }
@@ -312,22 +300,15 @@ Result<EmbeddingResponse> OllamaBackend::embed(const EmbeddingRequest& req) {
     std::vector<std::string> headers;
     headers.emplace_back("Content-Type: application/json");
 
-    auto result = http_->post(url, body, headers, 120);
-    if (!result) {
-        return make_error(result.error().code,
-                          fmt::format("Ollama embed request failed: {}", result.error().message));
-    }
-
-    if (result->status_code >= 400) {
-        return make_error(ErrorCode::LLMBackendError,
-                          fmt::format("Ollama embed error (HTTP {}): {}",
-                                      result->status_code,
-                                      result->body.substr(0, 500)));
+    auto http_result = BackendUtils::http_post_json(
+        "Ollama", *http_, url, body, headers, 120);
+    if (!http_result) {
+        return make_error(http_result.error().code, http_result.error().message);
     }
 
     EmbeddingResponse resp;
     try {
-        Json j = Json::parse(result->body);
+        Json j = Json::parse(*http_result);
 
         if (j.contains("error") && j["error"].is_string()) {
             return make_error(ErrorCode::LLMBackendError,

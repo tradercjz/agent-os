@@ -129,14 +129,13 @@ public:
 
     // In-memory update（去重：相同 source+target+relation 的边覆盖）
     auto &edge_list = edges_[edge.source_id];
-    auto dup = std::find_if(edge_list.begin(), edge_list.end(),
-                            [&](const GraphEdge &ex) {
-                              return ex.target_id == edge.target_id &&
-                                     ex.relation == edge.relation;
-                            });
-    if (dup != edge_list.end()) {
-      *dup = edge; // 覆盖（更新 weight/timestamp）
+    auto &idx = edge_index_[edge.source_id];
+    auto key = std::make_pair(edge.target_id, edge.relation);
+    auto dup_it = idx.find(key);
+    if (dup_it != idx.end()) {
+      edge_list[dup_it->second] = edge; // 覆盖（更新 weight/timestamp）
     } else {
+      idx[key] = edge_list.size();
       edge_list.push_back(edge);
     }
 
@@ -192,16 +191,21 @@ public:
     if (it == nodes_.end())
       return false;
     nodes_.erase(it);
-    // Remove outgoing edges
+    // Remove outgoing edges and index
     edges_.erase(node_id);
-    // Remove incoming edges from all adjacency lists
+    edge_index_.erase(node_id);
+    // Remove incoming edges from all adjacency lists and rebuild indices
     for (auto &[src, edge_list] : edges_) {
+      auto before_size = edge_list.size();
       edge_list.erase(
           std::remove_if(edge_list.begin(), edge_list.end(),
                          [&](const GraphEdge &e) {
                            return e.target_id == node_id;
                          }),
           edge_list.end());
+      if (edge_list.size() != before_size) {
+        rebuild_edge_index(src);
+      }
     }
     append_wal("DN," + escape(node_id));
     maybe_compact_locked();
@@ -216,6 +220,13 @@ public:
     if (it == edges_.end())
       return false;
     auto &edge_list = it->second;
+    // Check via index first for O(1) existence test
+    auto idx_it = edge_index_.find(source_id);
+    if (idx_it != edge_index_.end()) {
+      auto key = std::make_pair(target_id, relation);
+      if (idx_it->second.find(key) == idx_it->second.end())
+        return false; // Edge not found
+    }
     auto before_size = edge_list.size();
     edge_list.erase(
         std::remove_if(edge_list.begin(), edge_list.end(),
@@ -226,6 +237,7 @@ public:
         edge_list.end());
     if (edge_list.size() == before_size)
       return false; // Edge not found
+    rebuild_edge_index(source_id);
     append_wal("DE," + escape(source_id) + "," + escape(target_id) + "," +
                escape(relation));
     maybe_compact_locked();
@@ -240,6 +252,7 @@ public:
     std::lock_guard lk(mu_);
     size_t removed = 0;
     for (auto &[src, edge_list] : edges_) {
+      auto before_size = edge_list.size();
       auto new_end = std::remove_if(
           edge_list.begin(), edge_list.end(),
           [&](const GraphEdge &e) {
@@ -247,6 +260,9 @@ public:
           });
       removed += std::distance(new_end, edge_list.end());
       edge_list.erase(new_end, edge_list.end());
+      if (edge_list.size() != before_size) {
+        rebuild_edge_index(src);
+      }
     }
     if (removed > 0) {
       // Compact WAL to reflect removals
@@ -536,12 +552,17 @@ private:
             std::string id = unescape(parts[1]);
             nodes_.erase(id);
             edges_.erase(id);
+            edge_index_.erase(id);
             for (auto &[src, el] : edges_) {
+              auto before_sz = el.size();
               el.erase(std::remove_if(el.begin(), el.end(),
                                       [&](const GraphEdge &e) {
                                         return e.target_id == id;
                                       }),
                        el.end());
+              if (el.size() != before_sz) {
+                rebuild_edge_index(src);
+              }
             }
           } else if (parts[0] == "DE" && parts.size() >= 4) {
             // Delete edge
@@ -557,6 +578,7 @@ private:
                                                e.relation == rel;
                                       }),
                        el.end());
+              rebuild_edge_index(src);
             }
           } else if (parts[0] == "E" && parts.size() >= 7) {
             GraphEdge e;
@@ -570,14 +592,13 @@ private:
 
             // 去重：相同 (source, target, relation) 的边覆盖而非累加
             auto &edge_list = edges_[e.source_id];
-            auto dup = std::find_if(edge_list.begin(), edge_list.end(),
-                                    [&](const GraphEdge &ex) {
-                                      return ex.target_id == e.target_id &&
-                                             ex.relation == e.relation;
-                                    });
-            if (dup != edge_list.end()) {
-              *dup = e; // 用最新值覆盖
+            auto &eidx = edge_index_[e.source_id];
+            auto ekey = std::make_pair(e.target_id, e.relation);
+            auto dup_it = eidx.find(ekey);
+            if (dup_it != eidx.end()) {
+              edge_list[dup_it->second] = e; // 用最新值覆盖
             } else {
+              eidx[ekey] = edge_list.size();
               edge_list.push_back(e);
             }
           }
@@ -632,9 +653,36 @@ private:
   fs::path wal_path_;
   size_t wal_ops_count_{0};
 
+  // Hash for (target_id, relation) pair used in edge dedup index
+  struct EdgeKeyHash {
+    size_t operator()(const std::pair<std::string, std::string>& p) const {
+      size_t h1 = std::hash<std::string>{}(p.first);
+      size_t h2 = std::hash<std::string>{}(p.second);
+      return h1 ^ (h2 * 0x9e3779b97f4a7c15ULL + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+    }
+  };
+  // Per-source index: (target_id, relation) -> index in edge_list vector
+  using EdgeIndex = std::unordered_map<std::pair<std::string, std::string>, size_t, EdgeKeyHash>;
+
+  // Rebuild the edge dedup index for a given source from its edge list
+  void rebuild_edge_index(const std::string& source_id) {
+    auto eit = edges_.find(source_id);
+    if (eit == edges_.end()) {
+      edge_index_.erase(source_id);
+      return;
+    }
+    auto& idx = edge_index_[source_id];
+    idx.clear();
+    const auto& el = eit->second;
+    for (size_t i = 0; i < el.size(); ++i) {
+      idx[std::make_pair(el[i].target_id, el[i].relation)] = i;
+    }
+  }
+
   std::unordered_map<std::string, GraphNode> nodes_;
   std::unordered_map<std::string, std::vector<GraphEdge>>
       edges_; // adjacency list
+  std::unordered_map<std::string, EdgeIndex> edge_index_; // dedup index
 };
 
 } // namespace agentos::memory

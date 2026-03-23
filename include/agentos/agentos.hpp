@@ -232,6 +232,18 @@ public:
     return *this;
   }
 
+  /// Set maximum agent count (0 = unlimited)
+  AgentOSBuilder &max_agents(size_t limit) {
+    cfg_.max_agents = limit;
+    return *this;
+  }
+
+  /// Enable/disable tracing
+  AgentOSBuilder &tracing(bool enabled = true) {
+    tracing_enabled_ = enabled;
+    return *this;
+  }
+
   /// Set log level
   AgentOSBuilder &log_level(LogLevel level) {
     log_level_ = level;
@@ -280,6 +292,9 @@ public:
     }
 
     auto os = std::make_unique<AgentOS>(std::move(be), cfg_);
+    if (!tracing_enabled_) {
+      os->tracer().set_enabled(false);
+    }
     if (!config_file_.empty()) {
       os->configure_hot_reload(config_file_);
     }
@@ -301,6 +316,7 @@ private:
   AgentOS::Config cfg_;
   std::optional<LogLevel> log_level_;
   std::string config_file_;
+  bool tracing_enabled_{true};
 };
 
 // ─────────────────────────────────────────────────────────────

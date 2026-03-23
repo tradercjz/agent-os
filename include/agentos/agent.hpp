@@ -247,6 +247,7 @@ public:
     std::filesystem::path repo_root{std::filesystem::current_path()};
     std::filesystem::path worktree_base{".agentos/worktrees"};
     uint32_t max_worktrees{10};
+    size_t max_agents{0};           // 0 = unlimited
 
     static ConfigBuilder builder();
   };
@@ -283,6 +284,10 @@ public:
     }
     ConfigBuilder& max_worktrees(uint32_t n) {
       cfg_.max_worktrees = n;
+      return *this;
+    }
+    ConfigBuilder& max_agents(size_t n) {
+      cfg_.max_agents = n;
       return *this;
     }
     Config build() { return std::move(cfg_); }
@@ -390,6 +395,14 @@ public:
   // ── Agent 工厂 ─────────────────────────────────────────
   template <AgentConcept AgentT = ReActAgent, typename... Args>
   std::shared_ptr<AgentT> create_agent(AgentConfig cfg, Args &&...args) {
+    // Enforce max_agents limit
+    if (config_.max_agents > 0) {
+      std::lock_guard lk(agents_mu_);
+      if (agents_.size() >= config_.max_agents) {
+        throw std::runtime_error(
+            fmt::format("max_agents limit ({}) reached", config_.max_agents));
+      }
+    }
     AgentId id = next_agent_id_++;
     auto agent = std::make_shared<AgentT>(id, std::move(cfg), this,
                                           std::forward<Args>(args)...);
@@ -512,6 +525,36 @@ public:
     std::lock_guard lk(agents_mu_);
     auto it = agents_.find(id);
     return it != agents_.end() ? it->second : nullptr;
+  }
+
+  // ── Kill All Agents ─────────────────────────────────────────
+  /// Destroy all agents and return the count destroyed.
+  size_t kill_all_agents() {
+    std::vector<AgentId> ids;
+    {
+      std::lock_guard lk(agents_mu_);
+      ids.reserve(agents_.size());
+      for (const auto& [id, _] : agents_) {
+        ids.push_back(id);
+      }
+    }
+    for (auto id : ids) {
+      destroy_agent(id);
+    }
+    return ids.size();
+  }
+
+  // ── Find Agents by Name ───────────────────────────────────
+  /// Find all agents whose name matches the given string.
+  std::vector<std::shared_ptr<Agent>> find_agents_by_name(std::string_view name) const {
+    std::vector<std::shared_ptr<Agent>> result;
+    std::lock_guard lk(agents_mu_);
+    for (const auto& [_, agent] : agents_) {
+      if (agent->config().name == name) {
+        result.push_back(agent);
+      }
+    }
+    return result;
   }
 
   // ── Agent Snapshot — Save/Restore Agent State ────────────────

@@ -1,4 +1,5 @@
 #include <agentos/kernel/llm_kernel.hpp>
+#include <agentos/kernel/base_backend.hpp>
 #include <agentos/kernel/http_client.hpp>
 #include <algorithm>
 #include <stdexcept>
@@ -164,35 +165,8 @@ size_t sse_line_callback(const char *contents, size_t total, StreamContext *ctx)
 } // anonymous namespace
 
 // ============================================================
-// R7-16: Redaction helper for sensitive data in error messages
+// R7-16: Redaction via BackendUtils::BackendUtils::redact_auth()
 // ============================================================
-
-namespace {
-
-// Redact sensitive headers and API keys from error messages before logging
-static std::string redact_auth(const std::string &msg) {
-    std::string result = msg;
-    // Redact "Bearer xxx..." patterns
-    static const std::string bearer = "Bearer ";
-    auto pos = result.find(bearer);
-    while (pos != std::string::npos) {
-        auto end = result.find_first_of(" \r\n\"'}", pos + bearer.size());
-        if (end == std::string::npos) end = result.size();
-        result.replace(pos + bearer.size(), end - pos - bearer.size(), "***REDACTED***");
-        pos = result.find(bearer, pos + bearer.size() + 14);
-    }
-    // Redact "sk-..." API key patterns
-    auto sk_pos = result.find("sk-");
-    while (sk_pos != std::string::npos) {
-        auto end = result.find_first_of(" \r\n\"'}", sk_pos);
-        if (end == std::string::npos) end = result.size();
-        result.replace(sk_pos, end - sk_pos, "sk-***REDACTED***");
-        sk_pos = result.find("sk-", sk_pos + 17);
-    }
-    return result;
-}
-
-} // anonymous namespace
 
 // ============================================================
 // OpenAIBackend implementation
@@ -378,52 +352,11 @@ Result<std::string> OpenAIBackend::http_post(const std::string &endpoint,
                                              const std::string &body) const {
   std::string url = base_url_ + endpoint;
 
-  // Build HTTP headers
   std::vector<std::string> headers;
   headers.emplace_back("Content-Type: application/json");
   headers.emplace_back("Authorization: Bearer " + api_key_);
 
-  auto result = http_client_.post(url, body, headers, 60);
-  if (!result) {
-    // R7-16: Redact sensitive data from error messages
-    return make_error(result.error().code,
-                      redact_auth(result.error().message));
-  }
-
-  long http_code = result->status_code;
-
-  if (http_code == 401) {
-    return make_error(ErrorCode::LLMBackendError,
-        "OpenAI API: authentication failed (check API key)");
-  } else if (http_code == 429) {
-    return make_error(ErrorCode::RateLimitExceeded,
-        fmt::format("OpenAI API: rate limited (HTTP 429): {}",
-                    redact_auth(result->body.substr(0, 500))));
-  } else if (http_code >= 500 && http_code < 600) {
-    return make_error(ErrorCode::LLMBackendError,
-        fmt::format("OpenAI API: server error (HTTP {}): {}",
-                    http_code, redact_auth(result->body.substr(0, 500))));
-  } else if (http_code >= 400) {
-    // Parse API error response for better error messages
-    std::string error_msg;
-    try {
-      Json err_json = Json::parse(result->body);
-      if (err_json.contains("error") && err_json["error"].is_object()) {
-        auto &err_obj = err_json["error"];
-        if (err_obj.contains("message") && err_obj["message"].is_string())
-          error_msg = err_obj["message"].get<std::string>();
-      }
-    } catch (const nlohmann::json::exception&) { /* not JSON, use raw body */ }
-
-    if (error_msg.empty())
-      error_msg = result->body.substr(0, 500);
-
-    return make_error(ErrorCode::LLMBackendError,
-        fmt::format("OpenAI API: unexpected status (HTTP {}): {}",
-                    http_code, redact_auth(error_msg)));
-  }
-
-  return result->body;
+  return BackendUtils::http_post_json("OpenAI", http_client_, url, body, headers);
 }
 
 // ── complete: synchronous inference ─────────────────────────
@@ -489,7 +422,7 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
     // Check if we already received complete data
     if (!sctx.done) {
       return make_error(stream_result.error().code,
-                        redact_auth(stream_result.error().message));
+                        BackendUtils::redact_auth(stream_result.error().message));
     }
   }
 
@@ -499,13 +432,7 @@ Result<LLMResponse> OpenAIBackend::stream(const LLMRequest &req,
   }
 
   // If stream didn't return usage (older API), use heuristic estimates
-  if (resp.prompt_tokens == 0) {
-    for (auto &m : req.messages)
-      resp.prompt_tokens += ILLMBackend::estimate_tokens(m.content);
-  }
-  if (resp.completion_tokens == 0) {
-    resp.completion_tokens = ILLMBackend::estimate_tokens(resp.content);
-  }
+  BackendUtils::apply_fallback_token_estimates(resp, req);
 
   return resp;
 }

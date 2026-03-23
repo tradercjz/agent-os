@@ -104,6 +104,7 @@ private:
         std::chrono::system_clock::time_point loaded_at;
     };
     std::vector<LoadedPlugin> plugins_;
+    std::unordered_map<std::string, size_t> name_index_; // name -> plugins_ index
     mutable std::mutex mu_;
 };
 

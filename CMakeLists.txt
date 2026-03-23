@@ -343,6 +343,12 @@ if(NOT AGENTOS_NO_DUCKDB)
     target_link_libraries(rag_agent_demo agentos)
 endif()
 
+add_executable(streaming_demo examples/streaming_demo.cpp)
+target_link_libraries(streaming_demo agentos)
+
+add_executable(multimodal_demo examples/multimodal_demo.cpp)
+target_link_libraries(multimodal_demo agentos)
+
 # ---- Tests ----
 add_executable(benchmark_csr_graph tests/benchmark_csr_graph.cpp)
 target_link_libraries(benchmark_csr_graph PRIVATE agentos)
@@ -447,6 +453,7 @@ set(TEST_SOURCES
   tests/test_context_extended.cpp
   tests/test_scheduler_extended.cpp
   tests/test_tools_extended.cpp
+  tests/test_convenience_api.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target

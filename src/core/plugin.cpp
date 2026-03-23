@@ -24,6 +24,7 @@ PluginManager::~PluginManager() {
         }
     }
     plugins_.clear();
+    name_index_.clear();
 }
 
 Result<void> PluginManager::load(const std::string& path, AgentOS& os) {
@@ -65,17 +66,15 @@ Result<void> PluginManager::load(const std::string& path, AgentOS& os) {
             fmt::format("Plugin '{}': agentos_plugin_create returned nullptr", path));
     }
 
-    // Check for duplicate name
+    // Check for duplicate name via hash index
     std::string plugin_name = plugin->name();
     {
         std::lock_guard lk(mu_);
-        for (const auto& lp : plugins_) {
-            if (lp.plugin && lp.plugin->name() == plugin_name) {
-                destroy_fn(plugin);
-                dlclose(handle);
-                return make_error(ErrorCode::AlreadyExists,
-                    fmt::format("Plugin '{}' already loaded", plugin_name));
-            }
+        if (name_index_.contains(plugin_name)) {
+            destroy_fn(plugin);
+            dlclose(handle);
+            return make_error(ErrorCode::AlreadyExists,
+                fmt::format("Plugin '{}' already loaded", plugin_name));
         }
     }
 
@@ -92,6 +91,7 @@ Result<void> PluginManager::load(const std::string& path, AgentOS& os) {
     auto now = std::chrono::system_clock::now();
     {
         std::lock_guard lk(mu_);
+        name_index_[plugin_name] = plugins_.size();
         plugins_.push_back(LoadedPlugin{handle, plugin, destroy_fn, path, now});
     }
 
@@ -102,21 +102,28 @@ Result<void> PluginManager::load(const std::string& path, AgentOS& os) {
 Result<void> PluginManager::unload(const std::string& name) {
     std::lock_guard lk(mu_);
 
-    auto it = std::find_if(plugins_.begin(), plugins_.end(),
-        [&name](const LoadedPlugin& lp) {
-            return lp.plugin && lp.plugin->name() == name;
-        });
-
-    if (it == plugins_.end()) {
+    auto idx_it = name_index_.find(name);
+    if (idx_it == name_index_.end()) {
         return make_error(ErrorCode::NotFound,
             fmt::format("Plugin '{}' not loaded", name));
     }
 
+    size_t idx = idx_it->second;
+    auto& lp = plugins_[idx];
+
     // Shutdown and destroy
-    it->plugin->shutdown();
-    it->destroy(it->plugin);
-    dlclose(it->handle);
-    plugins_.erase(it);
+    lp.plugin->shutdown();
+    lp.destroy(lp.plugin);
+    dlclose(lp.handle);
+
+    // Remove from index
+    name_index_.erase(idx_it);
+
+    // Erase from vector and fix up indices for shifted elements
+    plugins_.erase(plugins_.begin() + static_cast<std::ptrdiff_t>(idx));
+    for (auto& [n, i] : name_index_) {
+        if (i > idx) --i;
+    }
 
     LOG_INFO(fmt::format("Plugin unloaded: {}", name));
     return {};
@@ -124,10 +131,9 @@ Result<void> PluginManager::unload(const std::string& name) {
 
 IPlugin* PluginManager::find(const std::string& name) const {
     std::lock_guard lk(mu_);
-    for (const auto& lp : plugins_) {
-        if (lp.plugin && lp.plugin->name() == name) {
-            return lp.plugin;
-        }
+    auto it = name_index_.find(name);
+    if (it != name_index_.end()) {
+        return plugins_[it->second].plugin;
     }
     return nullptr;
 }
@@ -186,19 +192,16 @@ Result<void> PluginManager::scan_directory(const std::filesystem::path& dir, Age
 }
 
 Result<void> PluginManager::reload(const std::string& name, AgentOS& os) {
-    // Find the path before unloading
+    // Find the path before unloading via hash index
     std::string path;
     {
         std::lock_guard lk(mu_);
-        auto it = std::find_if(plugins_.begin(), plugins_.end(),
-            [&name](const LoadedPlugin& lp) {
-                return lp.plugin && lp.plugin->name() == name;
-            });
-        if (it == plugins_.end()) {
+        auto it = name_index_.find(name);
+        if (it == name_index_.end()) {
             return make_error(ErrorCode::NotFound,
                 fmt::format("Plugin '{}' not loaded, cannot reload", name));
         }
-        path = it->path;
+        path = plugins_[it->second].path;
     }
 
     // Unload, then re-load from the same path
@@ -217,16 +220,16 @@ Result<void> PluginManager::reload(const std::string& name, AgentOS& os) {
 
 std::optional<PluginInfo> PluginManager::info(const std::string& name) const {
     std::lock_guard lk(mu_);
-    for (const auto& lp : plugins_) {
-        if (lp.plugin && lp.plugin->name() == name) {
-            return PluginInfo{
-                lp.plugin->name(),
-                lp.plugin->version(),
-                lp.path,
-                lp.plugin->dependencies(),
-                lp.loaded_at
-            };
-        }
+    auto it = name_index_.find(name);
+    if (it != name_index_.end()) {
+        const auto& lp = plugins_[it->second];
+        return PluginInfo{
+            lp.plugin->name(),
+            lp.plugin->version(),
+            lp.path,
+            lp.plugin->dependencies(),
+            lp.loaded_at
+        };
     }
     return std::nullopt;
 }
