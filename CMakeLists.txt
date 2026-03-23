@@ -406,6 +406,17 @@ set(TEST_SOURCES
   tests/test_subworker_runtime.cpp
   tests/test_e2e_scenarios.cpp
   tests/test_smoke_real_llm.cpp
+  tests/test_security_aho_corasick.cpp
+  tests/test_security_rbac_extended.cpp
+  tests/test_api_server_extended.cpp
+  tests/test_multimodal_extended.cpp
+  tests/test_kernel_extended.cpp
+  tests/test_plugin_lifecycle.cpp
+  tests/test_e2e_advanced.cpp
+  tests/test_memory_extended.cpp
+  tests/test_context_extended.cpp
+  tests/test_scheduler_extended.cpp
+  tests/test_tools_extended.cpp
 )
 
 # GTest issue with GCC 13: need to disable some warnings for the test target
