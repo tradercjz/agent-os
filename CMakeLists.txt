@@ -349,6 +349,9 @@ target_link_libraries(streaming_demo agentos)
 add_executable(multimodal_demo examples/multimodal_demo.cpp)
 target_link_libraries(multimodal_demo agentos)
 
+add_executable(corax_demo examples/corax_demo.cpp)
+target_link_libraries(corax_demo agentos)
+
 # ---- Tests ----
 add_executable(benchmark_csr_graph tests/benchmark_csr_graph.cpp)
 target_link_libraries(benchmark_csr_graph PRIVATE agentos)
