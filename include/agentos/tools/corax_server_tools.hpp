@@ -373,12 +373,4 @@ inline std::vector<std::string> corax_server_tool_ids() {
     };
 }
 
-/// 全部 Corax 工具 ID（CLI + Server 模式合并）
-inline std::vector<std::string> all_corax_tool_ids() {
-    auto cli = corax_tool_ids();
-    auto srv = corax_server_tool_ids();
-    cli.insert(cli.end(), srv.begin(), srv.end());
-    return cli;
-}
-
 } // namespace agentos::corax

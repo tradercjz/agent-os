@@ -8,14 +8,18 @@
 // 编译:
 //   cmake --build build --target corax_demo
 //
-// 运行 (CLI 模式):
-//   ANTHROPIC_API_KEY=sk-ant-... TUSHARE_TOKEN=xxx \
+// 运行 (自定义 LLM endpoint):
+//   ./build/corax_demo /path/to/bin/corax \
+//     --api-key YOUR_KEY --api-base https://your-endpoint/v1 --model your-model
+//
+// 运行 (环境变量):
+//   OPENAI_API_KEY=sk-... OPENAI_API_BASE=https://your-endpoint/v1 TUSHARE_TOKEN=xxx \
 //     ./build/corax_demo /path/to/bin/corax
 //
-// 运行 (Server 模式):
+// 运行 (Server 模式 — 持久监控):
 //   /path/to/bin/corax-server --port 8080 &
-//   ANTHROPIC_API_KEY=sk-ant-... TUSHARE_TOKEN=xxx \
-//     ./build/corax_demo /path/to/bin/corax --server http://localhost:8080
+//   ./build/corax_demo /path/to/bin/corax --server http://localhost:8080 \
+//     --api-key YOUR_KEY --api-base https://your-endpoint/v1 --model your-model
 // ============================================================
 
 #include <agentos/agentos.hpp>
@@ -35,6 +39,9 @@ int main(int argc, char* argv[]) {
     std::string corax_binary = "bin/corax";
     std::string server_url;
     std::string fetch_script;
+    std::string llm_api_base;
+    std::string llm_api_key;
+    std::string llm_model;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -42,6 +49,12 @@ int main(int argc, char* argv[]) {
             server_url = argv[++i];
         } else if (arg == "--fetch-script" && i + 1 < argc) {
             fetch_script = argv[++i];
+        } else if (arg == "--api-base" && i + 1 < argc) {
+            llm_api_base = argv[++i];
+        } else if (arg == "--api-key" && i + 1 < argc) {
+            llm_api_key = argv[++i];
+        } else if (arg == "--model" && i + 1 < argc) {
+            llm_model = argv[++i];
         } else if (arg[0] != '-') {
             corax_binary = arg;
         }
@@ -88,18 +101,33 @@ int main(int argc, char* argv[]) {
               << "╚══════════════════════════════════════════════════════╝\n\n";
 
     // ── 2. 选择 LLM Backend ──
-    std::unique_ptr<kernel::ILLMBackend> backend;
+    // 优先级: 命令行参数 > 环境变量
+    if (llm_api_key.empty()) {
+        if (auto env = std::getenv("OPENAI_API_KEY"); env && *env)
+            llm_api_key = env;
+        else if (auto env = std::getenv("ANTHROPIC_API_KEY"); env && *env)
+            llm_api_key = env;
+    }
+    if (llm_api_base.empty()) {
+        if (auto env = std::getenv("OPENAI_API_BASE"); env && *env)
+            llm_api_base = env;
+    }
 
-    if (auto key = std::getenv("ANTHROPIC_API_KEY"); key && std::string(key).size() > 0) {
-        std::cout << "[*] 使用 Claude (Anthropic) 后端\n";
-        backend = std::make_unique<kernel::AnthropicBackend>(key, "claude-sonnet-4-20250514");
-    } else if (auto key = std::getenv("OPENAI_API_KEY"); key && std::string(key).size() > 0) {
-        std::cout << "[*] 使用 GPT (OpenAI) 后端\n";
-        backend = std::make_unique<kernel::OpenAIBackend>(key, "gpt-4o");
-    } else {
-        std::cerr << "[!] 请设置 ANTHROPIC_API_KEY 或 OPENAI_API_KEY 环境变量\n";
+    if (llm_api_key.empty()) {
+        std::cerr << "[!] 请提供 API key:\n"
+                  << "    --api-key YOUR_KEY --api-base https://your-endpoint/v1 --model your-model\n"
+                  << "    或设置环境变量 OPENAI_API_KEY / OPENAI_API_BASE\n";
         return 1;
     }
+
+    std::unique_ptr<kernel::ILLMBackend> backend;
+
+    // 统一走 OpenAI-compatible 接口（支持任意 base_url）
+    std::string api_base = llm_api_base.empty() ? "https://api.openai.com/v1" : llm_api_base;
+    std::string model = llm_model.empty() ? "gpt-4o" : llm_model;
+
+    std::cout << "[*] LLM Backend: " << api_base << " (model: " << model << ")\n";
+    backend = std::make_unique<kernel::OpenAIBackend>(llm_api_key, api_base, model);
 
     // ── 3. 构建 AgentOS ──
     auto os = std::make_unique<AgentOS>(std::move(backend),
